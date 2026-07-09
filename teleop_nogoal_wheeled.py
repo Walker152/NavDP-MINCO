@@ -3,7 +3,7 @@ from omni.isaac.lab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="A script to run a car control simulation")
 parser.add_argument(
-    "--scene_dir", type=str, default="./asset_scenes/cluttered_easy")
+    "--scene_dir", type=str, default="./assets/scenes/cluttered_easy")
 parser.add_argument(
     "--scene_index", type=int, default=0)
 parser.add_argument(
@@ -143,8 +143,8 @@ def main():
     env_config.scene = scene_config
     env_config.events.reset_pose.params = {"init_point_path": init_path,
                                            'height_offset': 0.1,
-                                           'robot_visible': False,
-                                           'light_enabled': False}
+                                           'robot_visible': True,
+                                           'light_enabled': True}
     env = ManagerBasedRLEnv(env_config)
     env = RslRlVecEnvWrapper(env)
     adjust_usd_scale(scale=args_cli.scene_scale)
