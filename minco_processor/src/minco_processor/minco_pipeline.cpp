@@ -1,7 +1,6 @@
 #include "minco_processor/minco_pipeline.hpp"
 
 #include "minco_core/components/trajectory_safety_checker.hpp"
-#include "minco_core/corridor_generator.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -335,8 +334,6 @@ void MincoPipeline::setConfig(const Config & config)
   }
   optimizer_ = std::make_unique<minco_planner::MincoOptimizer>(config_.optimizer);
   yaw_optimizer_ = std::make_unique<traj_opt::YawTrajOpt>(3.14);
-  corridor_generator_ = std::make_shared<minco_planner::SimpleCorridorGenerator>();
-  corridor_generator_->setSafetyMargins(config_.optimizer.safe_dist, 0.0);
   safety_checker_ = std::make_unique<minco_planner::TrajectorySafetyChecker>();
   safety_checker_->configure(config_.optimizer.safe_dist, config_.safety_sample_dt);
   setMap(map_);
@@ -347,9 +344,6 @@ void MincoPipeline::setMap(std::shared_ptr<EsdfMapInterface> map)
   map_ = std::move(map);
   if (optimizer_) {
     optimizer_->setMap(map_);
-  }
-  if (corridor_generator_) {
-    corridor_generator_->setMap(map_);
   }
   if (safety_checker_) {
     safety_checker_->setQuery(map_);
@@ -504,6 +498,8 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   has_last_yaw_traj_ = true;
   result.trajectory.start_WT = request.now;
   result.yaw_trajectory.start_WT = request.now;
+  result.samples =
+    sampleTrajectory(result.trajectory, result.yaw_trajectory, config_.sample_dt, request.current.yaw);
   result.success = true;
   result.failure_reason = "NONE";
   return result;
@@ -792,6 +788,54 @@ bool MincoPipeline::optimizeYaw(const Eigen::Matrix3d & start_state,
     std::atan2(std::sin(goal_yaw - init_yaw_state(0)), std::cos(goal_yaw - init_yaw_state(0)));
   goal_yaw_state(0) = init_yaw_state(0) + yaw_err;
   return yaw_optimizer_->optimize(init_yaw_state, goal_yaw_state, pos_traj, out_yaw_traj, 5, false, true);
+}
+
+std::vector<MincoPipeline::TrajectorySample> MincoPipeline::sampleTrajectory(
+  const geometry_utils::Trajectory & pos_traj,
+  const geometry_utils::Trajectory & yaw_traj,
+  double dt,
+  double fallback_yaw) const
+{
+  std::vector<TrajectorySample> samples;
+  const double duration = pos_traj.getTotalDuration();
+  if (!(std::isfinite(duration) && duration >= 0.0)) {
+    return samples;
+  }
+
+  const double step = (std::isfinite(dt) && dt > 1e-6) ? dt : 0.05;
+  const double yaw_duration = yaw_traj.getTotalDuration();
+  const bool has_yaw = !yaw_traj.empty() && std::isfinite(yaw_duration) && yaw_duration > 1e-6;
+  const int sample_count = std::max(1, static_cast<int>(std::ceil(duration / step)) + 1);
+
+  samples.reserve(static_cast<size_t>(sample_count));
+  for (int i = 0; i < sample_count; ++i) {
+    const double t = std::min(duration, static_cast<double>(i) * step);
+    TrajectorySample sample;
+    sample.t = t;
+    sample.pos = pos_traj.getPos(t);
+    sample.vel = pos_traj.getVel(t);
+    sample.acc = pos_traj.getAcc(t);
+    sample.jerk = pos_traj.getJer(t);
+
+    sample.pos.z() = 0.0;
+    sample.vel.z() = 0.0;
+    sample.acc.z() = 0.0;
+    sample.jerk.z() = 0.0;
+
+    if (has_yaw) {
+      const double yaw_t = std::min(t, yaw_duration);
+      sample.yaw = yaw_traj.getPos(yaw_t)(0);
+      sample.yaw_dot = yaw_traj.getVel(yaw_t)(0);
+    } else {
+      const double planar_speed = sample.vel.head<2>().norm();
+      sample.yaw = planar_speed > 1e-6 ? std::atan2(sample.vel.y(), sample.vel.x()) : fallback_yaw;
+      sample.yaw_dot = 0.0;
+    }
+
+    samples.push_back(sample);
+  }
+
+  return samples;
 }
 
 }  // namespace minco_processor

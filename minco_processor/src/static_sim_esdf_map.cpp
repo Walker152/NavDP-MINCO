@@ -1,0 +1,162 @@
+#include "minco_processor/static_sim_esdf_map.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace minco_processor {
+
+void StaticSimEsdfMap2D::setMap(
+  const Eigen::MatrixXd & distance,
+  const Eigen::Matrix<uint8_t, Eigen::Dynamic, Eigen::Dynamic> & free,
+  double origin_x,
+  double origin_y,
+  double resolution)
+{
+  distance_ = distance;
+  free_ = free;
+  origin_x_ = origin_x;
+  origin_y_ = origin_y;
+  resolution_ = resolution;
+  const int value_count = static_cast<int>(std::max<Eigen::Index>(0, free_.rows() * free_.cols()));
+  values_.assign(static_cast<size_t>(value_count), 0U);
+  for (int y = 0; y < free_.rows(); ++y) {
+    for (int x = 0; x < free_.cols(); ++x) {
+      values_[static_cast<size_t>(y * free_.cols() + x)] = static_cast<unsigned char>(free_(y, x));
+    }
+  }
+}
+
+QueryResult StaticSimEsdfMap2D::query(const Eigen::Vector3d & pos) const
+{
+  QueryResult result;
+  if (!pos.allFinite()) {
+    result.status = QueryStatus::kNonFiniteInput;
+    return result;
+  }
+  if (!hasMap()) {
+    result.status = QueryStatus::kUnavailable;
+    return result;
+  }
+  const double gx = (pos.x() - origin_x_) / resolution_;
+  const double gy = (pos.y() - origin_y_) / resolution_;
+  double dist = 0.0;
+  if (!interpolate(gx, gy, dist)) {
+    result.status = QueryStatus::kOutOfMap;
+    return result;
+  }
+
+  const auto sample = [this](double x, double y, double & out) { return interpolate(x, y, out); };
+  double dx = 0.0;
+  double dy = 0.0;
+  double lp = 0.0;
+  double rp = 0.0;
+  if (sample(gx - 1.0, gy, lp) && sample(gx + 1.0, gy, rp)) {
+    dx = (rp - lp) / (2.0 * resolution_);
+  } else if (sample(gx, gy, lp) && sample(gx + 1.0, gy, rp)) {
+    dx = (rp - lp) / resolution_;
+  } else if (sample(gx - 1.0, gy, lp) && sample(gx, gy, rp)) {
+    dx = (rp - lp) / resolution_;
+  }
+  if (sample(gx, gy - 1.0, lp) && sample(gx, gy + 1.0, rp)) {
+    dy = (rp - lp) / (2.0 * resolution_);
+  } else if (sample(gx, gy, lp) && sample(gx, gy + 1.0, rp)) {
+    dy = (rp - lp) / resolution_;
+  } else if (sample(gx, gy - 1.0, lp) && sample(gx, gy, rp)) {
+    dy = (rp - lp) / resolution_;
+  }
+
+  result.ok = true;
+  result.status = QueryStatus::kOk;
+  result.distance = dist;
+  result.gradient = Eigen::Vector3d(dx, dy, 0.0);
+  return result;
+}
+
+bool StaticSimEsdfMap2D::worldToMap(double wx, double wy, unsigned int & mx, unsigned int & my) const
+{
+  if (!hasMap() || !std::isfinite(wx) || !std::isfinite(wy)) {
+    return false;
+  }
+  const int ix = static_cast<int>(std::floor((wx - origin_x_) / resolution_));
+  const int iy = static_cast<int>(std::floor((wy - origin_y_) / resolution_));
+  if (ix < 0 || iy < 0 || ix >= distance_.cols() || iy >= distance_.rows()) {
+    return false;
+  }
+  mx = static_cast<unsigned int>(ix);
+  my = static_cast<unsigned int>(iy);
+  return true;
+}
+
+void StaticSimEsdfMap2D::mapToWorld(unsigned int mx, unsigned int my, double & wx, double & wy) const
+{
+  wx = origin_x_ + (static_cast<double>(mx) + 0.5) * resolution_;
+  wy = origin_y_ + (static_cast<double>(my) + 0.5) * resolution_;
+}
+
+unsigned int StaticSimEsdfMap2D::sizeX() const
+{
+  return static_cast<unsigned int>(std::max<Eigen::Index>(0, distance_.cols()));
+}
+unsigned int StaticSimEsdfMap2D::sizeY() const
+{
+  return static_cast<unsigned int>(std::max<Eigen::Index>(0, distance_.rows()));
+}
+double StaticSimEsdfMap2D::resolution() const { return resolution_; }
+double StaticSimEsdfMap2D::originX() const { return origin_x_; }
+double StaticSimEsdfMap2D::originY() const { return origin_y_; }
+
+uint8_t StaticSimEsdfMap2D::value(unsigned int mx, unsigned int my) const
+{
+  return isValid(mx, my) ? free_(static_cast<int>(my), static_cast<int>(mx)) : 0U;
+}
+
+const unsigned char * StaticSimEsdfMap2D::values() const
+{
+  return values_.empty() ? nullptr : values_.data();
+}
+
+bool StaticSimEsdfMap2D::copyValues(std::vector<unsigned char> & out) const
+{
+  out = values_;
+  return !out.empty();
+}
+
+bool StaticSimEsdfMap2D::isValid(unsigned int mx, unsigned int my) const
+{
+  return hasMap() && mx < sizeX() && my < sizeY();
+}
+
+bool StaticSimEsdfMap2D::isFree(unsigned int mx, unsigned int my) const
+{
+  return isValid(mx, my) && free_(static_cast<int>(my), static_cast<int>(mx)) != 0U;
+}
+
+bool StaticSimEsdfMap2D::hasMap() const
+{
+  return resolution_ > 0.0 && distance_.rows() > 0 && distance_.cols() > 0 && free_.rows() == distance_.rows() &&
+         free_.cols() == distance_.cols();
+}
+
+bool StaticSimEsdfMap2D::interpolate(double gx, double gy, double & distance) const
+{
+  if (!hasMap() || gx < 0.0 || gy < 0.0 || gx > static_cast<double>(distance_.cols() - 1) ||
+      gy > static_cast<double>(distance_.rows() - 1)) {
+    return false;
+  }
+  const int cols = static_cast<int>(distance_.cols());
+  const int rows = static_cast<int>(distance_.rows());
+  const int x0 = std::min(static_cast<int>(std::floor(gx)), cols - 1);
+  const int y0 = std::min(static_cast<int>(std::floor(gy)), rows - 1);
+  const int x1 = std::min(x0 + 1, cols - 1);
+  const int y1 = std::min(y0 + 1, rows - 1);
+  const double tx = gx - static_cast<double>(x0);
+  const double ty = gy - static_cast<double>(y0);
+  const double d00 = distance_(y0, x0);
+  const double d10 = distance_(y0, x1);
+  const double d01 = distance_(y1, x0);
+  const double d11 = distance_(y1, x1);
+  distance = (1.0 - tx) * (1.0 - ty) * d00 + tx * (1.0 - ty) * d10 + (1.0 - tx) * ty * d01 + tx * ty * d11;
+  return std::isfinite(distance);
+}
+
+}  // namespace minco_processor

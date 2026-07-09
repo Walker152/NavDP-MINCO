@@ -18,6 +18,17 @@ parser.add_argument(
     "--speed", type=float, default=0.5)
 parser.add_argument(
     "--port", type=int, default=8888)
+parser.add_argument("--enable_minco", action="store_true")
+parser.add_argument("--minco_top_k", type=int, default=4)
+parser.add_argument("--minco_safe_dist", type=float, default=0.30)
+parser.add_argument("--minco_sample_dt", type=float, default=0.05)
+parser.add_argument("--minco_fallback_to_raw", action="store_true", default=True)
+parser.add_argument("--esdf_resolution", type=float, default=0.05)
+parser.add_argument("--esdf_padding", type=float, default=1.0)
+parser.add_argument("--esdf_force_rebuild", action="store_true")
+parser.add_argument("--esdf_cache_name", type=str, default="esdf_2d.npz")
+parser.add_argument("--esdf_obstacle_min_height", type=float, default=0.08)
+parser.add_argument("--esdf_obstacle_max_height", type=float, default=1.50)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(headless=False, enable_cameras=True)
 simulation_app = app_launcher.app
@@ -57,7 +68,7 @@ stop_event = threading.Event()
 vis_manager = [VisualizationManager(history_size=5) for i in range(args_cli.num_envs)]
 mpc = None
 
-def planning_thread(env, camera_intrinsic):
+def planning_thread(env, camera_intrinsic, minco_adapter=None):
     global mpc
     """Thread function that continuously plans trajectories"""
     while not stop_event.is_set():
@@ -72,14 +83,15 @@ def planning_thread(env, camera_intrinsic):
                 depth = planning_input.current_depth.copy()
                 camera_pos = planning_input.camera_pos.copy()
                 camera_rot = planning_input.camera_rot.copy()
+                robot_lin_vel_w = planning_input.robot_lin_vel_w.copy() if planning_input.robot_lin_vel_w is not None else None
+                robot_ang_vel_w = planning_input.robot_ang_vel_w.copy() if planning_input.robot_ang_vel_w is not None else None
             with output_lock:
                 planning_output.is_planning = True
             
             # Start timing planning
             planning_start = time.time()
             trajectory_points_camera, all_trajectories_camera, all_values_camera = pointgoal_step(goal, image, depth,port=args_cli.port)
-            # Transform trajectory from camera frame to world frame
-            batch_optimal_points_world = []
+            raw_top1_world = []
             for idx in range(trajectory_points_camera.shape[0]):
                 trajectory_points_world = []
                 for i, point in enumerate(trajectory_points_camera[idx]):
@@ -89,12 +101,8 @@ def planning_thread(env, camera_intrinsic):
                     point_world = camera_pos[idx] + camera_rot[idx] @ point_local
                     trajectory_points_world.append(point_world[:2])
                 trajectory_points_world = np.array(trajectory_points_world)
-                batch_optimal_points_world.append(trajectory_points_world)
-                mpc = MPC_Controller(trajectory_points_world,
-                                     desired_v=args_cli.speed,
-                                     v_max=args_cli.speed,
-                                     w_max=args_cli.speed)
-            batch_optimal_points_world = np.array(batch_optimal_points_world)
+                raw_top1_world.append(trajectory_points_world)
+            raw_top1_world = np.array(raw_top1_world)
            
             batch_all_points_world = []
             for idx in range(all_trajectories_camera.shape[0]):
@@ -105,15 +113,57 @@ def planning_thread(env, camera_intrinsic):
                     for point in traj_camera:
                         point_local = np.array([point[0], point[1], 0.0])
                         point_world = camera_pos[idx] + camera_rot[idx] @ point_local
-                        traj_world.append(point_world[:2])
+                        traj_world.append(point_world[:3])
                     all_trajectories_world.append(np.array(traj_world))
                 batch_all_points_world.append(all_trajectories_world)
             batch_all_points_world = np.array(batch_all_points_world)
 
+            batch_optimal_points_world = []
+            used_minco = minco_adapter is not None and minco_adapter.enabled
+            if used_minco:
+                states = []
+                for idx in range(camera_pos.shape[0]):
+                    vel = robot_lin_vel_w[idx].copy() if robot_lin_vel_w is not None else np.zeros(3)
+                    vel[2] = 0.0
+                    yaw_rate = float(robot_ang_vel_w[idx]) if robot_ang_vel_w is not None else 0.0
+                    states.append({
+                        "position": np.array([camera_pos[idx, 0], camera_pos[idx, 1], 0.0]),
+                        "velocity": vel,
+                        "acceleration": np.zeros(3),
+                        "yaw": float(np.arctan2(camera_rot[idx, 1, 0], camera_rot[idx, 0, 0])),
+                        "yaw_rate": yaw_rate,
+                    })
+                minco_results = minco_adapter.optimize_candidates(
+                    candidates_world=batch_all_points_world,
+                    critic_values=all_values_camera,
+                    states=states,
+                    raw_top1_world=raw_top1_world,
+                )
+                for idx, result in enumerate(minco_results):
+                    if result["success"] and result["waypoints"] is not None and len(result["waypoints"]) >= 2:
+                        trajectory_points_world = np.asarray(result["waypoints"])[:, :2]
+                    else:
+                        trajectory_points_world = np.asarray(raw_top1_world[idx])[:, :2]
+                    batch_optimal_points_world.append(trajectory_points_world)
+                    mpc = MPC_Controller(trajectory_points_world,
+                                         desired_v=args_cli.speed,
+                                         v_max=args_cli.speed,
+                                         w_max=args_cli.speed)
+            else:
+                for idx in range(len(raw_top1_world)):
+                    trajectory_points_world = np.asarray(raw_top1_world[idx])[:, :2]
+                    batch_optimal_points_world.append(trajectory_points_world)
+                    mpc = MPC_Controller(trajectory_points_world,
+                                         desired_v=args_cli.speed,
+                                         v_max=args_cli.speed,
+                                         w_max=args_cli.speed)
+            batch_optimal_points_world = np.array(batch_optimal_points_world, dtype=object if used_minco else None)
+            batch_all_points_world_vis = batch_all_points_world[:, :, :, :2] if batch_all_points_world.ndim == 4 else batch_all_points_world
+
             # Update shared state
             with output_lock:
                 planning_output.trajectory_points_world = batch_optimal_points_world
-                planning_output.all_trajectories_world = batch_all_points_world
+                planning_output.all_trajectories_world = batch_all_points_world_vis
                 planning_output.all_values_camera = all_values_camera
                 planning_output.is_planning = False
                 planning_output.planning_error = None
@@ -159,7 +209,42 @@ for _ in range(PREHEAT_STEPS):
     
 camera_intrinsic = env.unwrapped.scene.sensors['camera_sensor'].data.intrinsic_matrices[0]
 
-planning_thread_obj = threading.Thread(target=planning_thread, args=(env, camera_intrinsic))
+minco_adapter = None
+if args_cli.enable_minco:
+    from utils_tasks.sim_esdf_builder import SimEsdfBuilder
+    from utils_tasks.navdp_minco_adapter import NavDPMincoAdapter
+    import omni.usd
+
+    stage = omni.usd.get_context().get_stage()
+    esdf_builder = SimEsdfBuilder(
+        resolution=args_cli.esdf_resolution,
+        padding=args_cli.esdf_padding,
+        safe_dist=args_cli.minco_safe_dist,
+        cache_name=args_cli.esdf_cache_name,
+        force_rebuild=args_cli.esdf_force_rebuild,
+        obstacle_min_height=args_cli.esdf_obstacle_min_height,
+        obstacle_max_height=args_cli.esdf_obstacle_max_height,
+    )
+    esdf = esdf_builder.build_or_load_from_stage(
+        stage=stage,
+        scene_path=scene_path,
+        scene_scale=args_cli.scene_scale,
+        env_prim_path="/World/Scene/terrain",
+    )
+    camera_pos_debug = env.unwrapped.scene.sensors['camera_sensor'].data.pos_w.cpu().numpy()
+    ok, dist = esdf_builder.query_grid(esdf, camera_pos_debug[0, :2])
+    print(f"[SimESDF] initial camera query ok={ok} dist={dist}")
+    minco_adapter = NavDPMincoAdapter(
+        esdf=esdf,
+        safe_dist=args_cli.minco_safe_dist,
+        top_k=args_cli.minco_top_k,
+        sample_dt=args_cli.minco_sample_dt,
+        speed=args_cli.speed,
+        enable=True,
+        fallback_to_raw=args_cli.minco_fallback_to_raw,
+    )
+
+planning_thread_obj = threading.Thread(target=planning_thread, args=(env, camera_intrinsic, minco_adapter))
 planning_thread_obj.daemon = True
 planning_thread_obj.start()
 
@@ -195,6 +280,8 @@ while simulation_app.is_running():
             planning_input.current_depth = depths.copy()
             planning_input.camera_pos = camera_pos.copy()
             planning_input.camera_rot = camera_rot.copy()
+            planning_input.robot_lin_vel_w = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :3].cpu().numpy().copy()
+            planning_input.robot_ang_vel_w = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy().copy()
 
         # based on the current world trajectory 
         robot_vel = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[0, :2].norm().cpu().numpy()

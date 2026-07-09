@@ -9,7 +9,6 @@
 
 #include "data_structure/base/trajectory.h"
 #include "minco_core/components/trajectory_safety_checker.hpp"
-#include "minco_core/corridor_generator.hpp"
 #include "minco_processor/esdf_map.hpp"
 #include "traj_opt/minco_optimizer.hpp"
 #include "traj_opt/yaw_traj_opt.h"
@@ -35,6 +34,7 @@ public:
     double traj_goal_tolerance{0.3};
     double safety_sample_dt{0.05};
     double validation_sample_dt{0.05};
+    double sample_dt{0.05};
     double validation_dynamic_scale{1.5};
     double start_projection_margin{0.05};
     bool enable_yaw_opt{true};
@@ -57,6 +57,19 @@ public:
     double now{0.0};
   };
 
+  struct TrajectorySample
+  {
+    double t{0.0};
+
+    Eigen::Vector3d pos{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d vel{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d acc{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d jerk{Eigen::Vector3d::Zero()};
+
+    double yaw{0.0};
+    double yaw_dot{0.0};
+  };
+
   struct Result
   {
     bool success{false};
@@ -71,6 +84,7 @@ public:
     super_utils::VecDf local_vmaxs;
     geometry_utils::Trajectory trajectory;
     geometry_utils::Trajectory yaw_trajectory;
+    std::vector<TrajectorySample> samples;
     double objective{std::numeric_limits<double>::infinity()};
     int optimizer_return_code{0};
   };
@@ -114,12 +128,15 @@ private:
     double current_yaw,
     double goal_yaw,
     double now) const;
+  std::vector<TrajectorySample> sampleTrajectory(const geometry_utils::Trajectory & pos_traj,
+    const geometry_utils::Trajectory & yaw_traj,
+    double dt,
+    double fallback_yaw) const;
 
   Config config_;
   std::shared_ptr<EsdfMapInterface> map_;
   std::unique_ptr<minco_planner::MincoOptimizer> optimizer_;
   std::unique_ptr<traj_opt::YawTrajOpt> yaw_optimizer_;
-  minco_planner::SimpleCorridorGenerator::Ptr corridor_generator_;
   std::unique_ptr<minco_planner::TrajectorySafetyChecker> safety_checker_;
 
   geometry_utils::Trajectory last_traj_;

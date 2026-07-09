@@ -1,8 +1,8 @@
 #include <Eigen/Core>
 
-#include "minco_core/corridor_generator.hpp"
 #include "minco_core/components/trajectory_safety_checker.hpp"
 #include "minco_processor/minco_pipeline.hpp"
+#include "minco_processor/static_sim_esdf_map.hpp"
 #include "traj_opt/minco_optimizer.hpp"
 
 namespace {
@@ -40,7 +40,6 @@ int main()
   cfg.print_optimizer_log = false;
 
   minco_planner::MincoOptimizer optimizer(cfg);
-  minco_planner::SimpleCorridorGenerator corridor;
   minco_planner::TrajectorySafetyChecker checker;
   checker.configure(0.3, 0.05);
   minco_processor::MincoPipeline::Config pipeline_cfg;
@@ -58,12 +57,39 @@ int main()
   const auto result = pipeline.optimize(request);
 
   (void)optimizer;
-  (void)corridor;
   if (checker.getDistance(Eigen::Vector3d::Zero()) != 0.0) {
     return 1;
   }
-  if (!result.success || result.sparse_waypoints.size() < 2U || result.initial_times.size() == 0) {
+  if (!result.success || result.sparse_waypoints.size() < 2U || result.initial_times.size() == 0 ||
+      result.samples.empty()) {
     return 2;
   }
-  return result.trajectory.getTotalDuration() > 0.0 ? 0 : 3;
+  for (const auto & sample : result.samples) {
+    if (sample.pos.z() != 0.0 || sample.vel.z() != 0.0 || sample.acc.z() != 0.0 ||
+        sample.jerk.z() != 0.0) {
+      return 3;
+    }
+  }
+  minco_processor::StaticSimEsdfMap2D static_map;
+  Eigen::MatrixXd distance(3, 3);
+  distance << 1.0, 1.0, 1.0,
+    1.0, 0.5, 1.0,
+    1.0, 1.0, 1.0;
+  Eigen::Matrix<uint8_t, Eigen::Dynamic, Eigen::Dynamic> free(3, 3);
+  free.setConstant(1U);
+  free(1, 1) = 0U;
+  static_map.setMap(distance, free, -0.1, -0.1, 0.1);
+  unsigned int mx = 0U;
+  unsigned int my = 0U;
+  if (!static_map.worldToMap(0.0, 0.0, mx, my) || mx != 1U || my != 1U || static_map.isFree(mx, my)) {
+    return 5;
+  }
+  const auto q = static_map.query(Eigen::Vector3d(0.0, 0.0, 0.0));
+  if (!q.ok || std::abs(q.distance - 0.5) > 1e-9 || q.gradient.z() != 0.0) {
+    return 6;
+  }
+  if (static_map.query(Eigen::Vector3d(10.0, 0.0, 0.0)).ok) {
+    return 7;
+  }
+  return result.trajectory.getTotalDuration() > 0.0 ? 0 : 4;
 }

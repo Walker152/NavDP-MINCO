@@ -24,8 +24,8 @@ set(TRAJ_OPT_SOURCES
 
 set(MINCO_ALGORITHM_SOURCES
   src/minco_processor/minco_pipeline.cpp
-  src/minco_core/corridor_generator.cpp
   src/minco_core/components/trajectory_safety_checker.cpp
+  src/static_sim_esdf_map.cpp
 )
 
 add_library(${PROJECT_NAME}
@@ -50,6 +50,8 @@ PUBLIC
   Eigen3::Eigen
 )
 
+set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 if(OpenMP_CXX_FOUND)
   target_link_libraries(${PROJECT_NAME} PUBLIC OpenMP::OpenMP_CXX)
 endif()
@@ -58,6 +60,15 @@ add_executable(minco_processor_compile_test
   tests/test_pure_algorithm_compile.cpp
 )
 target_link_libraries(minco_processor_compile_test PRIVATE ${PROJECT_NAME})
+
+find_package(pybind11 CONFIG QUIET)
+if(pybind11_FOUND)
+  pybind11_add_module(minco_processor_py
+    bindings/minco_pybind.cpp
+  )
+  target_link_libraries(minco_processor_py PRIVATE ${PROJECT_NAME})
+  set_target_properties(minco_processor_py PROPERTIES OUTPUT_NAME _minco_processor)
+endif()
 
 install(TARGETS ${PROJECT_NAME}
   EXPORT ${PROJECT_NAME}Targets
@@ -71,9 +82,6 @@ install(FILES
   include/data_structure/base/ellipsoid.h
   include/data_structure/base/piece.h
   DESTINATION include/data_structure/base
-)
-install(FILES include/minco_core/corridor_generator.hpp
-  DESTINATION include/minco_core
 )
 install(FILES include/minco_core/components/trajectory_safety_checker.hpp
   DESTINATION include/minco_core/components

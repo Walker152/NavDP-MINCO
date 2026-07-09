@@ -11,7 +11,6 @@ ROS messages, TF, pluginlib, or ROGMap.
 - Time allocation and warm-start support inside `MincoOptimizer`.
 - Joint optimization of segment times and intermediate control points.
 - ESDF-based position penalty through `minco_processor::EsdfMapInterface`.
-- Safe-box corridor generation with `SimpleCorridorGenerator`.
 - Trajectory safety checking by sampling optimized trajectories against ESDF distance.
 - Yaw trajectory optimization.
 
@@ -62,7 +61,6 @@ clearance when available.
 - `traj_opt/minco_optimizer.hpp`: MINCO joint time/control-point optimizer.
 - `traj_opt/yaw_traj_opt.h`: yaw trajectory optimization.
 - `minco_processor/esdf_map.hpp`: pure ESDF query interface.
-- `minco_core/corridor_generator.hpp`: ESDF-based safe AABB corridor helper.
 - `minco_core/components/trajectory_safety_checker.hpp`: trajectory ESDF sampling checker.
 
 ## Compile Contract
