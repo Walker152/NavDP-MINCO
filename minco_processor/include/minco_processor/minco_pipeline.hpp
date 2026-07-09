@@ -3,6 +3,7 @@
 #include <Eigen/Core>
 
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -37,6 +38,7 @@ public:
     double sample_dt{0.05};
     double validation_dynamic_scale{1.5};
     double start_projection_margin{0.05};
+    int max_sparse_waypoints{8};
     bool enable_yaw_opt{true};
   };
 
@@ -87,6 +89,10 @@ public:
     std::vector<TrajectorySample> samples;
     double objective{std::numeric_limits<double>::infinity()};
     int optimizer_return_code{0};
+    std::map<std::string, double> timing_ms;
+    int dense_path_size{0};
+    int sparse_waypoint_size{0};
+    int optimizer_iteration_count{0};
   };
 
   MincoPipeline();

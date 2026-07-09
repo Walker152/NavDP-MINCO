@@ -3,6 +3,7 @@
 #include "minco_core/components/trajectory_safety_checker.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <iostream>
@@ -298,6 +299,35 @@ std::vector<Eigen::Vector3d> getSparseWaypoints(const std::vector<Eigen::Vector3
   return sparse;
 }
 
+std::vector<Eigen::Vector3d> limitSparseWaypoints(const std::vector<Eigen::Vector3d> & path, int max_count)
+{
+  const int n = static_cast<int>(path.size());
+  const int limit = std::max(2, max_count);
+  if (n <= limit) {
+    return path;
+  }
+
+  std::vector<Eigen::Vector3d> limited;
+  limited.reserve(static_cast<size_t>(limit));
+  int last_idx = -1;
+  for (int i = 0; i < limit; ++i) {
+    int idx = static_cast<int>(std::lround(static_cast<double>(i) * static_cast<double>(n - 1) /
+      static_cast<double>(limit - 1)));
+    idx = clampValue(idx, 0, n - 1);
+    if (idx <= last_idx && last_idx + 1 < n) {
+      idx = last_idx + 1;
+    }
+    if (idx >= n) {
+      idx = n - 1;
+    }
+    limited.push_back(path[static_cast<size_t>(idx)]);
+    last_idx = idx;
+  }
+  limited.front() = path.front();
+  limited.back() = path.back();
+  return limited;
+}
+
 }  // namespace
 
 MincoPipeline::Config::Config()
@@ -363,26 +393,48 @@ void MincoPipeline::resetHistory()
 
 MincoPipeline::Result MincoPipeline::optimize(const Request & request)
 {
+  using Clock = std::chrono::steady_clock;
+
   Result result;
+  const auto pipeline_start = Clock::now();
+  auto elapsedMs = [](const Clock::time_point & start) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+  };
+  auto finish = [&]() {
+    result.dense_path_size = static_cast<int>(result.dense_path.size());
+    result.sparse_waypoint_size = static_cast<int>(result.sparse_waypoints.size());
+    if (optimizer_) {
+      result.optimizer_iteration_count = optimizer_->lastIterationCount();
+    }
+    result.timing_ms["pipeline_total_ms"] = elapsedMs(pipeline_start);
+    return result;
+  };
+
   if (!optimizer_ || request.guide_path.size() < 2U) {
     result.failure_reason = "INVALID_INPUT";
-    return result;
+    return finish();
   }
 
   const Eigen::Vector3d goal =
     request.goal.allFinite() ? request.goal : Eigen::Vector3d(request.guide_path.back().x(), request.guide_path.back().y(), 0.0);
+  auto stage_start = Clock::now();
   result.dense_path = extractLocalPath(request.guide_path, request.current.position);
+  result.timing_ms["extract_local_path_ms"] = elapsedMs(stage_start);
   if (result.dense_path.size() < 2U) {
     result.failure_reason = "LOCAL_PATH_FAILED";
-    return result;
+    return finish();
   }
   const bool local_end_is_goal = (goal - result.dense_path.back()).head<2>().norm() <= config_.traj_goal_tolerance;
+  stage_start = Clock::now();
   result.sparse_waypoints = sparsifyPath(result.dense_path, local_end_is_goal);
+  result.sparse_waypoints = limitSparseWaypoints(result.sparse_waypoints, config_.max_sparse_waypoints);
+  result.timing_ms["sparsify_path_ms"] = elapsedMs(stage_start);
   if (result.sparse_waypoints.size() < 2U) {
     result.failure_reason = "SPARSIFY_FAILED";
-    return result;
+    return finish();
   }
 
+  stage_start = Clock::now();
   result.planning_state = determinePlanningState(request.current, result.sparse_waypoints, request.now);
   double hot_sample_t = 0.0;
   super_utils::vec_Vec3f shifted_waypoints;
@@ -447,10 +499,12 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
          (result.sparse_waypoints[1] - result.start_state.col(0)).norm() < 0.2) {
     result.sparse_waypoints.erase(result.sparse_waypoints.begin() + 1);
   }
+  result.timing_ms["state_prepare_ms"] = elapsedMs(stage_start);
 
   const int N = static_cast<int>(result.sparse_waypoints.size()) - 1;
   result.local_vmaxs.resize(N);
   result.initial_times.resize(N);
+  stage_start = Clock::now();
   allocatePathTime(result.sparse_waypoints,
     result.start_state,
     local_end_is_goal,
@@ -461,21 +515,29 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     result.initial_points,
     result.initial_times,
     result.local_vmaxs);
+  result.timing_ms["allocate_time_ms"] = elapsedMs(stage_start);
   optimizer_->setInitPsAndTs(result.initial_points, result.initial_times);
 
+  stage_start = Clock::now();
   result.objective = optimizer_->optimize(
     result.sparse_waypoints, result.start_state, result.end_state, result.local_vmaxs, result.trajectory);
+  result.timing_ms["optimizer_ms"] = elapsedMs(stage_start);
   result.optimizer_return_code = optimizer_->lastReturnCode();
+  result.optimizer_iteration_count = optimizer_->lastIterationCount();
   if (!std::isfinite(result.objective)) {
     result.failure_reason = "OPTIMIZER_FAILED";
-    return result;
+    return finish();
   }
+  stage_start = Clock::now();
   if (!validateTrajectory(result.trajectory, result.end_state.col(0))) {
+    result.timing_ms["validate_ms"] = elapsedMs(stage_start);
     result.failure_reason = "VALIDATION_FAILED";
-    return result;
+    return finish();
   }
+  result.timing_ms["validate_ms"] = elapsedMs(stage_start);
 
   const double goal_yaw = std::isfinite(request.goal_yaw) ? request.goal_yaw : request.current.yaw;
+  stage_start = Clock::now();
   if (!optimizeYaw(result.start_state,
         result.trajectory,
         result.yaw_trajectory,
@@ -489,6 +551,7 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     result.yaw_trajectory.clear();
     result.yaw_trajectory.emplace_back(std::max(0.02, result.trajectory.getTotalDuration()), cMat);
   }
+  result.timing_ms["yaw_ms"] = elapsedMs(stage_start);
 
   last_traj_ = result.trajectory;
   last_traj_.start_WT = request.now;
@@ -498,11 +561,13 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   has_last_yaw_traj_ = true;
   result.trajectory.start_WT = request.now;
   result.yaw_trajectory.start_WT = request.now;
+  stage_start = Clock::now();
   result.samples =
     sampleTrajectory(result.trajectory, result.yaw_trajectory, config_.sample_dt, request.current.yaw);
+  result.timing_ms["sample_ms"] = elapsedMs(stage_start);
   result.success = true;
   result.failure_reason = "NONE";
-  return result;
+  return finish();
 }
 
 std::vector<Eigen::Vector3d> MincoPipeline::extractLocalPath(

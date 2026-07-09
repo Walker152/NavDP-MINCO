@@ -15,13 +15,16 @@ parser.add_argument(
 parser.add_argument(
     "--num_episodes", type=int, default=100)
 parser.add_argument(
-    "--speed", type=float, default=0.5)
+    "--speed", type=float, default=1.5)
 parser.add_argument(
     "--port", type=int, default=8888)
 parser.add_argument("--enable_minco", action="store_true")
 parser.add_argument("--minco_top_k", type=int, default=4)
 parser.add_argument("--minco_safe_dist", type=float, default=0.30)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
+parser.add_argument("--minco_max_vel", type=float, default=2.0)
+parser.add_argument("--minco_max_acc", type=float, default=4.0)
+parser.add_argument("--minco_max_iterations", type=int, default=64)
 parser.add_argument("--minco_fallback_to_raw", action="store_true", default=True)
 parser.add_argument("--esdf_resolution", type=float, default=0.05)
 parser.add_argument("--esdf_padding", type=float, default=1.0)
@@ -104,6 +107,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
             
             with planning_timer.section("navdp_step_ms"):
                 trajectory_points_camera, all_trajectories_camera, all_values_camera = pointgoal_step(goal, image, depth,port=args_cli.port)
+            if stop_event.is_set():
+                break
 
             with planning_timer.section("raw_transform_ms"):
                 raw_top1_world = []
@@ -159,6 +164,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
 
             minco_results = []
             if used_minco:
+                if stop_event.is_set():
+                    break
                 with planning_timer.section("minco_total_ms"):
                     minco_results = minco_adapter.optimize_candidates(
                         candidates_world=batch_all_points_world,
@@ -166,6 +173,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         states=states,
                         raw_top1_world=raw_top1_world,
                     )
+                if stop_event.is_set():
+                    break
             else:
                 planning_timer.records["minco_total_ms"] = 0.0
 
@@ -315,6 +324,9 @@ if args_cli.enable_minco:
         top_k=args_cli.minco_top_k,
         sample_dt=args_cli.minco_sample_dt,
         speed=args_cli.speed,
+        max_vel=args_cli.minco_max_vel,
+        max_acc=args_cli.minco_max_acc,
+        max_iterations=args_cli.minco_max_iterations,
         enable=True,
         fallback_to_raw=args_cli.minco_fallback_to_raw,
     )
@@ -339,193 +351,214 @@ fps_writer = [imageio.get_writer(save_dir + "fps_%d.mp4"%i, fps=10) for i in ran
 trajectory_length = np.zeros((scene_config.num_envs))
 frame_idx = 0
 
-while simulation_app.is_running():
-    with torch.inference_mode():
-        goals = infos['observations']['goal_pose'].cpu().numpy()[:,0:2]
-        images = infos['observations']['rgb'].cpu().numpy()[:,:,:,0:3]
-        depths = infos['observations']['depth'].cpu().numpy()[:,:,:]
-        # get all camera poses
-        camera_pos = env.unwrapped.scene.sensors['camera_sensor'].data.pos_w.cpu().numpy()
-        camera_rot_quat = env.unwrapped.scene.sensors['camera_sensor'].data.quat_w_world.cpu().numpy()
-        camera_rot_quat = camera_rot_quat[:,[1, 2, 3, 0]]
-        camera_rot = R.from_quat(camera_rot_quat).as_matrix()
+try:
+    while simulation_app.is_running() and not stop_event.is_set():
+        with torch.inference_mode():
+            goals = infos['observations']['goal_pose'].cpu().numpy()[:,0:2]
+            images = infos['observations']['rgb'].cpu().numpy()[:,:,:,0:3]
+            depths = infos['observations']['depth'].cpu().numpy()[:,:,:]
+            # get all camera poses
+            camera_pos = env.unwrapped.scene.sensors['camera_sensor'].data.pos_w.cpu().numpy()
+            camera_rot_quat = env.unwrapped.scene.sensors['camera_sensor'].data.quat_w_world.cpu().numpy()
+            camera_rot_quat = camera_rot_quat[:,[1, 2, 3, 0]]
+            camera_rot = R.from_quat(camera_rot_quat).as_matrix()
         
-        with input_lock:
-            planning_input.current_goal = goals.copy()
-            planning_input.current_image = images.copy()
-            planning_input.current_depth = depths.copy()
-            planning_input.camera_pos = camera_pos.copy()
-            planning_input.camera_rot = camera_rot.copy()
-            planning_input.robot_lin_vel_w = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :3].cpu().numpy().copy()
-            planning_input.robot_ang_vel_w = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy().copy()
+            with input_lock:
+                planning_input.current_goal = goals.copy()
+                planning_input.current_image = images.copy()
+                planning_input.current_depth = depths.copy()
+                planning_input.camera_pos = camera_pos.copy()
+                planning_input.camera_rot = camera_rot.copy()
+                planning_input.robot_lin_vel_w = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :3].cpu().numpy().copy()
+                planning_input.robot_ang_vel_w = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy().copy()
 
-        # based on the current world trajectory
-        robot_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :2].norm(dim=1).cpu().numpy()
-        robot_ang_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy()
+            # based on the current world trajectory
+            robot_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :2].norm(dim=1).cpu().numpy()
+            robot_ang_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy()
 
-        x0 = np.stack([
-            camera_pos[:, 0],
-            camera_pos[:, 1],
-            np.arctan2(camera_rot[:, 1, 0], camera_rot[:, 0, 0]),
-            robot_vel_batch,
-            robot_ang_vel_batch,
-        ], axis=-1)
-        current_trajectory = None
-        current_all_trajectories = None
-        current_all_values = None
-        current_raw_top1 = None
-        current_selected_candidate = None
-        current_control_points = None
-        current_minco_samples = None
-        current_minco_speed_profile = None
-        current_minco_info = None
-        current_planning_timing = None
-        with output_lock:
-            if planning_output.trajectory_points_world is not None:
-                current_trajectory = planning_output.trajectory_points_world.copy() if planning_output.trajectory_points_world is not None else None
-                current_all_trajectories = planning_output.all_trajectories_world.copy() if planning_output.all_trajectories_world is not None else None
-                current_all_values = planning_output.all_values_camera.copy() if planning_output.all_values_camera is not None else None
-                current_raw_top1 = planning_output.raw_top1_world.copy() if planning_output.raw_top1_world is not None else None
-                current_selected_candidate = planning_output.selected_candidate_world.copy() if planning_output.selected_candidate_world is not None else None
-                current_control_points = planning_output.minco_control_points_world.copy() if planning_output.minco_control_points_world is not None else None
-                current_minco_samples = planning_output.minco_samples
-                current_minco_speed_profile = planning_output.minco_speed_profile
-                current_minco_info = planning_output.minco_info
-                current_planning_timing = planning_output.planning_timing.copy() if planning_output.planning_timing is not None else None
+            x0 = np.stack([
+                camera_pos[:, 0],
+                camera_pos[:, 1],
+                np.arctan2(camera_rot[:, 1, 0], camera_rot[:, 0, 0]),
+                robot_vel_batch,
+                robot_ang_vel_batch,
+            ], axis=-1)
+            current_trajectory = None
+            current_all_trajectories = None
+            current_all_values = None
+            current_raw_top1 = None
+            current_selected_candidate = None
+            current_control_points = None
+            current_minco_samples = None
+            current_minco_speed_profile = None
+            current_minco_info = None
+            current_planning_timing = None
+            with output_lock:
+                if planning_output.trajectory_points_world is not None:
+                    current_trajectory = planning_output.trajectory_points_world.copy() if planning_output.trajectory_points_world is not None else None
+                    current_all_trajectories = planning_output.all_trajectories_world.copy() if planning_output.all_trajectories_world is not None else None
+                    current_all_values = planning_output.all_values_camera.copy() if planning_output.all_values_camera is not None else None
+                    current_raw_top1 = planning_output.raw_top1_world.copy() if planning_output.raw_top1_world is not None else None
+                    current_selected_candidate = planning_output.selected_candidate_world.copy() if planning_output.selected_candidate_world is not None else None
+                    current_control_points = planning_output.minco_control_points_world.copy() if planning_output.minco_control_points_world is not None else None
+                    current_minco_samples = planning_output.minco_samples
+                    current_minco_speed_profile = planning_output.minco_speed_profile
+                    current_minco_info = planning_output.minco_info
+                    current_planning_timing = planning_output.planning_timing.copy() if planning_output.planning_timing is not None else None
         
-        if current_trajectory is not None:
-            action_list = []
-            control_timing_records = []
+            if current_trajectory is not None:
+                action_list = []
+                control_timing_records = []
+                for i in range(args_cli.num_envs):
+                    control_timer = StageTimer()
+
+                    with control_timer.section("visualize_ms"):
+                        vis_image = vis_manager[i].visualize_trajectory(
+                            images[i], depths[i][:,:,None], camera_intrinsic.cpu().numpy(),
+                            current_trajectory[i],
+                            robot_pose=x0[i],
+                            all_trajectories_points=current_all_trajectories[i] if current_all_trajectories is not None else None,
+                            all_trajectories_values=current_all_values[i] if current_all_values is not None else None,
+                            raw_trajectory_points=current_raw_top1[i] if current_raw_top1 is not None else None,
+                            selected_candidate_points=current_selected_candidate[i] if current_selected_candidate is not None else None,
+                            control_points=current_control_points[i] if current_control_points is not None else None,
+                            esdf=minco_adapter.esdf if minco_adapter is not None else None,
+                            minco_info=current_minco_info[i] if current_minco_info is not None else None,
+                        )
+
+                    mpc_i = mpc[i] if isinstance(mpc, list) and i < len(mpc) else mpc
+                    if mpc_i is None:
+                        action_list.append(np.zeros(2, dtype=np.float32))
+                        continue
+                    with control_timer.section("mpc_solve_ms"):
+                        opt_u_controls, opt_x_states = mpc_i.solve(x0[i, :3])
+                    v, w = opt_u_controls[1, 0], opt_u_controls[1, 1]
+                    action = torch.tensor([v, w], device="cuda:0")
+                    action_cpu = action.cpu().numpy()
+                    joint_velocities = controller.forward(action_cpu).joint_velocities
+                    action_list.append(joint_velocities)
+
+                    planned_v = None
+                    if current_minco_speed_profile is not None:
+                        profile = current_minco_speed_profile[i]
+                        if profile is not None:
+                            profile_np = np.asarray(profile, dtype=np.float64).reshape(-1)
+                            if profile_np.size > 0 and np.isfinite(profile_np[0]):
+                                planned_v = float(profile_np[0])
+
+                    with control_timer.section("speed_plot_ms"):
+                        vis_manager[i].update_speed_history(
+                            actual_v=float(robot_vel_batch[i]),
+                            actual_w=float(robot_ang_vel_batch[i]),
+                            cmd_v=float(v),
+                            cmd_w=float(w),
+                            planned_v=planned_v,
+                        )
+                        vis_image = vis_manager[i].append_speed_plot(
+                            vis_image,
+                            speed_max=max(1.0, float(args_cli.speed) * 1.5),
+                        )
+
+                    try:
+                        with control_timer.section("text_overlay_ms"):
+                            vis_image = draw_box_with_text(vis_image,0,0,430,50,"desired lin.:%.2f ang.:%.2f"%(v,w))
+                            vis_image = draw_box_with_text(vis_image,0,50,430,50,"actual lin.:%.2f ang.:%.2f"%(robot_vel_batch[i],robot_ang_vel_batch[i]))
+                            if current_all_values is not None:
+                                vis_image = draw_box_with_text(vis_image,0,770,430,50,"critic max:%.2f min:%.2f"%(np.max(current_all_values[i]), np.min(current_all_values[i])))
+                            vis_image = draw_box_with_text(vis_image,0,820,430,50,"point goal:(%.2f, %.2f)"%(goals[i][0],goals[i][1]))
+                            if current_minco_info is not None:
+                                info = current_minco_info[i]
+                                status = "MINCO ok" if info.get("success", False) else "MINCO fallback"
+                                vis_image = draw_box_with_text(
+                                    vis_image,
+                                    0,
+                                    870,
+                                    520,
+                                    50,
+                                    "%s idx:%d esdf:%.2f cost:%.1f" % (
+                                        status,
+                                        info.get("selected_index", -1),
+                                        info.get("min_esdf", float("nan")),
+                                        info.get("objective", float("inf")),
+                                    ),
+                                )
+
+                        control_timing = control_timer.snapshot()
+                        control_timing["video_write_ms"] = 0.0
+                        control_timing["env_step_ms"] = 0.0
+
+                        if args_cli.show_timing_overlay:
+                            vis_image = draw_timing_overlay(vis_image, current_planning_timing, control_timing)
+
+                        if not stop_event.is_set():
+                            cv2.imwrite(f"frame_test.png", cv2.cvtColor(vis_image, cv2.COLOR_RGB2BGR))
+                            with control_timer.section("video_write_ms"):
+                                fps_writer[i].append_data(vis_image)
+                            control_timing = control_timer.snapshot()
+                            control_timing["env_step_ms"] = 0.0
+                            control_timing_records.append(control_timing)
+                    except Exception:
+                        pass
+                
+                action = torch.as_tensor(np.stack(action_list, axis=0),device="cuda:0")
+                env_step_timer = StageTimer()
+                with env_step_timer.section("env_step_ms"):
+                    obs, rewards, dones, infos = env.step(action)
+                env_step_ms = env_step_timer.records["env_step_ms"]
+                for record in control_timing_records:
+                    record["env_step_ms"] = env_step_ms
+                if control_timing_records and frame_idx % max(1, args_cli.timing_log_interval) == 0:
+                    print(format_control_summary(mean_timing(control_timing_records)))
+                # Get actual joint velocities from Isaac Sim
+                actual_joint_velocities = env.unwrapped.scene.articulations['robot'].data.joint_vel[0, :2].cpu().numpy()
+                desired_joint_velocities = env.unwrapped.scene.articulations['robot'].data.joint_vel_target[0, :2].cpu().numpy()
+                trajectory_length += (infos['observations']['policy'][:,0] * env.unwrapped.step_dt).cpu().numpy()
+            else:
+                action = torch.zeros((args_cli.num_envs, 2), device="cuda:0")
+                env_step_timer = StageTimer()
+                with env_step_timer.section("env_step_ms"):
+                    obs, rewards, dones, infos = env.step(action)
+                env_step_ms = env_step_timer.records["env_step_ms"]
+                print("No trajectory available, using zero action")
+        
             for i in range(args_cli.num_envs):
-                control_timer = StageTimer()
-
-                with control_timer.section("visualize_ms"):
-                    vis_image = vis_manager[i].visualize_trajectory(
-                        images[i], depths[i][:,:,None], camera_intrinsic.cpu().numpy(),
-                        current_trajectory[i],
-                        robot_pose=x0[i],
-                        all_trajectories_points=current_all_trajectories[i] if current_all_trajectories is not None else None,
-                        all_trajectories_values=current_all_values[i] if current_all_values is not None else None,
-                        raw_trajectory_points=current_raw_top1[i] if current_raw_top1 is not None else None,
-                        selected_candidate_points=current_selected_candidate[i] if current_selected_candidate is not None else None,
-                        control_points=current_control_points[i] if current_control_points is not None else None,
-                        esdf=minco_adapter.esdf if minco_adapter is not None else None,
-                        minco_info=current_minco_info[i] if current_minco_info is not None else None,
-                    )
-
-                mpc_i = mpc[i] if isinstance(mpc, list) and i < len(mpc) else mpc
-                if mpc_i is None:
-                    action_list.append(np.zeros(2, dtype=np.float32))
-                    continue
-                with control_timer.section("mpc_solve_ms"):
-                    opt_u_controls, opt_x_states = mpc_i.solve(x0[i, :3])
-                v, w = opt_u_controls[1, 0], opt_u_controls[1, 1]
-                action = torch.tensor([v, w], device="cuda:0")
-                action_cpu = action.cpu().numpy()
-                joint_velocities = controller.forward(action_cpu).joint_velocities
-                action_list.append(joint_velocities)
-
-                planned_v = None
-                if current_minco_speed_profile is not None:
-                    profile = current_minco_speed_profile[i]
-                    if profile is not None:
-                        profile_np = np.asarray(profile, dtype=np.float64).reshape(-1)
-                        if profile_np.size > 0 and np.isfinite(profile_np[0]):
-                            planned_v = float(profile_np[0])
-
-                with control_timer.section("speed_plot_ms"):
-                    vis_manager[i].update_speed_history(
-                        actual_v=float(robot_vel_batch[i]),
-                        actual_w=float(robot_ang_vel_batch[i]),
-                        cmd_v=float(v),
-                        cmd_w=float(w),
-                        planned_v=planned_v,
-                    )
-                    vis_image = vis_manager[i].append_speed_plot(
-                        vis_image,
-                        speed_max=max(1.0, float(args_cli.speed) * 1.5),
-                    )
-
-                try:
-                    with control_timer.section("text_overlay_ms"):
-                        vis_image = draw_box_with_text(vis_image,0,0,430,50,"desired lin.:%.2f ang.:%.2f"%(v,w))
-                        vis_image = draw_box_with_text(vis_image,0,50,430,50,"actual lin.:%.2f ang.:%.2f"%(robot_vel_batch[i],robot_ang_vel_batch[i]))
-                        if current_all_values is not None:
-                            vis_image = draw_box_with_text(vis_image,0,770,430,50,"critic max:%.2f min:%.2f"%(np.max(current_all_values[i]), np.min(current_all_values[i])))
-                        vis_image = draw_box_with_text(vis_image,0,820,430,50,"point goal:(%.2f, %.2f)"%(goals[i][0],goals[i][1]))
-                        if current_minco_info is not None:
-                            info = current_minco_info[i]
-                            status = "MINCO ok" if info.get("success", False) else "MINCO fallback"
-                            vis_image = draw_box_with_text(
-                                vis_image,
-                                0,
-                                870,
-                                520,
-                                50,
-                                "%s idx:%d esdf:%.2f cost:%.1f" % (
-                                    status,
-                                    info.get("selected_index", -1),
-                                    info.get("min_esdf", float("nan")),
-                                    info.get("objective", float("inf")),
-                                ),
-                            )
-
-                    control_timing = control_timer.snapshot()
-                    control_timing["video_write_ms"] = 0.0
-                    control_timing["env_step_ms"] = 0.0
-
-                    if args_cli.show_timing_overlay:
-                        vis_image = draw_timing_overlay(vis_image, current_planning_timing, control_timing)
-
-                    cv2.imwrite(f"frame_test.png", cv2.cvtColor(vis_image, cv2.COLOR_RGB2BGR))
-                    with control_timer.section("video_write_ms"):
-                        fps_writer[i].append_data(vis_image)
-                    control_timing = control_timer.snapshot()
-                    control_timing["env_step_ms"] = 0.0
-                    control_timing_records.append(control_timing)
-                except:
-                    pass
-                
-            action = torch.as_tensor(np.stack(action_list, axis=0),device="cuda:0")
-            env_step_timer = StageTimer()
-            with env_step_timer.section("env_step_ms"):
-                obs, rewards, dones, infos = env.step(action)
-            env_step_ms = env_step_timer.records["env_step_ms"]
-            for record in control_timing_records:
-                record["env_step_ms"] = env_step_ms
-            if control_timing_records and frame_idx % max(1, args_cli.timing_log_interval) == 0:
-                print(format_control_summary(mean_timing(control_timing_records)))
-            # Get actual joint velocities from Isaac Sim
-            actual_joint_velocities = env.unwrapped.scene.articulations['robot'].data.joint_vel[0, :2].cpu().numpy()
-            desired_joint_velocities = env.unwrapped.scene.articulations['robot'].data.joint_vel_target[0, :2].cpu().numpy()
-            trajectory_length += (infos['observations']['policy'][:,0] * env.unwrapped.step_dt).cpu().numpy()
-        else:
-            action = torch.zeros((args_cli.num_envs, 2), device="cuda:0")
-            env_step_timer = StageTimer()
-            with env_step_timer.section("env_step_ms"):
-                obs, rewards, dones, infos = env.step(action)
-            env_step_ms = env_step_timer.records["env_step_ms"]
-            print("No trajectory available, using zero action")
+                if stop_event.is_set():
+                    break
+                if dones[i] == True:
+                    episode_num += 1
+                    navigator_reset(env_id=i,port=args_cli.port)
+                    success_flag = (np.sqrt(np.square(goals[i]).sum())<1.0).astype(np.float32)
+                    fps_writer[i].close()
+                    evaluation_metrics.append({'success':success_flag,
+                                               'spl': np.clip(euclidean[i] / trajectory_length[i],0,1) * success_flag,
+                                               'distance':euclidean[i]})
+                    write_metrics(evaluation_metrics,save_dir+"metric.csv")
+                    euclidean[i] = np.sqrt(np.square(infos['observations']['goal_pose'].cpu().numpy()[:,0:2]).sum(axis=-1))[i]
+                    fps_writer[i] = imageio.get_writer(save_dir + "fps_%d.mp4"%episode_num, fps=10)
+                    trajectory_length[i] = 0.0
         
-        for i in range(args_cli.num_envs):
-            if dones[i] == True:
-                episode_num += 1
-                navigator_reset(env_id=i,port=args_cli.port)
-                success_flag = (np.sqrt(np.square(goals[i]).sum())<1.0).astype(np.float32)
-                fps_writer[i].close()
-                evaluation_metrics.append({'success':success_flag,
-                                           'spl': np.clip(euclidean[i] / trajectory_length[i],0,1) * success_flag,
-                                           'distance':euclidean[i]})
-                write_metrics(evaluation_metrics,save_dir+"metric.csv")
-                euclidean[i] = np.sqrt(np.square(infos['observations']['goal_pose'].cpu().numpy()[:,0:2]).sum(axis=-1))[i]
-                fps_writer[i] = imageio.get_writer(save_dir + "fps_%d.mp4"%episode_num, fps=10)
-                trajectory_length[i] = 0.0
-        
-        if episode_num >= args_cli.num_episodes:
-            break
-        frame_idx += 1
-       
-                
-   
+            if episode_num >= args_cli.num_episodes:
+                break
+            frame_idx += 1
 
-        
+except KeyboardInterrupt:
+    print("[Shutdown] KeyboardInterrupt received.")
+finally:
+    stop_event.set()
+    try:
+        planning_thread_obj.join(timeout=3.0)
+    except Exception as exc:
+        print(f"[Shutdown] planning thread join failed: {exc}")
+    for writer in fps_writer:
+        try:
+            writer.close()
+        except Exception as exc:
+            print(f"[Shutdown] video writer close failed: {exc}")
+    try:
+        env.close()
+    except Exception as exc:
+        print(f"[Shutdown] env close failed: {exc}")
+    try:
+        simulation_app.close()
+    except Exception as exc:
+        print(f"[Shutdown] simulation app close failed: {exc}")

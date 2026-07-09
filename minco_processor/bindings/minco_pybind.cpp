@@ -22,10 +22,10 @@ class MincoProcessorPy
 public:
   MincoProcessorPy()
   {
-    configure(0.5, 0.3, 0.05);
+    configure(2.0, 4.0, 0.3, 0.05, 64);
   }
 
-  void configure(double max_vel, double safe_dist, double sample_dt)
+  void configure(double max_vel, double max_acc, double safe_dist, double sample_dt, int max_iterations)
   {
     minco_processor::MincoPipeline::Config config;
     config.sample_dt = sample_dt;
@@ -33,7 +33,8 @@ public:
     config.safety_sample_dt = sample_dt;
     config.optimizer.safe_dist = safe_dist;
     config.optimizer.max_vel = max_vel;
-    config.optimizer.max_acc = 1.0;
+    config.optimizer.max_acc = max_acc;
+    config.optimizer.max_iterations = max_iterations;
     config.optimizer.print_optimizer_log = false;
     pipeline_.setConfig(config);
   }
@@ -79,7 +80,11 @@ public:
     }
     request.now = std::chrono::duration<double>(t0.time_since_epoch()).count();
 
-    const auto result = pipeline_.optimize(request);
+    minco_processor::MincoPipeline::Result result;
+    {
+      py::gil_scoped_release release;
+      result = pipeline_.optimize(request);
+    }
     const auto t1 = std::chrono::steady_clock::now();
     const double duration = std::chrono::duration<double>(t1 - t0).count();
     return toDict(result, duration);
@@ -136,6 +141,10 @@ private:
     out["min_esdf"] = min_esdf;
     out["samples"] = samples;
     out["waypoints"] = waypoints;
+    out["timing_ms"] = result.timing_ms;
+    out["dense_path_size"] = result.dense_path_size;
+    out["sparse_waypoint_size"] = result.sparse_waypoint_size;
+    out["optimizer_iteration_count"] = result.optimizer_iteration_count;
 
     Eigen::MatrixXd sparse_waypoints(static_cast<int>(result.sparse_waypoints.size()), 3);
     for (int i = 0; i < sparse_waypoints.rows(); ++i) {
@@ -157,7 +166,11 @@ PYBIND11_MODULE(_minco_processor, m)
   py::class_<MincoProcessorPy>(m, "MincoProcessor")
     .def(py::init<>())
     .def("configure", &MincoProcessorPy::configure,
-      py::arg("max_vel"), py::arg("safe_dist"), py::arg("sample_dt"))
+      py::arg("max_vel"),
+      py::arg("max_acc"),
+      py::arg("safe_dist"),
+      py::arg("sample_dt"),
+      py::arg("max_iterations"))
     .def("set_static_esdf_2d", &MincoProcessorPy::set_static_esdf_2d,
       py::arg("distance"), py::arg("free"), py::arg("origin"), py::arg("resolution"))
     .def("optimize", &MincoProcessorPy::optimize,

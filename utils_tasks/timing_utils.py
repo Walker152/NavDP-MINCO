@@ -55,11 +55,16 @@ def format_planning_summary(timing):
 
 
 def format_minco_summary(env_i, info):
+    timing_ms = info.get("timing_ms", {}) or {}
     return (
         "[Timing][MINCO] "
         f"env={env_i} success={info.get('success', False)} fallback={info.get('fallback', False)} "
         f"adapter={info.get('adapter_total_ms', np.nan):.2f}ms "
         f"cpp={info.get('selected_cpp_optimize_time_ms', np.nan):.2f}ms "
+        f"optimizer={timing_ms.get('optimizer_ms', np.nan):.2f}ms "
+        f"validate={timing_ms.get('validate_ms', np.nan):.2f}ms "
+        f"sparse_n={info.get('sparse_waypoint_size', 0)} "
+        f"iter={info.get('optimizer_iteration_count', 0)} "
         f"selected_idx={info.get('selected_index', -1)}"
     )
 

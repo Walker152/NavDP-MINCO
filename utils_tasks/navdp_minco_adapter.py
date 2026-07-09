@@ -11,6 +11,9 @@ class NavDPMincoAdapter:
         top_k=4,
         sample_dt=0.05,
         speed=0.5,
+        max_vel=None,
+        max_acc=4.0,
+        max_iterations=64,
         enable=True,
         fallback_to_raw=True,
     ):
@@ -19,6 +22,9 @@ class NavDPMincoAdapter:
         self.top_k = int(top_k)
         self.sample_dt = float(sample_dt)
         self.speed = float(speed)
+        self.max_vel = float(self.speed if max_vel is None else max_vel)
+        self.max_acc = float(max_acc)
+        self.max_iterations = int(max_iterations)
         self.enabled = bool(enable)
         self.fallback_to_raw = bool(fallback_to_raw)
         self.processor = None
@@ -28,9 +34,11 @@ class NavDPMincoAdapter:
             self.processor = minco_processor.MincoProcessor()
             if hasattr(self.processor, "configure"):
                 self.processor.configure(
-                    max_vel=self.speed,
+                    max_vel=self.max_vel,
+                    max_acc=self.max_acc,
                     safe_dist=self.safe_dist,
                     sample_dt=self.sample_dt,
+                    max_iterations=self.max_iterations,
                 )
             self.processor.set_static_esdf_2d(
                 distance=np.asarray(esdf["distance"], dtype=np.float64),
@@ -91,6 +99,10 @@ class NavDPMincoAdapter:
                     "selected_index": int(selected_idx),
                     "python_call_ms": float(candidate_call_ms),
                     "cpp_optimize_time_ms": float(cpp_ms),
+                    "timing_ms": dict(result.get("timing_ms", {})),
+                    "dense_path_size": int(result.get("dense_path_size", 0)),
+                    "sparse_waypoint_size": int(result.get("sparse_waypoint_size", 0)),
+                    "optimizer_iteration_count": int(result.get("optimizer_iteration_count", 0)),
                     "success": bool(result.get("success", False)),
                     "objective": float(result.get("objective", np.inf)),
                     "min_esdf": float(result.get("min_esdf", np.nan)),
@@ -161,6 +173,10 @@ class NavDPMincoAdapter:
                     "candidate_timings": candidate_timings,
                     "selected_cpp_optimize_time_ms": float(best.get("cpp_optimize_time_ms", best.get("duration", 0.0) * 1000.0)),
                     "selected_python_call_ms": float(best.get("python_call_ms", np.nan)),
+                    "timing_ms": dict(best.get("timing_ms", {})),
+                    "dense_path_size": int(best.get("dense_path_size", 0)),
+                    "sparse_waypoint_size": int(best.get("sparse_waypoint_size", 0)),
+                    "optimizer_iteration_count": int(best.get("optimizer_iteration_count", 0)),
                 }
                 print(
                     "[NavDP-Minco] "
@@ -194,6 +210,10 @@ class NavDPMincoAdapter:
             "candidate_timings": candidate_timings or [],
             "selected_cpp_optimize_time_ms": float("nan"),
             "selected_python_call_ms": float("nan"),
+            "timing_ms": {},
+            "dense_path_size": 0,
+            "sparse_waypoint_size": 0,
+            "optimizer_iteration_count": 0,
         }
         print(
             f"[NavDP-Minco] env={env_idx} success=0 fallback=1 "

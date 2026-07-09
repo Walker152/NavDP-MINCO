@@ -61,7 +61,7 @@ double MincoOptimizer::optimize(const std::vector<Eigen::Vector3d> & waypoints,
   lbfgs_params.min_step = 1.0e-32;
   lbfgs_params.g_epsilon = 0.0;
   lbfgs_params.delta = cfg_.opt_accuracy;  // Gradient tolerance
-  lbfgs_params.max_iterations = 256;
+  lbfgs_params.max_iterations = std::max(1, cfg_.max_iterations);
 
   // 4. Run the optimizer
   // [Theory] L-BFGS is a limited-memory quasi-Newton method.

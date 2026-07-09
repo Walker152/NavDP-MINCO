@@ -5,16 +5,19 @@ import io
 import json
 import time
 
+REQUEST_TIMEOUT_S = 5.0
+
 def navigator_reset(intrinsic=None,stop_threshold=-0.5,batch_size=1,port=8888,env_id=None):
     print("http://localhost:%d/navigator_reset"%port)
     if env_id is None:
         url = "http://localhost:%d/navigator_reset"%port
         response = requests.post(url,json={'intrinsic':intrinsic.tolist(),
                                            'stop_threshold':stop_threshold,
-                                           'batch_size':batch_size})
+                                           'batch_size':batch_size},
+                                 timeout=REQUEST_TIMEOUT_S)
     else:
         url = "http://localhost:%d/navigator_reset_env"%port
-        response = requests.post(url,json={'env_id':env_id})
+        response = requests.post(url,json={'env_id':env_id}, timeout=REQUEST_TIMEOUT_S)
     return json.loads(response.text)['algo']
 
 def nogoal_step(rgb_images,depth_images,port=8888):
@@ -38,7 +41,7 @@ def nogoal_step(rgb_images,depth_images,port=8888):
         'depth_time':time.time(),
         'rgb_time':time.time(),
     }
-    response = requests.post(url, files=files, data=data)
+    response = requests.post(url, files=files, data=data, timeout=REQUEST_TIMEOUT_S)
     trajectory = json.loads(response.text)['trajectory']
     all_trajectory = json.loads(response.text)['all_trajectory']
     all_value = json.loads(response.text)['all_values']
@@ -69,7 +72,7 @@ def pointgoal_step(point_goals,rgb_images,depth_images,port=8888):
         'depth_time':time.time(),
         'rgb_time':time.time(),
     }
-    response = requests.post(url, files=files, data=data)
+    response = requests.post(url, files=files, data=data, timeout=REQUEST_TIMEOUT_S)
     trajectory = json.loads(response.text)['trajectory']
     all_trajectory = json.loads(response.text)['all_trajectory']
     all_value = json.loads(response.text)['all_values']
@@ -107,12 +110,11 @@ def imagegoal_step(image_goals,rgb_images,depth_images,port=8888):
         'depth_time':time.time(),
         'rgb_time':time.time(),
     }
-    response = requests.post(url, files=files, data=data)
+    response = requests.post(url, files=files, data=data, timeout=REQUEST_TIMEOUT_S)
     trajectory = json.loads(response.text)['trajectory']
     all_trajectory = json.loads(response.text)['all_trajectory']
     all_value = json.loads(response.text)['all_values']
     return np.array(trajectory),np.array(all_trajectory),np.array(all_value)
-
 
 
 
