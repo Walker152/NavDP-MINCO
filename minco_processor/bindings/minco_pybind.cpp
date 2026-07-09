@@ -3,7 +3,10 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -129,9 +132,17 @@ private:
     out["objective"] = result.objective;
     out["optimizer_return_code"] = result.optimizer_return_code;
     out["duration"] = duration;
+    out["cpp_optimize_time_ms"] = duration * 1000.0;
     out["min_esdf"] = min_esdf;
     out["samples"] = samples;
     out["waypoints"] = waypoints;
+
+    Eigen::MatrixXd sparse_waypoints(static_cast<int>(result.sparse_waypoints.size()), 3);
+    for (int i = 0; i < sparse_waypoints.rows(); ++i) {
+      sparse_waypoints.row(i) = result.sparse_waypoints[static_cast<size_t>(i)].transpose();
+    }
+    out["sparse_waypoints"] = sparse_waypoints;
+    out["control_points"] = sparse_waypoints;
     return out;
   }
 

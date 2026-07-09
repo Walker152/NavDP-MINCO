@@ -9,9 +9,15 @@ class VisualizationManager:
         self.occupancy_history = deque(maxlen=history_size)  # Will store (grid, min_coords, robot_pose)
         self.resolution = 0.05  # 5cm per pixel
         self.inflation = 5      # inflation radius in pixels
+        self.speed_history = deque(maxlen=150)
+        self.esdf_overlay_cache = None
+        self.esdf_overlay_pose = None
     
     def reset(self):
         self.occupancy_history.clear()
+        self.speed_history.clear()
+        self.esdf_overlay_cache = None
+        self.esdf_overlay_pose = None
         
     def build_occupancy_grid(self, depth_map, intrinsic, camera_roll=0):
         try:
@@ -72,8 +78,190 @@ class VisualizationManager:
             min_coords = np.array([0,0])
         
         return occupancy_grid, min_coords
+
+    def world_to_vis_points(self, points_xy, robot_pose, grid_size, center_offset):
+        points_xy = np.asarray(points_xy, dtype=np.float64)
+        if points_xy.ndim != 2 or points_xy.shape[1] < 2 or points_xy.shape[0] == 0:
+            return np.zeros((0, 2), dtype=np.int32)
+
+        dx = points_xy[:, 0] - robot_pose[0]
+        dy = points_xy[:, 1] - robot_pose[1]
+
+        grid_points = np.stack([dx, dy], axis=1) / self.resolution
+        grid_points = grid_points.astype(np.int32)
+
+        valid_mask = (
+            (np.abs(grid_points[:, 0]) < grid_size // 2) &
+            (np.abs(grid_points[:, 1]) < grid_size // 2)
+        )
+        grid_points = grid_points[valid_mask]
+
+        vis_points = np.zeros_like(grid_points)
+        vis_points[:, 0] = -grid_points[:, 1] + center_offset
+        vis_points[:, 1] = -grid_points[:, 0] + center_offset
+
+        valid_mask = (
+            (vis_points[:, 0] >= 0) & (vis_points[:, 0] < grid_size) &
+            (vis_points[:, 1] >= 0) & (vis_points[:, 1] < grid_size)
+        )
+        return vis_points[valid_mask].astype(np.int32)
+
+    def draw_polyline_world(
+        self,
+        vis_image,
+        points,
+        robot_pose,
+        color,
+        thickness=2,
+        dashed=False,
+    ):
+        grid_size = vis_image.shape[0]
+        center_offset = grid_size // 2
+        vis_points = self.world_to_vis_points(points, robot_pose, grid_size, center_offset)
+        if len(vis_points) < 2:
+            return vis_image
+
+        for k in range(len(vis_points) - 1):
+            if dashed and (k % 2 == 1):
+                continue
+            cv2.line(vis_image, tuple(vis_points[k]), tuple(vis_points[k + 1]), color, thickness, cv2.LINE_AA)
+        return vis_image
+
+    def draw_points_world(
+        self,
+        vis_image,
+        points,
+        robot_pose,
+        color,
+        radius=4,
+    ):
+        grid_size = vis_image.shape[0]
+        center_offset = grid_size // 2
+        vis_points = self.world_to_vis_points(points, robot_pose, grid_size, center_offset)
+        for p in vis_points:
+            cv2.circle(vis_image, tuple(p), radius + 1, (0, 0, 0), -1, cv2.LINE_AA)
+            cv2.circle(vis_image, tuple(p), radius, color, -1, cv2.LINE_AA)
+        return vis_image
+
+    def render_esdf_overlay(self, vis_image, robot_pose, esdf, safe_dist=0.30):
+        distance = np.asarray(esdf["distance"], dtype=np.float64)
+        origin = np.asarray(esdf["origin"], dtype=np.float64)
+        esdf_res = float(esdf["resolution"])
+
+        grid_size = vis_image.shape[0]
+        center = grid_size // 2
+        rows, cols = np.indices((grid_size, grid_size))
+        dx = -(cols - center) * self.resolution
+        dy = -(rows - center) * self.resolution
+
+        world_x = robot_pose[0] + dx
+        world_y = robot_pose[1] + dy
+
+        mx = np.floor((world_x - origin[0]) / esdf_res).astype(np.int32)
+        my = np.floor((world_y - origin[1]) / esdf_res).astype(np.int32)
+
+        valid = (mx >= 0) & (mx < distance.shape[1]) & (my >= 0) & (my < distance.shape[0])
+        dist = np.full((grid_size, grid_size), np.nan, dtype=np.float64)
+        dist[valid] = distance[my[valid], mx[valid]]
+
+        overlay = np.zeros_like(vis_image)
+        unknown = ~np.isfinite(dist)
+        occupied = dist <= 0.0
+        unsafe = (dist > 0.0) & (dist <= safe_dist)
+        near = (dist > safe_dist) & (dist <= 1.0)
+        free = dist > 1.0
+
+        overlay[unknown] = (30, 30, 30)
+        overlay[occupied] = (40, 40, 160)
+        overlay[unsafe] = (0, 140, 255)
+        overlay[near] = (100, 120, 60)
+        overlay[free] = (30, 50, 30)
+
+        alpha = 0.45
+        vis_image[:] = cv2.addWeighted(vis_image, 1.0 - alpha, overlay, alpha, 0)
+        return vis_image
+
+    def update_speed_history(self, actual_v, actual_w, cmd_v=None, cmd_w=None, planned_v=None):
+        self.speed_history.append({
+            "actual_v": float(actual_v) if actual_v is not None else np.nan,
+            "actual_w": float(actual_w) if actual_w is not None else np.nan,
+            "cmd_v": float(cmd_v) if cmd_v is not None else np.nan,
+            "cmd_w": float(cmd_w) if cmd_w is not None else np.nan,
+            "planned_v": float(planned_v) if planned_v is not None else np.nan,
+        })
+
+    def append_speed_plot(self, image, speed_max=1.0):
+        plot_h = 180
+        plot_w = image.shape[1]
+        plot = np.zeros((plot_h, plot_w, 3), dtype=np.uint8)
+
+        if len(self.speed_history) < 2:
+            return np.concatenate([image, plot], axis=0)
+
+        hist = list(self.speed_history)
+        actual = np.array([h["actual_v"] for h in hist], dtype=np.float64)
+        cmd = np.array([h["cmd_v"] for h in hist], dtype=np.float64)
+        planned = np.array([h["planned_v"] for h in hist], dtype=np.float64)
+
+        all_values = np.concatenate([
+            actual[np.isfinite(actual)],
+            cmd[np.isfinite(cmd)],
+            planned[np.isfinite(planned)],
+        ])
+        if all_values.size == 0:
+            max_v = max(float(speed_max), 0.5)
+        else:
+            max_v = max(float(speed_max), float(np.max(np.abs(all_values))), 0.5)
+        max_v = min(max_v * 1.2, 3.0)
+
+        def series_to_points(series):
+            n = len(series)
+            xs = np.linspace(40, plot_w - 20, n)
+            clipped = np.clip(series, 0.0, max_v)
+            ys = plot_h - 30 - clipped / max_v * (plot_h - 55)
+            valid = np.isfinite(series)
+            if np.count_nonzero(valid) < 2:
+                return np.zeros((0, 2), dtype=np.int32)
+            return np.stack([xs[valid], ys[valid]], axis=1).astype(np.int32)
+
+        cv2.line(plot, (40, 15), (40, plot_h - 30), (80, 80, 80), 1, cv2.LINE_AA)
+        cv2.line(plot, (40, plot_h - 30), (plot_w - 20, plot_h - 30), (80, 80, 80), 1, cv2.LINE_AA)
+
+        for pts, color in [
+            (series_to_points(actual), (255, 255, 255)),
+            (series_to_points(cmd), (0, 255, 0)),
+            (series_to_points(planned), (0, 255, 255)),
+        ]:
+            if len(pts) >= 2:
+                cv2.polylines(plot, [pts], False, color, 2, cv2.LINE_AA)
+
+        cv2.putText(plot, "speed history", (50, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(plot, "actual white | cmd green | planned yellow", (50, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
+
+        latest = hist[-1]
+        text = f"actual={latest['actual_v']:.2f} cmd={latest['cmd_v']:.2f}"
+        if np.isfinite(latest["planned_v"]):
+            text += f" planned={latest['planned_v']:.2f}"
+        cv2.putText(plot, text, (50, plot_h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
+
+        return np.concatenate([image, plot], axis=0)
         
-    def visualize_trajectory(self, rgb_image, depth_image, intrinsic, trajectory_points, robot_pose, camera_roll=0, all_trajectories_points=None, all_trajectories_values=None):
+    def visualize_trajectory(
+        self,
+        rgb_image,
+        depth_image,
+        intrinsic,
+        trajectory_points,
+        robot_pose,
+        camera_roll=0,
+        all_trajectories_points=None,
+        all_trajectories_values=None,
+        raw_trajectory_points=None,
+        selected_candidate_points=None,
+        control_points=None,
+        esdf=None,
+        minco_info=None,
+    ):
         # Calculate visualization size based on 10m×10m range
         grid_size = int(10.0 / self.resolution)  # 20m in grid cells
         vis_image = np.zeros((grid_size, grid_size, 3), dtype=np.uint8)
@@ -96,6 +284,11 @@ class VisualizationManager:
         
         # Calculate center offset (assuming robot is at center)
         center_offset = grid_size // 2
+        if esdf is not None:
+            try:
+                vis_image = self.render_esdf_overlay(vis_image, robot_pose, esdf, safe_dist=0.30)
+            except Exception as exc:
+                print(f"[Visualization] ESDF overlay failed: {exc}")
         
         # Draw historical occupancy grids
         all_hist_world_points_list = []
@@ -172,63 +365,71 @@ class VisualizationManager:
         if vis_coords_current.size > 0:
             vis_image[vis_coords_current[:, 0], vis_coords_current[:, 1]] = (0, 0, 255) # Red
         
-        # Draw trajectory
+        if raw_trajectory_points is not None:
+            self.draw_polyline_world(
+                vis_image,
+                raw_trajectory_points,
+                robot_pose,
+                color=(0, 165, 255),
+                thickness=1,
+                dashed=True,
+            )
+
+        if selected_candidate_points is not None:
+            self.draw_polyline_world(
+                vis_image,
+                selected_candidate_points,
+                robot_pose,
+                color=(255, 255, 0),
+                thickness=1,
+                dashed=False,
+            )
+
+        vis_points = np.zeros((0, 2), dtype=np.int32)
         if trajectory_points is not None:
-            # Transform trajectory points to yaw=0 frame centered at current robot position
-            dx = trajectory_points[:, 0] - robot_pose[0]
-            dy = trajectory_points[:, 1] - robot_pose[1]
-            
-            # Rotate points to align with yaw=0 frame
-            current_rotation = np.array([
-                [np.cos(0), np.sin(0)],
-                [np.sin(0), np.cos(0)]
-            ])
-            transformed_points = (current_rotation @ np.vstack([dx, dy])).T
-            
-            # Convert to grid coordinates
-            grid_points = (transformed_points / self.resolution).astype(int)
-            
-            # Filter points within range
-            valid_mask = (np.abs(grid_points[:, 0]) < grid_size//2) & (np.abs(grid_points[:, 1]) < grid_size//2)
-            grid_points = grid_points[valid_mask]
-            
-            # Convert to visualization coordinates (adjust for image coordinate system)
-            vis_points = np.zeros_like(grid_points)
-            vis_points[:, 0] = -grid_points[:, 1] + center_offset  # Flip x axis
-            vis_points[:, 1] = -grid_points[:, 0] + center_offset   # Keep y axis
-            
-            # Draw trajectory with anti-aliased lines
-            for i in range(len(vis_points) - 1):
-                cv2.line(vis_image, tuple(vis_points[i]), tuple(vis_points[i+1]), (0, 255, 0), 2, cv2.LINE_AA)
-            # Draw start and end points
+            self.draw_polyline_world(
+                vis_image,
+                trajectory_points,
+                robot_pose,
+                color=(0, 255, 0),
+                thickness=2,
+                dashed=False,
+            )
+            vis_points = self.world_to_vis_points(trajectory_points, robot_pose, grid_size, center_offset)
             if len(vis_points) > 0:
-                # Use larger circles with anti-aliasing for smoother appearance
-                cv2.circle(vis_image, tuple(vis_points[0]), 3, (255, 0, 0), -1, cv2.LINE_AA)  # Blue for start
-                
-                # Draw robot rectangle at start position
-                rect_length = 10  # pixels
-                rect_width = 5   # pixels
-                start_point = (center_offset, center_offset)
-                # Get yaw angle from trajectory points
-                yaw = -robot_pose[2]
-                
-                # Calculate rectangle corners
-                cos_yaw = np.cos(yaw)
-                sin_yaw = np.sin(yaw)
-                corners = np.array([
-                    [-rect_width/2, -rect_length/2],
-                    [rect_width/2, -rect_length/2],
-                    [rect_width/2, rect_length/2],
-                    [-rect_width/2, rect_length/2]
-                ])
-                # Rotate corners
-                rot_matrix = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
-                rotated_corners = (rot_matrix @ corners.T).T + start_point
-                
-                # Draw rectangle with anti-aliasing
-                corners_int = rotated_corners.astype(np.int32)
-                cv2.polylines(vis_image, [corners_int], True, (255, 255, 255), 1, cv2.LINE_AA)  # Blue rectangle
-                cv2.circle(vis_image, tuple(vis_points[-1]), 3, (0, 0, 255), -1, cv2.LINE_AA)  # Red for end
+                cv2.circle(vis_image, tuple(vis_points[0]), 3, (255, 0, 0), -1, cv2.LINE_AA)
+                cv2.circle(vis_image, tuple(vis_points[-1]), 3, (0, 0, 255), -1, cv2.LINE_AA)
+
+        if control_points is not None:
+            self.draw_points_world(
+                vis_image,
+                control_points,
+                robot_pose,
+                color=(0, 255, 255),
+                radius=4,
+            )
+
+        rect_length = 10
+        rect_width = 5
+        start_point = (center_offset, center_offset)
+        yaw = -robot_pose[2]
+        cos_yaw = np.cos(yaw)
+        sin_yaw = np.sin(yaw)
+        corners = np.array([
+            [-rect_width / 2, -rect_length / 2],
+            [rect_width / 2, -rect_length / 2],
+            [rect_width / 2, rect_length / 2],
+            [-rect_width / 2, rect_length / 2],
+        ])
+        rot_matrix = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
+        rotated_corners = (rot_matrix @ corners.T).T + start_point
+        corners_int = rotated_corners.astype(np.int32)
+        cv2.polylines(vis_image, [corners_int], True, (255, 255, 255), 1, cv2.LINE_AA)
+
+        legend_y = 16
+        cv2.putText(vis_image, "green: MINCO opt", (8, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "orange: raw", (8, legend_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "yellow: ctrl", (8, legend_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
         
         # Resize visualization to match RGB image height with better interpolation
         vis_resized = cv2.resize(vis_image, (int(rgb_image.shape[0]), int(rgb_image.shape[0])), interpolation=cv2.INTER_CUBIC)
@@ -291,26 +492,8 @@ class VisualizationManager:
         
         for idx, traj in enumerate(all_trajectories_points):
             color = trajectory_colors[idx]
-            
-            # Transform trajectory points
-            dx = traj[:, 0] - robot_pose[0]
-            dy = traj[:, 1] - robot_pose[1]
-            
-            # Rotate points
-            transformed_points = (current_rotation @ np.vstack([dx, dy])).T
-            
-            # Convert to grid coordinates
-            grid_points = (transformed_points / self.resolution).astype(int)
-            
-            # Filter points within range
-            valid_mask = (np.abs(grid_points[:, 0]) < grid_size//2) & (np.abs(grid_points[:, 1]) < grid_size//2)
-            grid_points = grid_points[valid_mask]
-            
-            # Convert to visualization coordinates
-            vis_points_all = np.zeros_like(grid_points)
-            vis_points_all[:, 0] = -grid_points[:, 1] + center_offset
-            vis_points_all[:, 1] = -grid_points[:, 0] + center_offset
-            
+            vis_points_all = self.world_to_vis_points(traj, robot_pose, grid_size, center_offset)
+
             # Draw trajectory with anti-aliased lines
             for i in range(len(vis_points_all) - 1):
                 cv2.line(vis_image_all, tuple(vis_points_all[i]), tuple(vis_points_all[i+1]), color, 1, cv2.LINE_AA)
@@ -320,9 +503,7 @@ class VisualizationManager:
                 cv2.circle(vis_image_all, tuple(vis_points_all[0]), 2, color, -1, cv2.LINE_AA)
         
         # Draw robot position with anti-aliasing
-        if len(vis_points) > 0:
-            corners_int = rotated_corners.astype(np.int32)
-            cv2.polylines(vis_image_all, [corners_int], True, (255, 255, 255), 1, cv2.LINE_AA)  # White robot outline
+        cv2.polylines(vis_image_all, [corners_int], True, (255, 255, 255), 1, cv2.LINE_AA)  # White robot outline
         
         # Resize all trajectories visualization - align width with rgb_image
         # Get target width (same as rgb_image width)
@@ -344,4 +525,4 @@ class VisualizationManager:
         # Stack vertically: combined_image (top) and vis_resized_all (bottom)
         final_combined_image = np.concatenate((combined_image, vis_resized_all), axis=0)
         
-        return final_combined_image 
+        return final_combined_image

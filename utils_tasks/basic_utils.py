@@ -23,6 +23,15 @@ class PlanningOutput:
     trajectory_points_world: Optional[np.ndarray] = None
     all_trajectories_world: Optional[List[np.ndarray]] = None
     all_values_camera: Optional[np.ndarray] = None
+
+    raw_top1_world: Optional[np.ndarray] = None
+    selected_candidate_world: Optional[np.ndarray] = None
+    minco_control_points_world: Optional[np.ndarray] = None
+    minco_samples: Optional[List[np.ndarray]] = None
+    minco_speed_profile: Optional[List[np.ndarray]] = None
+    minco_info: Optional[List[dict]] = None
+    planning_timing: Optional[dict] = None
+
     sub_pointgoal_pd: Optional[np.ndarray] = None
     is_planning: bool = False
     planning_error: Optional[str] = None

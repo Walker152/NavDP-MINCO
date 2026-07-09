@@ -52,15 +52,17 @@ class NavDPMincoAdapter:
         batch_size = len(candidates_world)
         results = []
         for env_idx in range(batch_size):
-            start_time = time.time()
+            start_time = time.perf_counter()
             best = None
             failures = []
+            candidate_timings = []
             order = self._candidate_order(critic_values[env_idx], len(candidates_world[env_idx]))
             for selected_idx in order[:max(0, self.top_k)]:
                 candidate = self._as_guide_path(candidates_world[env_idx][selected_idx])
                 if candidate is None:
                     failures.append(f"idx={selected_idx}: invalid_candidate")
                     continue
+                candidate_call_start = time.perf_counter()
                 try:
                     result = self.processor.optimize(
                         guide_path=candidate,
@@ -71,8 +73,29 @@ class NavDPMincoAdapter:
                         yaw_rate=float(states[env_idx].get("yaw_rate", 0.0)),
                     )
                 except Exception as exc:
+                    candidate_call_ms = (time.perf_counter() - candidate_call_start) * 1000.0
+                    candidate_timings.append({
+                        "selected_index": int(selected_idx),
+                        "python_call_ms": float(candidate_call_ms),
+                        "cpp_optimize_time_ms": float("nan"),
+                        "success": False,
+                        "objective": float("inf"),
+                        "min_esdf": float("nan"),
+                        "failure_reason": str(exc),
+                    })
                     failures.append(f"idx={selected_idx}: {exc}")
                     continue
+                candidate_call_ms = (time.perf_counter() - candidate_call_start) * 1000.0
+                cpp_ms = float(result.get("cpp_optimize_time_ms", result.get("duration", 0.0) * 1000.0))
+                candidate_timings.append({
+                    "selected_index": int(selected_idx),
+                    "python_call_ms": float(candidate_call_ms),
+                    "cpp_optimize_time_ms": float(cpp_ms),
+                    "success": bool(result.get("success", False)),
+                    "objective": float(result.get("objective", np.inf)),
+                    "min_esdf": float(result.get("min_esdf", np.nan)),
+                    "failure_reason": str(result.get("failure_reason", "")),
+                })
                 if not result.get("success", False):
                     failures.append(f"idx={selected_idx}: {result.get('failure_reason', 'FAILED')}")
                     continue
@@ -82,35 +105,76 @@ class NavDPMincoAdapter:
                     continue
                 scored = dict(result)
                 scored["selected_index"] = int(selected_idx)
+                scored["python_call_ms"] = candidate_call_ms
+                scored["cpp_optimize_time_ms"] = cpp_ms
                 if best is None or self._is_better(scored, best):
                     best = scored
 
-            elapsed_ms = (time.time() - start_time) * 1000.0
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             if best is not None:
+                samples = best.get("samples")
+                samples_np = None
+                speed_profile = None
+                if samples is not None:
+                    samples_np = np.asarray(samples, dtype=np.float64)
+                    if samples_np.ndim == 2 and samples_np.shape[1] >= 6:
+                        speed_profile = np.linalg.norm(samples_np[:, 4:6], axis=1)
+
+                control_points = best.get("control_points", best.get("sparse_waypoints", None))
+                if control_points is not None:
+                    control_points = np.asarray(control_points, dtype=np.float64)
+                    if control_points.ndim == 2 and control_points.shape[1] >= 2:
+                        control_points = control_points[:, :2]
+                    else:
+                        control_points = None
+
+                selected_candidate = np.asarray(
+                    candidates_world[env_idx][best["selected_index"]],
+                    dtype=np.float64,
+                )
+                if selected_candidate.ndim == 2 and selected_candidate.shape[1] >= 2:
+                    selected_candidate = selected_candidate[:, :2]
+                else:
+                    selected_candidate = None
+
+                raw_top1 = np.asarray(raw_top1_world[env_idx], dtype=np.float64)
+                if raw_top1.ndim == 2 and raw_top1.shape[1] >= 2:
+                    raw_top1 = raw_top1[:, :2]
+                else:
+                    raw_top1 = None
+
                 result = {
                     "success": True,
                     "waypoints": np.asarray(best["waypoints"], dtype=np.float64)[:, :2],
-                    "samples": best.get("samples"),
+                    "samples": samples_np,
                     "selected_index": int(best["selected_index"]),
                     "objective": float(best.get("objective", np.inf)),
                     "min_esdf": float(best.get("min_esdf", np.nan)),
                     "failure_reason": best.get("failure_reason", "NONE"),
                     "fallback": False,
                     "time_ms": elapsed_ms,
+                    "control_points": control_points,
+                    "selected_candidate": selected_candidate,
+                    "raw_top1": raw_top1,
+                    "speed_profile": speed_profile,
+                    "adapter_total_ms": elapsed_ms,
+                    "candidate_timings": candidate_timings,
+                    "selected_cpp_optimize_time_ms": float(best.get("cpp_optimize_time_ms", best.get("duration", 0.0) * 1000.0)),
+                    "selected_python_call_ms": float(best.get("python_call_ms", np.nan)),
                 }
                 print(
                     "[NavDP-Minco] "
                     f"env={env_idx} success=1 fallback=0 selected_idx={result['selected_index']} "
                     f"objective={result['objective']:.4f} min_esdf={result['min_esdf']:.4f} "
-                    f"time_ms={elapsed_ms:.2f}"
+                    f"adapter_ms={elapsed_ms:.2f} cpp_ms={result['selected_cpp_optimize_time_ms']:.2f}"
                 )
             else:
                 reason = "; ".join(failures[-3:]) if failures else "NO_VALID_CANDIDATE"
-                result = self._fallback_result(env_idx, raw_top1_world[env_idx], reason, elapsed_ms)
+                result = self._fallback_result(env_idx, raw_top1_world[env_idx], reason, elapsed_ms, candidate_timings)
             results.append(result)
         return results
 
-    def _fallback_result(self, env_idx, raw_top1_world, reason, elapsed_ms):
+    def _fallback_result(self, env_idx, raw_top1_world, reason, elapsed_ms, candidate_timings=None):
         waypoints = np.asarray(raw_top1_world, dtype=np.float64)
         result = {
             "success": False,
@@ -122,8 +186,19 @@ class NavDPMincoAdapter:
             "failure_reason": reason,
             "fallback": self.fallback_to_raw,
             "time_ms": elapsed_ms,
+            "control_points": None,
+            "selected_candidate": None,
+            "raw_top1": waypoints[:, :2] if waypoints.ndim == 2 and waypoints.shape[1] >= 2 else None,
+            "speed_profile": None,
+            "adapter_total_ms": elapsed_ms,
+            "candidate_timings": candidate_timings or [],
+            "selected_cpp_optimize_time_ms": float("nan"),
+            "selected_python_call_ms": float("nan"),
         }
-        print(f"[NavDP-Minco] env={env_idx} success=0 fallback=1 reason={reason}")
+        print(
+            f"[NavDP-Minco] env={env_idx} success=0 fallback=1 "
+            f"adapter_ms={elapsed_ms:.2f} reason={reason}"
+        )
         return result
 
     @staticmethod

@@ -1,4 +1,5 @@
 import os
+import time
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt
@@ -44,18 +45,34 @@ class SimEsdfBuilder:
         scene_scale: float = 1.0,
         env_prim_path: str = "/World/Scene/terrain",
     ) -> dict:
+        total_start = time.perf_counter()
+        print(f"[SimESDF] search env_prim_path={env_prim_path}")
         cache_path = os.path.join(scene_path, self.cache_name)
+        cache_start = time.perf_counter()
         cached = self._load_cache(cache_path, scene_scale)
+        cache_ms = (time.perf_counter() - cache_start) * 1000.0
         if cached is not None and not self.force_rebuild:
+            cached["timing"] = {
+                "source": "cache",
+                "cache_load_ms": cache_ms,
+                "total_ms": (time.perf_counter() - total_start) * 1000.0,
+            }
             self._print_debug(cached, cache_path, "cache")
+            print(
+                f"[SimESDF][Timing] source=cache cache_load_ms={cache_ms:.2f} "
+                f"total_ms={cached['timing']['total_ms']:.2f}"
+            )
             return cached
         if stage is None:
             raise RuntimeError("SimEsdfBuilder requires a loaded USD stage when no valid cache exists")
 
+        extract_start = time.perf_counter()
         points, triangles = self._extract_static_mesh(stage, env_prim_path, scene_scale)
+        extract_mesh_ms = (time.perf_counter() - extract_start) * 1000.0
         if points.size == 0 or not triangles:
             raise RuntimeError(f"No static mesh triangles found under {env_prim_path}")
 
+        bounds_start = time.perf_counter()
         xy_min = points[:, :2].min(axis=0) - self.padding
         xy_max = points[:, :2].max(axis=0) + self.padding
         origin = xy_min.astype(np.float64)
@@ -67,7 +84,9 @@ class SimEsdfBuilder:
         z_low = ground_z + self.obstacle_min_height
         z_high = ground_z + self.obstacle_max_height
         spacing = self.resolution * 0.5
+        bounds_ms = (time.perf_counter() - bounds_start) * 1000.0
 
+        raster_start = time.perf_counter()
         for tri in triangles:
             tri_z_min = float(np.min(tri[:, 2]))
             tri_z_max = float(np.max(tri[:, 2]))
@@ -85,12 +104,15 @@ class SimEsdfBuilder:
         occupied[-1, :] = True
         occupied[:, 0] = True
         occupied[:, -1] = True
+        rasterize_ms = (time.perf_counter() - raster_start) * 1000.0
 
+        dt_start = time.perf_counter()
         outside_dist = distance_transform_edt(~occupied) * self.resolution
         inside_dist = distance_transform_edt(occupied) * self.resolution
         distance = outside_dist.astype(np.float64)
         distance[occupied] = -inside_dist[occupied]
         free = distance > 0.0
+        distance_transform_ms = (time.perf_counter() - dt_start) * 1000.0
 
         esdf = {
             "distance": distance,
@@ -101,8 +123,29 @@ class SimEsdfBuilder:
             "ground_z": ground_z,
             "scene_scale": float(scene_scale),
         }
-        np.savez(cache_path, **esdf)
+        cache_write_start = time.perf_counter()
+        save_esdf = {k: v for k, v in esdf.items() if k != "timing"}
+        np.savez(cache_path, **save_esdf)
+        cache_write_ms = (time.perf_counter() - cache_write_start) * 1000.0
+        total_ms = (time.perf_counter() - total_start) * 1000.0
+        esdf["timing"] = {
+            "source": "stage",
+            "cache_load_ms": cache_ms,
+            "extract_mesh_ms": extract_mesh_ms,
+            "bounds_ms": bounds_ms,
+            "rasterize_ms": rasterize_ms,
+            "distance_transform_ms": distance_transform_ms,
+            "cache_write_ms": cache_write_ms,
+            "total_ms": total_ms,
+        }
         self._print_debug(esdf, cache_path, "stage")
+        print(
+            "[SimESDF][Timing] "
+            f"source=stage extract={extract_mesh_ms:.2f}ms "
+            f"bounds={bounds_ms:.2f}ms raster={rasterize_ms:.2f}ms "
+            f"dt={distance_transform_ms:.2f}ms cache_write={cache_write_ms:.2f}ms "
+            f"total={total_ms:.2f}ms"
+        )
         return esdf
 
     def query_grid(self, esdf: dict, pos_xy: np.ndarray):

@@ -67,6 +67,14 @@ class NavDPMincoAdapterTest(unittest.TestCase):
         self.assertFalse(results[0]["fallback"])
         self.assertEqual(results[0]["selected_index"], 1)
         np.testing.assert_allclose(results[0]["waypoints"], [[0.0, 0.0], [2.0, 0.0]])
+        np.testing.assert_allclose(results[0]["raw_top1"], raw_top1[0])
+        np.testing.assert_allclose(results[0]["selected_candidate"], candidates[0, 1])
+        self.assertIsNotNone(results[0]["speed_profile"])
+        self.assertIn("adapter_total_ms", results[0])
+        self.assertIn("candidate_timings", results[0])
+        self.assertEqual(len(results[0]["candidate_timings"]), 2)
+        self.assertIn("selected_cpp_optimize_time_ms", results[0])
+        self.assertIn("selected_python_call_ms", results[0])
 
         fake_processor.optimize.side_effect = [{
             "success": False,
@@ -80,6 +88,10 @@ class NavDPMincoAdapterTest(unittest.TestCase):
         self.assertFalse(fallback[0]["success"])
         self.assertTrue(fallback[0]["fallback"])
         np.testing.assert_allclose(fallback[0]["waypoints"], raw_top1[0])
+        np.testing.assert_allclose(fallback[0]["raw_top1"], raw_top1[0])
+        self.assertIsNone(fallback[0]["control_points"])
+        self.assertIn("adapter_total_ms", fallback[0])
+        self.assertEqual(len(fallback[0]["candidate_timings"]), 1)
 
 
 class SimEsdfBuilderTest(unittest.TestCase):
@@ -102,6 +114,9 @@ class SimEsdfBuilderTest(unittest.TestCase):
             esdf = builder.build_or_load_from_stage(None, tmpdir, scene_scale=1.0)
 
         self.assertEqual(esdf["distance"].shape, (2, 2))
+        self.assertEqual(esdf["timing"]["source"], "cache")
+        self.assertIn("cache_load_ms", esdf["timing"])
+        self.assertIn("total_ms", esdf["timing"])
         ok, dist = builder.query_grid(esdf, np.array([-0.75, -1.75]))
         self.assertTrue(ok)
         self.assertAlmostEqual(dist, 1.0)
