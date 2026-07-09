@@ -1,5 +1,6 @@
 *.ply
 __pycache__
+minco_processor/build/
 *.pth
 *.ckpt
 *.pt
@@ -10,3 +11,5 @@ __pycache__
 assets/scenes/Materials/*
 assets/scenes/SkyTexture/*
 assets/scenes/embodiedscan/*
+*.db
+*.zip

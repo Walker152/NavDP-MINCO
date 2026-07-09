@@ -24,12 +24,15 @@
 #ifndef CLASS_COLOR_MSG_UTILS
 #define CLASS_COLOR_MSG_UTILS
 
-#include <std_msgs/msg/color_rgba.hpp>
-
-class Color : public std_msgs::msg::ColorRGBA
+class Color
 {
 public:
-  Color() : std_msgs::msg::ColorRGBA() {}
+  double r{0.0};
+  double g{0.0};
+  double b{0.0};
+  double a{1.0};
+
+  Color() = default;
 
   Color(int hex_color)
   {

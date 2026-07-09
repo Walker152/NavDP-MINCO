@@ -10,13 +10,12 @@
 #include <vector>
 
 #include "data_structure/base/trajectory.h"
+#include "minco_processor/esdf_map.hpp"
 #include "traj_opt/minco.h"
 #include "utils/header/color_text.hpp"
 #include "utils/header/eigen_alias.hpp"
 #include "utils/optimization/lbfgs.h"
 #include "utils/optimization/optimization_utils.h"
-
-#include "rog_map/map_query_interface.hpp"
 
 namespace minco_planner {
 
@@ -81,7 +80,7 @@ public:
 
   void setInitPsAndTs(const vec_Vec3f & init_ps, const VecDf & init_ts);
 
-  void setMap(const std::shared_ptr<rog_map::MapQueryInterface> & map) { opt_vars_.map = map; }
+  void setMap(const std::shared_ptr<minco_processor::EsdfMapInterface> & map) { opt_vars_.map = map; }
 
   int lastIterationCount() const { return last_iteration_count_; }
   int lastReturnCode() const { return last_return_code_; }
@@ -110,7 +109,7 @@ private:
     bool default_init{true};
 
     // Environment map pointer.
-    std::shared_ptr<rog_map::MapQueryInterface> map;
+    std::shared_ptr<minco_processor::EsdfMapInterface> map;
 
     VecDf magnitudeBounds;
     VecDf penaltyWeights;
@@ -158,7 +157,7 @@ private:
   static void constraintsFunctional(const VecDf & T,
     const MatD3f & coeffs,
     const Mat3Df & waypoint_attractor,
-    const std::shared_ptr<rog_map::MapQueryInterface> & map,
+    const std::shared_ptr<minco_processor::EsdfMapInterface> & map,
     const double & smooth_eps,
     const int & integral_res,
     const VecDf & magnitudeBounds,

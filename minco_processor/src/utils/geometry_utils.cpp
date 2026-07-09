@@ -889,7 +889,7 @@ template <typename Scalar_t> Scalar_t geometry_utils::normalize_angle(Scalar_t a
       break;
     };
 
-    assert(cnt < 10 && "[uav_utils/geometry_msgs] INVALID INPUT ANGLE");
+    assert(cnt < 10 && "[geometry_utils] INVALID INPUT ANGLE");
   }
 
   return a;

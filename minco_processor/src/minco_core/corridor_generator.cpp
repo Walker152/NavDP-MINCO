@@ -15,7 +15,7 @@ void SimpleCorridorGenerator::setSafetyMargins(double robot_radius, double extra
   }
 }
 
-void SimpleCorridorGenerator::setMap(const std::shared_ptr<rog_map::MapQueryInterface> & map)
+void SimpleCorridorGenerator::setMap(const std::shared_ptr<minco_processor::EsdfMapInterface> & map)
 {
   map_ = map;
 }
