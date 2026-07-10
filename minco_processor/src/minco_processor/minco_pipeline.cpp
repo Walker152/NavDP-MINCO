@@ -141,22 +141,154 @@ double getDistFromTrapezoid(
   return clampValue(d_acc + d_flat + (v_peak + v) * 0.5 * dt, 0.0, total_length);
 }
 
-std::vector<Eigen::Vector3d> getSparseWaypoints(const std::vector<Eigen::Vector3d> & path,
+struct SparseWaypointBuild
+{
+  std::vector<Eigen::Vector3d> waypoints;
+  std::vector<size_t> source_indices;
+  std::vector<bool> mandatory;
+  int mandatory_corner_count{0};
+};
+
+size_t findCornerIndex(const std::vector<Eigen::Vector3d> & path, size_t start_idx, size_t end_idx)
+{
+  const Eigen::Vector2d a = path[start_idx].head<2>();
+  const Eigen::Vector2d b = path[end_idx].head<2>();
+  const Eigen::Vector2d ab = b - a;
+  const double ab2 = ab.squaredNorm();
+  if (end_idx <= start_idx + 1U || ab2 <= 1e-12) {
+    return (start_idx + end_idx) / 2U;
+  }
+  double best_dist2 = -1.0;
+  size_t best_k = (start_idx + end_idx) / 2U;
+  for (size_t k = start_idx + 1U; k < end_idx; ++k) {
+    const Eigen::Vector2d p = path[k].head<2>();
+    const double ratio = clampValue((p - a).dot(ab) / ab2, 0.0, 1.0);
+    const double dist2 = (p - (a + ratio * ab)).squaredNorm();
+    if (dist2 > best_dist2) {
+      best_dist2 = dist2;
+      best_k = k;
+    }
+  }
+  return best_k;
+}
+
+void appendSparsePoint(SparseWaypointBuild & build, const std::vector<Eigen::Vector3d> & path, size_t idx, bool mandatory)
+{
+  if (idx >= path.size()) {
+    return;
+  }
+  Eigen::Vector3d p = path[idx];
+  p.z() = 0.0;
+  if (!build.waypoints.empty() && (p - build.waypoints.back()).head<2>().norm() <= 1e-6) {
+    if (mandatory && !build.mandatory.empty()) {
+      build.mandatory.back() = true;
+    }
+    return;
+  }
+  build.waypoints.push_back(p);
+  build.source_indices.push_back(idx);
+  build.mandatory.push_back(mandatory);
+  if (mandatory && idx != 0U && idx + 1U != path.size()) {
+    ++build.mandatory_corner_count;
+  }
+}
+
+SparseWaypointBuild limitSparseWaypoints(const SparseWaypointBuild & in,
+  const std::vector<Eigen::Vector3d> & dense_path,
+  int max_count,
+  const std::function<bool(const Eigen::Vector3d &, const Eigen::Vector3d &)> & is_line_free)
+{
+  const int n = static_cast<int>(in.waypoints.size());
+  const int limit = std::max(2, max_count);
+  if (n <= limit) {
+    return in;
+  }
+
+  std::vector<size_t> keep;
+  keep.reserve(static_cast<size_t>(limit));
+  keep.push_back(0U);
+  for (size_t i = 1U; i + 1U < in.waypoints.size(); ++i) {
+    if (in.mandatory[i]) {
+      keep.push_back(i);
+    }
+  }
+  keep.push_back(in.waypoints.size() - 1U);
+  std::sort(keep.begin(), keep.end());
+  keep.erase(std::unique(keep.begin(), keep.end()), keep.end());
+
+  if (static_cast<int>(keep.size()) < limit) {
+    for (int slot = 1; slot < limit - 1; ++slot) {
+      const size_t idx = static_cast<size_t>(std::lround(
+        static_cast<double>(slot) * static_cast<double>(n - 1) / static_cast<double>(limit - 1)));
+      if (std::find(keep.begin(), keep.end(), idx) == keep.end()) {
+        keep.push_back(idx);
+      }
+    }
+    std::sort(keep.begin(), keep.end());
+    keep.erase(std::unique(keep.begin(), keep.end()), keep.end());
+    while (static_cast<int>(keep.size()) > limit) {
+      auto removable = std::find_if(keep.rbegin(), keep.rend(), [&in](size_t idx) {
+        return idx != 0U && idx + 1U != in.waypoints.size() && !in.mandatory[idx];
+      });
+      if (removable == keep.rend()) {
+        break;
+      }
+      keep.erase(std::next(removable).base());
+    }
+  }
+
+  SparseWaypointBuild out;
+  for (size_t idx : keep) {
+    appendSparsePoint(out, in.waypoints, idx, in.mandatory[idx]);
+    out.source_indices.back() = in.source_indices[idx];
+  }
+  out.mandatory_corner_count = in.mandatory_corner_count;
+
+  if (is_line_free && dense_path.size() >= 2U) {
+    for (size_t i = 0U; i + 1U < out.waypoints.size();) {
+      if (is_line_free(out.waypoints[i], out.waypoints[i + 1U])) {
+        ++i;
+        continue;
+      }
+      const size_t start_idx = std::min(out.source_indices[i], out.source_indices[i + 1U]);
+      const size_t end_idx = std::max(out.source_indices[i], out.source_indices[i + 1U]);
+      size_t corner_idx = findCornerIndex(dense_path, start_idx, end_idx);
+      if (corner_idx <= start_idx || corner_idx >= end_idx) {
+        corner_idx = std::min(start_idx + 1U, end_idx);
+      }
+      if (corner_idx <= start_idx || corner_idx >= end_idx) {
+        ++i;
+        continue;
+      }
+      Eigen::Vector3d corner = dense_path[corner_idx];
+      corner.z() = 0.0;
+      out.waypoints.insert(out.waypoints.begin() + static_cast<std::ptrdiff_t>(i + 1U), corner);
+      out.source_indices.insert(out.source_indices.begin() + static_cast<std::ptrdiff_t>(i + 1U), corner_idx);
+      out.mandatory.insert(out.mandatory.begin() + static_cast<std::ptrdiff_t>(i + 1U), true);
+      ++out.mandatory_corner_count;
+      ++i;
+    }
+  }
+  return out;
+}
+
+SparseWaypointBuild getSparseWaypoints(const std::vector<Eigen::Vector3d> & path,
   double max_vel,
   double max_acc,
   bool goal_reached,
+  int max_count,
   const std::function<bool(const Eigen::Vector3d &, const Eigen::Vector3d &)> & is_line_free)
 {
-  std::vector<Eigen::Vector3d> sparse;
+  SparseWaypointBuild sparse;
   if (path.empty()) {
     return sparse;
   }
-  sparse.push_back(path.front());
+  appendSparsePoint(sparse, path, 0U, true);
   if (path.size() < 2U) {
     return sparse;
   }
   if (path.size() == 2U) {
-    sparse.push_back(path.back());
+    appendSparsePoint(sparse, path, path.size() - 1U, true);
     return sparse;
   }
 
@@ -174,7 +306,7 @@ std::vector<Eigen::Vector3d> getSparseWaypoints(const std::vector<Eigen::Vector3
   }
   const double total_length = accumulated_dist.back();
   if (!(std::isfinite(total_length) && total_length > 1e-3)) {
-    sparse.push_back(path.back());
+    appendSparsePoint(sparse, path, path.size() - 1U, true);
     return sparse;
   }
 
@@ -202,7 +334,7 @@ std::vector<Eigen::Vector3d> getSparseWaypoints(const std::vector<Eigen::Vector3
 
   const double t_total = t_acc + t_flat + std::max(0.0, t_dec);
   if (!(std::isfinite(t_total) && t_total > 1e-6)) {
-    sparse.push_back(path.back());
+    appendSparsePoint(sparse, path, path.size() - 1U, true);
     return sparse;
   }
 
@@ -218,28 +350,6 @@ std::vector<Eigen::Vector3d> getSparseWaypoints(const std::vector<Eigen::Vector3
     const size_t idx1 = static_cast<size_t>(std::distance(accumulated_dist.begin(), it));
     const size_t idx0 = idx1 - 1U;
     return ((s_clamped - accumulated_dist[idx0]) < (accumulated_dist[idx1] - s_clamped)) ? idx0 : idx1;
-  };
-
-  auto findCornerIndex = [&path](size_t start_idx, size_t end_idx) -> size_t {
-    const Eigen::Vector2d a = path[start_idx].head<2>();
-    const Eigen::Vector2d b = path[end_idx].head<2>();
-    const Eigen::Vector2d ab = b - a;
-    const double ab2 = ab.squaredNorm();
-    if (end_idx <= start_idx + 1U || ab2 <= 1e-12) {
-      return (start_idx + end_idx) / 2U;
-    }
-    double best_dist2 = -1.0;
-    size_t best_k = (start_idx + end_idx) / 2U;
-    for (size_t k = start_idx + 1U; k < end_idx; ++k) {
-      const Eigen::Vector2d p = path[k].head<2>();
-      const double ratio = clampValue((p - a).dot(ab) / ab2, 0.0, 1.0);
-      const double dist2 = (p - (a + ratio * ab)).squaredNorm();
-      if (dist2 > best_dist2) {
-        best_dist2 = dist2;
-        best_k = k;
-      }
-    }
-    return best_k;
   };
 
   const int n_segments = std::max(4, static_cast<int>(std::ceil(t_total / 0.5)));
@@ -268,64 +378,25 @@ std::vector<Eigen::Vector3d> getSparseWaypoints(const std::vector<Eigen::Vector3
     size_t guard = 0U;
     while (guard++ < 32U && target_idx > current_safe_idx) {
       if (!is_line_free || is_line_free(path[current_safe_idx], path[target_idx])) {
-        Eigen::Vector3d p = path[target_idx];
-        p.z() = 0.0;
-        if ((p - sparse.back()).head<2>().norm() > 1e-6) {
-          sparse.push_back(p);
-        }
+        appendSparsePoint(sparse, path, target_idx, target_idx == path.size() - 1U);
         current_safe_idx = target_idx;
         break;
       }
-      size_t corner_idx = findCornerIndex(current_safe_idx, target_idx);
+      size_t corner_idx = findCornerIndex(path, current_safe_idx, target_idx);
       if (corner_idx <= current_safe_idx || corner_idx >= target_idx) {
         corner_idx = current_safe_idx + 1U;
         if (corner_idx >= target_idx) {
           break;
         }
       }
-      Eigen::Vector3d corner = path[corner_idx];
-      corner.z() = 0.0;
-      if ((corner - sparse.back()).head<2>().norm() > 1e-6) {
-        sparse.push_back(corner);
-      }
+      appendSparsePoint(sparse, path, corner_idx, true);
       current_safe_idx = corner_idx;
     }
   }
-  if ((path.back() - sparse.back()).head<2>().norm() > 1e-6) {
-    Eigen::Vector3d goal = path.back();
-    goal.z() = 0.0;
-    sparse.push_back(goal);
+  if ((path.back() - sparse.waypoints.back()).head<2>().norm() > 1e-6) {
+    appendSparsePoint(sparse, path, path.size() - 1U, true);
   }
-  return sparse;
-}
-
-std::vector<Eigen::Vector3d> limitSparseWaypoints(const std::vector<Eigen::Vector3d> & path, int max_count)
-{
-  const int n = static_cast<int>(path.size());
-  const int limit = std::max(2, max_count);
-  if (n <= limit) {
-    return path;
-  }
-
-  std::vector<Eigen::Vector3d> limited;
-  limited.reserve(static_cast<size_t>(limit));
-  int last_idx = -1;
-  for (int i = 0; i < limit; ++i) {
-    int idx = static_cast<int>(std::lround(static_cast<double>(i) * static_cast<double>(n - 1) /
-      static_cast<double>(limit - 1)));
-    idx = clampValue(idx, 0, n - 1);
-    if (idx <= last_idx && last_idx + 1 < n) {
-      idx = last_idx + 1;
-    }
-    if (idx >= n) {
-      idx = n - 1;
-    }
-    limited.push_back(path[static_cast<size_t>(idx)]);
-    last_idx = idx;
-  }
-  limited.front() = path.front();
-  limited.back() = path.back();
-  return limited;
+  return limitSparseWaypoints(sparse, path, max_count, is_line_free);
 }
 
 }  // namespace
@@ -415,8 +486,6 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     return finish();
   }
 
-  const Eigen::Vector3d goal =
-    request.goal.allFinite() ? request.goal : Eigen::Vector3d(request.guide_path.back().x(), request.guide_path.back().y(), 0.0);
   auto stage_start = Clock::now();
   result.dense_path = extractLocalPath(request.guide_path, request.current.position);
   result.timing_ms["extract_local_path_ms"] = elapsedMs(stage_start);
@@ -424,10 +493,12 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     result.failure_reason = "LOCAL_PATH_FAILED";
     return finish();
   }
-  const bool local_end_is_goal = (goal - result.dense_path.back()).head<2>().norm() <= config_.traj_goal_tolerance;
+  const bool local_end_is_goal =
+    request.has_terminal_goal && request.terminal_goal.allFinite() &&
+    (request.terminal_goal - result.dense_path.back()).head<2>().norm() <= config_.traj_goal_tolerance;
+  result.local_end_is_goal = local_end_is_goal;
   stage_start = Clock::now();
-  result.sparse_waypoints = sparsifyPath(result.dense_path, local_end_is_goal);
-  result.sparse_waypoints = limitSparseWaypoints(result.sparse_waypoints, config_.max_sparse_waypoints);
+  result.sparse_waypoints = sparsifyPath(result.dense_path, local_end_is_goal, &result.mandatory_corner_count);
   result.timing_ms["sparsify_path_ms"] = elapsedMs(stage_start);
   if (result.sparse_waypoints.size() < 2U) {
     result.failure_reason = "SPARSIFY_FAILED";
@@ -435,26 +506,9 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   }
 
   stage_start = Clock::now();
-  result.planning_state = determinePlanningState(request.current, result.sparse_waypoints, request.now);
-  double hot_sample_t = 0.0;
-  super_utils::vec_Vec3f shifted_waypoints;
-  super_utils::VecDf shifted_durations;
-  bool has_shifted_seed = false;
-  if (result.planning_state == PlanningState::kHotStart) {
-    hot_sample_t = request.now - last_traj_.start_WT;
-    prepareHotStart(request.current, hot_sample_t, result.start_state);
-    geometry_utils::Trajectory remain;
-    const double total = last_traj_.getTotalDuration();
-    if (std::isfinite(hot_sample_t) && hot_sample_t > 0.0 && total > hot_sample_t + 1e-3 &&
-        last_traj_.getPartialTrajectoryByTime(hot_sample_t, total, remain)) {
-      shifted_waypoints = remain.getWaypoints();
-      shifted_durations = remain.getDurations();
-      has_shifted_seed = (!shifted_waypoints.empty() && shifted_durations.size() > 0);
-    }
-  } else {
-    prepareColdStart(request.current, result.start_state);
-    optimizer_->setInitPsAndTs(super_utils::vec_Vec3f{}, super_utils::VecDf{});
-  }
+  result.planning_state = PlanningState::kColdStart;
+  prepareColdStart(request.current, result.start_state);
+  optimizer_->setInitPsAndTs(super_utils::vec_Vec3f{}, super_utils::VecDf{});
 
   if (safety_checker_) {
     Eigen::Vector3d start_pos = result.start_state.col(0);
@@ -465,8 +519,7 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
 
   result.end_state.setZero();
   result.end_state.col(0) = result.sparse_waypoints.back();
-  const double dist_to_goal = (result.end_state.col(0) - goal).head<2>().norm();
-  if (dist_to_goal > 1.0) {
+  if (!local_end_is_goal) {
     Eigen::Vector3d tangent = Eigen::Vector3d::UnitX();
     if (result.sparse_waypoints.size() >= 2U) {
       tangent = result.sparse_waypoints.back() - result.sparse_waypoints[result.sparse_waypoints.size() - 2U];
@@ -480,7 +533,9 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     }
     const double v_curr = std::max(0.0, result.start_state.col(1).head<2>().norm());
     const double amax = std::max(0.0, config_.optimizer.max_acc);
-    const double v_max_kinematic = std::sqrt(std::max(0.0, v_curr * v_curr + 2.0 * amax * dist_to_goal));
+    const double last_seg_len =
+      (result.sparse_waypoints.back() - result.sparse_waypoints[result.sparse_waypoints.size() - 2U]).head<2>().norm();
+    const double v_max_kinematic = std::sqrt(std::max(0.0, v_curr * v_curr + 2.0 * amax * last_seg_len));
     double local_end_vmax = config_.optimizer.max_vel;
     if (result.sparse_waypoints.size() >= 3U) {
       local_end_vmax = limitLocalVel(result.sparse_waypoints,
@@ -492,7 +547,7 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
         config_.optimizer.decay_power);
     }
     result.end_state.col(1) =
-      tangent * std::min({config_.optimizer.max_vel, v_max_kinematic, dist_to_goal, local_end_vmax});
+      tangent * std::min({config_.optimizer.max_vel, v_max_kinematic, local_end_vmax});
   }
 
   while (result.sparse_waypoints.size() > 2U &&
@@ -508,10 +563,10 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   allocatePathTime(result.sparse_waypoints,
     result.start_state,
     local_end_is_goal,
-    result.planning_state,
-    has_shifted_seed,
-    shifted_waypoints,
-    shifted_durations,
+    PlanningState::kColdStart,
+    false,
+    super_utils::vec_Vec3f{},
+    super_utils::VecDf{},
     result.initial_points,
     result.initial_times,
     result.local_vmaxs);
@@ -553,12 +608,6 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   }
   result.timing_ms["yaw_ms"] = elapsedMs(stage_start);
 
-  last_traj_ = result.trajectory;
-  last_traj_.start_WT = request.now;
-  last_yaw_traj_ = result.yaw_trajectory;
-  last_yaw_traj_.start_WT = request.now;
-  has_last_traj_ = true;
-  has_last_yaw_traj_ = true;
   result.trajectory.start_WT = request.now;
   result.yaw_trajectory.start_WT = request.now;
   stage_start = Clock::now();
@@ -608,13 +657,18 @@ std::vector<Eigen::Vector3d> MincoPipeline::extractLocalPath(
 }
 
 std::vector<Eigen::Vector3d> MincoPipeline::sparsifyPath(
-  const std::vector<Eigen::Vector3d> & dense_path, bool local_end_is_goal) const
+  const std::vector<Eigen::Vector3d> & dense_path, bool local_end_is_goal, int * mandatory_corner_count) const
 {
-  return getSparseWaypoints(dense_path,
+  const auto build = getSparseWaypoints(dense_path,
     config_.optimizer.max_vel,
     config_.optimizer.max_acc,
     local_end_is_goal,
+    config_.max_sparse_waypoints,
     [this](const Eigen::Vector3d & a, const Eigen::Vector3d & b) { return isLineFree(a, b); });
+  if (mandatory_corner_count) {
+    *mandatory_corner_count = build.mandatory_corner_count;
+  }
+  return build.waypoints;
 }
 
 bool MincoPipeline::isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d & p2) const
@@ -825,26 +879,15 @@ bool MincoPipeline::optimizeYaw(const Eigen::Matrix3d & start_state,
   double goal_yaw,
   double now) const
 {
+  (void)state;
+  (void)now;
   if (!config_.enable_yaw_opt || !yaw_optimizer_) {
     return false;
   }
   Eigen::Vector4d init_yaw_state = Eigen::Vector4d::Zero();
   Eigen::Vector4d goal_yaw_state = Eigen::Vector4d::Zero();
-  bool use_hot_seed = false;
-  if (state == PlanningState::kHotStart && has_last_yaw_traj_ && has_last_traj_) {
-    const double t_dur = now - last_traj_.start_WT;
-    const double yaw_dur = last_yaw_traj_.getTotalDuration();
-    if (std::isfinite(t_dur) && std::isfinite(yaw_dur) && yaw_dur > 1e-6 && t_dur >= 0.0) {
-      const double sample_t = std::min(t_dur, yaw_dur);
-      init_yaw_state(0) = last_yaw_traj_.getPos(sample_t)(0);
-      init_yaw_state(1) = last_yaw_traj_.getVel(sample_t)(0);
-      use_hot_seed = true;
-    }
-  }
-  if (!use_hot_seed) {
-    init_yaw_state(0) =
-      start_state.col(1).head<2>().norm() > 0.1 ? std::atan2(start_state.col(1).y(), start_state.col(1).x()) : current_yaw;
-  }
+  init_yaw_state(0) =
+    start_state.col(1).head<2>().norm() > 0.1 ? std::atan2(start_state.col(1).y(), start_state.col(1).x()) : current_yaw;
   if (!std::isfinite(goal_yaw)) {
     goal_yaw = init_yaw_state(0);
   }

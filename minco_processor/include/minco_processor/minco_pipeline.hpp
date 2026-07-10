@@ -54,7 +54,8 @@ public:
   {
     std::vector<Eigen::Vector3d> guide_path;
     State current;
-    Eigen::Vector3d goal{Eigen::Vector3d::Zero()};
+    bool has_terminal_goal{false};
+    Eigen::Vector3d terminal_goal{Eigen::Vector3d::Zero()};
     double goal_yaw{std::numeric_limits<double>::quiet_NaN()};
     double now{0.0};
   };
@@ -92,6 +93,8 @@ public:
     std::map<std::string, double> timing_ms;
     int dense_path_size{0};
     int sparse_waypoint_size{0};
+    bool local_end_is_goal{false};
+    int mandatory_corner_count{0};
     int optimizer_iteration_count{0};
   };
 
@@ -108,7 +111,7 @@ private:
   std::vector<Eigen::Vector3d> extractLocalPath(
     const std::vector<Eigen::Vector3d> & guide_path, const Eigen::Vector3d & current_position) const;
   std::vector<Eigen::Vector3d> sparsifyPath(
-    const std::vector<Eigen::Vector3d> & dense_path, bool local_end_is_goal) const;
+    const std::vector<Eigen::Vector3d> & dense_path, bool local_end_is_goal, int * mandatory_corner_count) const;
   bool isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d & p2) const;
 
   PlanningState determinePlanningState(

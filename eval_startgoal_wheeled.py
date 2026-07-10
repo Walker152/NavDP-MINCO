@@ -22,7 +22,6 @@ parser.add_argument("--enable_minco", action="store_true")
 parser.add_argument("--minco_top_k", type=int, default=4)
 parser.add_argument("--minco_safe_dist", type=float, default=0.30)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
-parser.add_argument("--minco_fallback_to_raw", action="store_true", default=True)
 parser.add_argument("--esdf_resolution", type=float, default=0.05)
 parser.add_argument("--esdf_padding", type=float, default=1.0)
 parser.add_argument("--esdf_force_rebuild", action="store_true")
@@ -119,6 +118,7 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
             batch_all_points_world = np.array(batch_all_points_world)
 
             batch_optimal_points_world = []
+            minco_stop_required = False
             used_minco = minco_adapter is not None and minco_adapter.enabled
             if used_minco:
                 states = []
@@ -143,12 +143,16 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     if result["success"] and result["waypoints"] is not None and len(result["waypoints"]) >= 2:
                         trajectory_points_world = np.asarray(result["waypoints"])[:, :2]
                     else:
-                        trajectory_points_world = np.asarray(raw_top1_world[idx])[:, :2]
+                        minco_stop_required = True
+                        print(f"[NavDP-Minco] env={idx} status=MINCO_STOP reason={result.get('failure_reason', '')}")
+                        continue
                     batch_optimal_points_world.append(trajectory_points_world)
                     mpc = MPC_Controller(trajectory_points_world,
+                                         trajectory_samples=result.get("samples"),
                                          desired_v=args_cli.speed,
                                          v_max=args_cli.speed,
-                                         w_max=args_cli.speed)
+                                         w_max=args_cli.speed,
+                                         allow_geometric_fallback=False)
             else:
                 for idx in range(len(raw_top1_world)):
                     trajectory_points_world = np.asarray(raw_top1_world[idx])[:, :2]
@@ -157,7 +161,11 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                                          desired_v=args_cli.speed,
                                          v_max=args_cli.speed,
                                          w_max=args_cli.speed)
-            batch_optimal_points_world = np.array(batch_optimal_points_world, dtype=object if used_minco else None)
+            if used_minco and minco_stop_required:
+                batch_optimal_points_world = None
+                mpc = None
+            else:
+                batch_optimal_points_world = np.array(batch_optimal_points_world, dtype=object if used_minco else None)
             batch_all_points_world_vis = batch_all_points_world[:, :, :, :2] if batch_all_points_world.ndim == 4 else batch_all_points_world
 
             # Update shared state
@@ -242,7 +250,6 @@ if args_cli.enable_minco:
         sample_dt=args_cli.minco_sample_dt,
         speed=args_cli.speed,
         enable=True,
-        fallback_to_raw=args_cli.minco_fallback_to_raw,
     )
 
 planning_thread_obj = threading.Thread(target=planning_thread, args=(env, camera_intrinsic, minco_adapter))

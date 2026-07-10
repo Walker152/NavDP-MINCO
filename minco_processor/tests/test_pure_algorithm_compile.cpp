@@ -52,9 +52,18 @@ int main()
   request.guide_path = {
     Eigen::Vector3d::Zero(), Eigen::Vector3d(0.5, 0.0, 0.0), Eigen::Vector3d::UnitX()};
   request.current.position = Eigen::Vector3d::Zero();
-  request.goal = Eigen::Vector3d::UnitX();
   request.now = 1.0;
+  const auto local_result = pipeline.optimize(request);
+  if (!local_result.success || local_result.local_end_is_goal ||
+      local_result.end_state.col(1).head<2>().norm() <= 1e-6) {
+    return 8;
+  }
+  request.has_terminal_goal = true;
+  request.terminal_goal = Eigen::Vector3d::UnitX();
   const auto result = pipeline.optimize(request);
+  if (!result.local_end_is_goal || result.end_state.col(1).head<2>().norm() > 1e-6) {
+    return 9;
+  }
 
   (void)optimizer;
   if (checker.getDistance(Eigen::Vector3d::Zero()) != 0.0) {

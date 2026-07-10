@@ -15,7 +15,7 @@ class NavDPMincoAdapter:
         max_acc=4.0,
         max_iterations=64,
         enable=True,
-        fallback_to_raw=True,
+        fallback_to_raw=False,
     ):
         self.esdf = esdf
         self.safe_dist = float(safe_dist)
@@ -26,7 +26,7 @@ class NavDPMincoAdapter:
         self.max_acc = float(max_acc)
         self.max_iterations = int(max_iterations)
         self.enabled = bool(enable)
-        self.fallback_to_raw = bool(fallback_to_raw)
+        self.fallback_to_raw = False
         self.processor = None
         if self.enabled:
             import minco_processor
@@ -53,11 +53,14 @@ class NavDPMincoAdapter:
         critic_values,
         states,
         raw_top1_world,
+        terminal_goals_world=None,
     ):
         candidates_world = np.asarray(candidates_world, dtype=object)
         critic_values = np.asarray(critic_values)
         raw_top1_world = np.asarray(raw_top1_world, dtype=object)
         batch_size = len(candidates_world)
+        if terminal_goals_world is None:
+            terminal_goals_world = [None for _ in range(batch_size)]
         results = []
         for env_idx in range(batch_size):
             start_time = time.perf_counter()
@@ -72,6 +75,7 @@ class NavDPMincoAdapter:
                     continue
                 candidate_call_start = time.perf_counter()
                 try:
+                    terminal_goal = self._as_terminal_goal(terminal_goals_world[env_idx])
                     result = self.processor.optimize(
                         guide_path=candidate,
                         position=np.asarray(states[env_idx].get("position", np.zeros(3)), dtype=np.float64),
@@ -79,6 +83,7 @@ class NavDPMincoAdapter:
                         acceleration=np.asarray(states[env_idx].get("acceleration", np.zeros(3)), dtype=np.float64),
                         yaw=float(states[env_idx].get("yaw", 0.0)),
                         yaw_rate=float(states[env_idx].get("yaw_rate", 0.0)),
+                        terminal_goal=terminal_goal,
                     )
                 except Exception as exc:
                     candidate_call_ms = (time.perf_counter() - candidate_call_start) * 1000.0
@@ -103,6 +108,9 @@ class NavDPMincoAdapter:
                     "dense_path_size": int(result.get("dense_path_size", 0)),
                     "sparse_waypoint_size": int(result.get("sparse_waypoint_size", 0)),
                     "optimizer_iteration_count": int(result.get("optimizer_iteration_count", 0)),
+                    "mandatory_corner_count": int(result.get("mandatory_corner_count", 0)),
+                    "planning_state": str(result.get("planning_state", "")),
+                    "local_end_is_goal": bool(result.get("local_end_is_goal", False)),
                     "success": bool(result.get("success", False)),
                     "objective": float(result.get("objective", np.inf)),
                     "min_esdf": float(result.get("min_esdf", np.nan)),
@@ -139,13 +147,13 @@ class NavDPMincoAdapter:
                     if samples_np.ndim == 2 and samples_np.shape[1] >= 6:
                         speed_profile = np.linalg.norm(samples_np[:, 4:6], axis=1)
 
-                control_points = best.get("control_points", best.get("sparse_waypoints", None))
-                if control_points is not None:
-                    control_points = np.asarray(control_points, dtype=np.float64)
-                    if control_points.ndim == 2 and control_points.shape[1] >= 2:
-                        control_points = control_points[:, :2]
+                sparse_waypoints = best.get("sparse_waypoints", None)
+                if sparse_waypoints is not None:
+                    sparse_waypoints = np.asarray(sparse_waypoints, dtype=np.float64)
+                    if sparse_waypoints.ndim == 2 and sparse_waypoints.shape[1] >= 2:
+                        sparse_waypoints = sparse_waypoints[:, :2]
                     else:
-                        control_points = None
+                        sparse_waypoints = None
 
                 selected_candidate = np.asarray(
                     candidates_world[env_idx][best["selected_index"]],
@@ -173,8 +181,10 @@ class NavDPMincoAdapter:
                     "safe_dist": self.safe_dist,
                     "failure_reason": best.get("failure_reason", "NONE"),
                     "fallback": False,
+                    "fallback_mode": "NONE",
+                    "status": "MINCO_OK",
                     "time_ms": elapsed_ms,
-                    "control_points": control_points,
+                    "sparse_waypoints": sparse_waypoints,
                     "selected_candidate": selected_candidate,
                     "raw_top1": raw_top1,
                     "speed_profile": speed_profile,
@@ -185,13 +195,21 @@ class NavDPMincoAdapter:
                     "timing_ms": dict(best.get("timing_ms", {})),
                     "dense_path_size": int(best.get("dense_path_size", 0)),
                     "sparse_waypoint_size": int(best.get("sparse_waypoint_size", 0)),
+                    "mandatory_corner_count": int(best.get("mandatory_corner_count", 0)),
+                    "planning_state": str(best.get("planning_state", "")),
+                    "local_end_is_goal": bool(best.get("local_end_is_goal", False)),
                     "optimizer_iteration_count": int(best.get("optimizer_iteration_count", 0)),
                 }
                 print(
                     "[NavDP-Minco] "
-                    f"env={env_idx} success=1 fallback=0 selected_idx={result['selected_index']} "
+                    f"env={env_idx} status=MINCO_OK selected_idx={result['selected_index']} "
+                    f"planning_state={result['planning_state']} local_end_is_goal={int(result['local_end_is_goal'])} "
                     f"objective={result['objective']:.4f} min_esdf={result['min_esdf']:.4f} "
                     f"py_esdf={result['py_min_esdf']:.4f} "
+                    f"raw_path_size={len(raw_top1) if raw_top1 is not None else 0} "
+                    f"sparse_waypoint_size={result['sparse_waypoint_size']} "
+                    f"mandatory_corner_count={result['mandatory_corner_count']} "
+                    f"trajectory_sample_size={len(samples_np) if samples_np is not None else 0} "
                     f"adapter_ms={elapsed_ms:.2f} cpp_ms={result['selected_cpp_optimize_time_ms']:.2f}"
                 )
             else:
@@ -204,7 +222,7 @@ class NavDPMincoAdapter:
         waypoints = np.asarray(raw_top1_world, dtype=np.float64)
         result = {
             "success": False,
-            "waypoints": waypoints[:, :2] if waypoints.ndim == 2 else waypoints,
+            "waypoints": None,
             "samples": None,
             "selected_index": -1,
             "objective": float("inf"),
@@ -212,9 +230,11 @@ class NavDPMincoAdapter:
             "py_min_esdf": float("nan"),
             "safe_dist": self.safe_dist,
             "failure_reason": reason,
-            "fallback": self.fallback_to_raw,
+            "fallback": False,
+            "fallback_mode": "HOLD_LAST_OR_STOP",
+            "status": "MINCO_FAIL",
             "time_ms": elapsed_ms,
-            "control_points": None,
+            "sparse_waypoints": None,
             "selected_candidate": None,
             "raw_top1": waypoints[:, :2] if waypoints.ndim == 2 and waypoints.shape[1] >= 2 else None,
             "speed_profile": None,
@@ -225,10 +245,13 @@ class NavDPMincoAdapter:
             "timing_ms": {},
             "dense_path_size": 0,
             "sparse_waypoint_size": 0,
+            "mandatory_corner_count": 0,
+            "planning_state": "COLD_START",
+            "local_end_is_goal": False,
             "optimizer_iteration_count": 0,
         }
         print(
-            f"[NavDP-Minco] env={env_idx} success=0 fallback=1 "
+            f"[NavDP-Minco] env={env_idx} status=MINCO_FAIL fallback_mode=HOLD_LAST_OR_STOP "
             f"adapter_ms={elapsed_ms:.2f} reason={reason}"
         )
         return result
@@ -281,6 +304,17 @@ class NavDPMincoAdapter:
         if not np.isfinite(length) or length < 1e-3:
             return None
         return candidate
+
+    @staticmethod
+    def _as_terminal_goal(goal):
+        if goal is None:
+            return None
+        goal = np.asarray(goal, dtype=np.float64).reshape(-1)
+        if goal.size < 3 or not np.all(np.isfinite(goal[:3])):
+            return None
+        out = goal[:3].copy()
+        out[2] = 0.0
+        return out
 
     @staticmethod
     def _is_better(candidate, current):

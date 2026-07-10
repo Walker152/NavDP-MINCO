@@ -56,7 +56,8 @@ public:
     const Eigen::Vector3d & velocity,
     const Eigen::Vector3d & acceleration,
     double yaw,
-    double yaw_rate)
+    double yaw_rate,
+    py::object terminal_goal)
   {
     (void)yaw_rate;
     const auto t0 = std::chrono::steady_clock::now();
@@ -75,8 +76,13 @@ public:
     request.current.velocity = velocity;
     request.current.acceleration = acceleration;
     request.current.yaw = yaw;
-    if (!request.guide_path.empty()) {
-      request.goal = request.guide_path.back();
+    if (!terminal_goal.is_none()) {
+      Eigen::VectorXd goal_vec = terminal_goal.cast<Eigen::VectorXd>();
+      if (goal_vec.size() >= 3 && goal_vec.head<3>().allFinite()) {
+        request.has_terminal_goal = true;
+        request.terminal_goal = goal_vec.head<3>();
+        request.terminal_goal.z() = 0.0;
+      }
     }
     request.now = std::chrono::duration<double>(t0.time_since_epoch()).count();
 
@@ -144,6 +150,10 @@ private:
     out["timing_ms"] = result.timing_ms;
     out["dense_path_size"] = result.dense_path_size;
     out["sparse_waypoint_size"] = result.sparse_waypoint_size;
+    out["mandatory_corner_count"] = result.mandatory_corner_count;
+    out["local_end_is_goal"] = result.local_end_is_goal;
+    out["planning_state"] = result.planning_state == minco_processor::MincoPipeline::PlanningState::kColdStart ?
+      "COLD_START" : "HOT_START";
     out["optimizer_iteration_count"] = result.optimizer_iteration_count;
 
     Eigen::MatrixXd sparse_waypoints(static_cast<int>(result.sparse_waypoints.size()), 3);
@@ -151,7 +161,6 @@ private:
       sparse_waypoints.row(i) = result.sparse_waypoints[static_cast<size_t>(i)].transpose();
     }
     out["sparse_waypoints"] = sparse_waypoints;
-    out["control_points"] = sparse_waypoints;
     return out;
   }
 
@@ -179,5 +188,6 @@ PYBIND11_MODULE(_minco_processor, m)
       py::arg("velocity"),
       py::arg("acceleration"),
       py::arg("yaw"),
-      py::arg("yaw_rate"));
+      py::arg("yaw_rate"),
+      py::arg("terminal_goal") = py::none());
 }

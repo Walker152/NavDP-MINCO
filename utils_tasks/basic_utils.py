@@ -31,10 +31,13 @@ class PlanningOutput:
 
     raw_top1_world: Optional[np.ndarray] = None
     selected_candidate_world: Optional[np.ndarray] = None
-    minco_control_points_world: Optional[np.ndarray] = None
+    minco_sparse_waypoints_world: Optional[np.ndarray] = None
     minco_samples: Optional[List[np.ndarray]] = None
     minco_speed_profile: Optional[List[np.ndarray]] = None
     minco_info: Optional[List[dict]] = None
+    per_env_plan_id: Optional[np.ndarray] = None
+    stop_required: Optional[np.ndarray] = None
+    minco_status: Optional[List[str]] = None
     planning_timing: Optional[dict] = None
 
     sub_pointgoal_pd: Optional[np.ndarray] = None

@@ -15,17 +15,18 @@ parser.add_argument(
 parser.add_argument(
     "--num_episodes", type=int, default=100)
 parser.add_argument(
-    "--speed", type=float, default=1.5)
+    "--speed", type=float, default=1.0)
+parser.add_argument("--mpc_max_yaw_rate", type=float, default=1.0)
+parser.add_argument("--mpc_max_yaw_acc", type=float, default=2.0)
 parser.add_argument(
     "--port", type=int, default=8888)
 parser.add_argument("--enable_minco", action="store_true")
 parser.add_argument("--minco_top_k", type=int, default=4)
 parser.add_argument("--minco_safe_dist", type=float, default=0.30)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
-parser.add_argument("--minco_max_vel", type=float, default=2.0)
-parser.add_argument("--minco_max_acc", type=float, default=4.0)
+parser.add_argument("--minco_max_vel", type=float, default=1.5)
+parser.add_argument("--minco_max_acc", type=float, default=1.0)
 parser.add_argument("--minco_max_iterations", type=int, default=64)
-parser.add_argument("--minco_fallback_to_raw", action="store_true", default=True)
 parser.add_argument("--esdf_resolution", type=float, default=0.05)
 parser.add_argument("--esdf_padding", type=float, default=1.0)
 parser.add_argument("--esdf_force_rebuild", action="store_true")
@@ -92,6 +93,8 @@ stop_event = threading.Event()
 vis_manager = [VisualizationManager(history_size=5) for i in range(args_cli.num_envs)]
 mpc = [None for _ in range(args_cli.num_envs)]
 last_applied_plan_id = [-1 for _ in range(args_cli.num_envs)]
+per_env_plan_id = np.zeros(args_cli.num_envs, dtype=np.int64)
+minco_hold_cache = [None for _ in range(args_cli.num_envs)]
 episode_generation = np.zeros(args_cli.num_envs, dtype=np.int64)
 use_robot_base_frame = bool(args_cli.use_robot_base_frame)
 
@@ -115,6 +118,50 @@ def query_esdf_polyline(esdf, points):
         if 0 <= mx < distance.shape[1] and 0 <= my < distance.shape[0]:
             vals.append(float(distance[my, mx]))
     return float(np.min(vals)) if vals else float("nan")
+
+def transform_navdp_local_point(point_xy, env_idx, camera_pos, camera_rot, robot_pos_w=None):
+    point_local = np.array([point_xy[0], point_xy[1], 0.0], dtype=np.float64)
+    point_world = camera_pos[env_idx] + camera_rot[env_idx] @ point_local
+    if use_robot_base_frame and robot_pos_w is not None:
+        point_world[:2] += robot_pos_w[env_idx, :2] - camera_pos[env_idx, :2]
+    point_world[2] = 0.0
+    return point_world
+
+def transform_navdp_local_traj(traj_local, env_idx, camera_pos, camera_rot, robot_pos_w=None):
+    return np.array(
+        [
+            transform_navdp_local_point(point, env_idx, camera_pos, camera_rot, robot_pos_w)
+            for point in traj_local
+        ],
+        dtype=np.float64,
+    )
+
+def minco_cache_entry(result, episode_gen):
+    samples = result.get("samples")
+    samples_np = np.asarray(samples, dtype=np.float64) if samples is not None else None
+    if samples_np is None or samples_np.ndim != 2 or samples_np.shape[0] < 2:
+        return None
+    duration = float(samples_np[-1, 0] - samples_np[0, 0])
+    if not np.isfinite(duration) or duration <= 0.0:
+        return None
+    return {
+        "waypoints": np.asarray(result["waypoints"], dtype=np.float64).copy(),
+        "samples": samples_np.copy(),
+        "speed_profile": None if result.get("speed_profile") is None else np.asarray(result["speed_profile"], dtype=np.float64).copy(),
+        "selected_candidate": None if result.get("selected_candidate") is None else np.asarray(result["selected_candidate"], dtype=np.float64).copy(),
+        "sparse_waypoints": None if result.get("sparse_waypoints") is None else np.asarray(result["sparse_waypoints"], dtype=np.float64).copy(),
+        "published_time": time.monotonic(),
+        "episode_generation": int(episode_gen),
+        "duration": duration,
+        "info": dict(result),
+    }
+
+def is_minco_cache_valid(cache, episode_gen):
+    if cache is None or int(cache.get("episode_generation", -1)) != int(episode_gen):
+        return False
+    elapsed = time.monotonic() - float(cache.get("published_time", 0.0))
+    duration = float(cache.get("duration", 0.0))
+    return np.isfinite(elapsed) and np.isfinite(duration) and elapsed <= duration
 
 def planning_thread(env, camera_intrinsic, minco_adapter=None):
     """Thread function that continuously plans trajectories"""
@@ -154,43 +201,39 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
             with planning_timer.section("raw_transform_ms"):
                 raw_top1_world = []
                 for idx in range(trajectory_points_camera.shape[0]):
-                    trajectory_points_world = []
-                    for i, point in enumerate(trajectory_points_camera[idx]):
-                        if i < 0:
-                            continue
-                        point_local = np.array([point[0], point[1], 0.0])
-                        point_world = camera_pos[idx] + camera_rot[idx] @ point_local
-                        if use_robot_base_frame and robot_pos_w is not None:
-                            point_world[:2] += robot_pos_w[idx, :2] - camera_pos[idx, :2]
-                        trajectory_points_world.append(point_world[:2])
-                    trajectory_points_world = np.array(trajectory_points_world)
+                    trajectory_points_world = transform_navdp_local_traj(
+                        trajectory_points_camera[idx], idx, camera_pos, camera_rot, robot_pos_w
+                    )[:, :2]
                     raw_top1_world.append(trajectory_points_world)
                 raw_top1_world = np.array(raw_top1_world, dtype=object)
 
             with planning_timer.section("candidate_transform_ms"):
                 batch_all_points_world = []
+                terminal_goals_world = []
                 for idx in range(all_trajectories_camera.shape[0]):
+                    terminal_goals_world.append(
+                        transform_navdp_local_point(goal[idx], idx, camera_pos, camera_rot, robot_pos_w)
+                    )
                     # Transform all trajectories
                     all_trajectories_world = []
                     for traj_camera in all_trajectories_camera[idx]:
-                        traj_world = []
-                        for point in traj_camera:
-                            point_local = np.array([point[0], point[1], 0.0])
-                            point_world = camera_pos[idx] + camera_rot[idx] @ point_local
-                            if use_robot_base_frame and robot_pos_w is not None:
-                                point_world[:2] += robot_pos_w[idx, :2] - camera_pos[idx, :2]
-                            traj_world.append(point_world[:3])
-                        all_trajectories_world.append(np.array(traj_world))
+                        all_trajectories_world.append(
+                            transform_navdp_local_traj(traj_camera, idx, camera_pos, camera_rot, robot_pos_w)
+                        )
                     batch_all_points_world.append(all_trajectories_world)
                 batch_all_points_world = np.array(batch_all_points_world, dtype=object)
+                terminal_goals_world = np.array(terminal_goals_world, dtype=object)
 
             batch_optimal_points_world = []
             batch_raw_top1_world = []
             batch_selected_candidate_world = []
-            batch_control_points_world = []
+            batch_sparse_waypoints_world = []
             batch_minco_samples = []
             batch_minco_speed_profile = []
             batch_minco_info = []
+            batch_stop_required = []
+            batch_minco_status = []
+            batch_per_env_plan_id = per_env_plan_id.copy()
             used_minco = minco_adapter is not None and minco_adapter.enabled
             with planning_timer.section("state_build_ms"):
                 states = []
@@ -223,6 +266,7 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         critic_values=all_values_camera,
                         states=states,
                         raw_top1_world=raw_top1_world,
+                        terminal_goals_world=terminal_goals_world,
                     )
                 if stop_event.is_set():
                     break
@@ -234,24 +278,72 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     for idx, result in enumerate(minco_results):
                         if result["success"] and result["waypoints"] is not None and len(result["waypoints"]) >= 2:
                             trajectory_points_world = np.asarray(result["waypoints"])[:, :2]
+                            cache = minco_cache_entry(result, input_episode_generation[idx])
+                            if cache is not None:
+                                minco_hold_cache[idx] = cache
+                                per_env_plan_id[idx] += 1
+                                batch_per_env_plan_id[idx] = per_env_plan_id[idx]
+                            status = "MINCO_OK"
+                            stop_required = False
+                            info = dict(result)
+                            info["status"] = status
                         else:
-                            trajectory_points_world = np.asarray(raw_top1_world[idx])[:, :2]
+                            if is_minco_cache_valid(minco_hold_cache[idx], input_episode_generation[idx]):
+                                cache = minco_hold_cache[idx]
+                                trajectory_points_world = np.asarray(cache["waypoints"], dtype=np.float64)[:, :2]
+                                status = "MINCO_HOLD_LAST"
+                                stop_required = False
+                                info = dict(result)
+                                info.update({
+                                    "status": status,
+                                    "fallback_mode": "HOLD_LAST",
+                                    "waypoints": None,
+                                    "samples": None,
+                                    "selected_index": cache["info"].get("selected_index", -1),
+                                })
+                                print(f"[NavDP-Minco] env={idx} status=MINCO_HOLD_LAST reason={result.get('failure_reason', '')}")
+                            else:
+                                trajectory_points_world = None
+                                status = "MINCO_STOP"
+                                stop_required = True
+                                info = dict(result)
+                                info.update({
+                                    "status": status,
+                                    "fallback_mode": "STOP",
+                                    "waypoints": None,
+                                    "samples": None,
+                                })
+                                print(f"[NavDP-Minco] env={idx} status=MINCO_STOP reason={result.get('failure_reason', '')}")
                         batch_optimal_points_world.append(trajectory_points_world)
                         batch_raw_top1_world.append(result.get("raw_top1"))
-                        batch_selected_candidate_world.append(result.get("selected_candidate"))
-                        batch_control_points_world.append(result.get("control_points"))
-                        batch_minco_samples.append(result.get("samples"))
-                        batch_minco_speed_profile.append(result.get("speed_profile"))
-                        batch_minco_info.append(result)
+                        batch_selected_candidate_world.append(
+                            result.get("selected_candidate") if status != "MINCO_HOLD_LAST" else minco_hold_cache[idx].get("selected_candidate")
+                        )
+                        batch_sparse_waypoints_world.append(
+                            result.get("sparse_waypoints") if status == "MINCO_OK" else (
+                                minco_hold_cache[idx].get("sparse_waypoints") if status == "MINCO_HOLD_LAST" else None
+                            )
+                        )
+                        batch_minco_samples.append(result.get("samples") if status == "MINCO_OK" else None)
+                        batch_minco_speed_profile.append(
+                            result.get("speed_profile") if status == "MINCO_OK" else (
+                                minco_hold_cache[idx].get("speed_profile") if status == "MINCO_HOLD_LAST" else None
+                            )
+                        )
+                        batch_minco_info.append(info)
+                        batch_stop_required.append(stop_required)
+                        batch_minco_status.append(status)
                 else:
                     for idx in range(len(raw_top1_world)):
                         trajectory_points_world = np.asarray(raw_top1_world[idx])[:, :2]
                         batch_optimal_points_world.append(trajectory_points_world)
                         batch_raw_top1_world.append(trajectory_points_world)
                         batch_selected_candidate_world.append(None)
-                        batch_control_points_world.append(None)
+                        batch_sparse_waypoints_world.append(None)
                         batch_minco_samples.append(None)
                         batch_minco_speed_profile.append(None)
+                        batch_stop_required.append(False)
+                        batch_minco_status.append("RAW_NAVDP")
                         batch_minco_info.append({
                             "success": False,
                             "fallback": True,
@@ -284,10 +376,13 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                 planning_output.all_values_camera = all_values_camera
                 planning_output.raw_top1_world = np.array(batch_raw_top1_world, dtype=object)
                 planning_output.selected_candidate_world = np.array(batch_selected_candidate_world, dtype=object)
-                planning_output.minco_control_points_world = np.array(batch_control_points_world, dtype=object)
+                planning_output.minco_sparse_waypoints_world = np.array(batch_sparse_waypoints_world, dtype=object)
                 planning_output.minco_samples = batch_minco_samples
                 planning_output.minco_speed_profile = batch_minco_speed_profile
                 planning_output.minco_info = batch_minco_info
+                planning_output.per_env_plan_id = batch_per_env_plan_id.copy()
+                planning_output.stop_required = np.array(batch_stop_required, dtype=bool)
+                planning_output.minco_status = list(batch_minco_status)
                 planning_output.planning_timing = planning_timing
                 planning_output.is_planning = False
                 planning_output.planning_error = None
@@ -375,7 +470,6 @@ if args_cli.enable_minco:
         max_acc=args_cli.minco_max_acc,
         max_iterations=args_cli.minco_max_iterations,
         enable=True,
-        fallback_to_raw=args_cli.minco_fallback_to_raw,
     )
 
 planning_thread_obj = threading.Thread(target=planning_thread, args=(env, camera_intrinsic, minco_adapter))
@@ -415,8 +509,9 @@ try:
             robot_rot = R.from_quat(robot_quat_xyzw).as_matrix()
             robot_yaw_w = np.arctan2(robot_rot[:, 1, 0], robot_rot[:, 0, 0])
             robot_lin_vel_w_np = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :3].cpu().numpy().copy()
+            robot_lin_vel_w_xy = robot_lin_vel_w_np[:, :2]
             robot_ang_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy()
-            robot_vel_batch = compute_forward_velocity(robot_lin_vel_w_np, robot_yaw_w)
+            robot_vel_batch = compute_forward_velocity(robot_lin_vel_w_xy, robot_yaw_w)
 
             if frame_idx % max(1, args_cli.timing_log_interval) == 0:
                 offset_xy = camera_pos[0, :2] - robot_pos_w[0, :2]
@@ -459,10 +554,13 @@ try:
             current_all_values = None
             current_raw_top1 = None
             current_selected_candidate = None
-            current_control_points = None
+            current_sparse_guide_points = None
             current_minco_samples = None
             current_minco_speed_profile = None
             current_minco_info = None
+            current_per_env_plan_id = None
+            current_stop_required = None
+            current_minco_status = None
             current_planning_timing = None
             current_plan_id = -1
             current_episode_generation = None
@@ -479,13 +577,16 @@ try:
                     current_all_values = planning_output.all_values_camera.copy() if planning_output.all_values_camera is not None else None
                     current_raw_top1 = planning_output.raw_top1_world.copy() if planning_output.raw_top1_world is not None else None
                     current_selected_candidate = planning_output.selected_candidate_world.copy() if planning_output.selected_candidate_world is not None else None
-                    current_control_points = planning_output.minco_control_points_world.copy() if planning_output.minco_control_points_world is not None else None
+                    current_sparse_guide_points = planning_output.minco_sparse_waypoints_world.copy() if planning_output.minco_sparse_waypoints_world is not None else None
                     current_minco_samples = [
                         np.asarray(s, dtype=np.float64).copy() if s is not None else None
                         for s in planning_output.minco_samples
                     ] if planning_output.minco_samples is not None else None
                     current_minco_speed_profile = planning_output.minco_speed_profile
                     current_minco_info = [dict(info) for info in planning_output.minco_info] if planning_output.minco_info is not None else None
+                    current_per_env_plan_id = planning_output.per_env_plan_id.copy() if planning_output.per_env_plan_id is not None else None
+                    current_stop_required = planning_output.stop_required.copy() if planning_output.stop_required is not None else None
+                    current_minco_status = list(planning_output.minco_status) if planning_output.minco_status is not None else None
                     current_planning_timing = planning_output.planning_timing.copy() if planning_output.planning_timing is not None else None
         
             if current_trajectory is not None:
@@ -502,7 +603,31 @@ try:
                         action_list.append(np.zeros(2, dtype=np.float32))
                         continue
 
-                    if current_plan_id != last_applied_plan_id[i]:
+                    stop_required_i = (
+                        bool(current_stop_required[i])
+                        if current_stop_required is not None and i < len(current_stop_required)
+                        else False
+                    )
+                    env_plan_id = (
+                        int(current_per_env_plan_id[i])
+                        if current_per_env_plan_id is not None and i < len(current_per_env_plan_id)
+                        else int(current_plan_id)
+                    )
+                    status_i = (
+                        current_minco_status[i]
+                        if current_minco_status is not None and i < len(current_minco_status)
+                        else ("MINCO_OK" if args_cli.enable_minco else "RAW_NAVDP")
+                    )
+
+                    if stop_required_i:
+                        if mpc[i] is not None:
+                            mpc[i].reset()
+                        action_list.append(np.zeros(2, dtype=np.float32))
+                        if frame_idx % max(1, args_cli.timing_log_interval) == 0:
+                            print(f"[ControlRef] env={i} status=MINCO_STOP cmd_v=0.00 cmd_w=0.00")
+                        continue
+
+                    if env_plan_id != last_applied_plan_id[i]:
                         path_i = np.asarray(current_trajectory[i], dtype=np.float64)
                         samples_i = (
                             current_minco_samples[i]
@@ -510,21 +635,29 @@ try:
                             else None
                         )
                         if mpc[i] is None:
+                            control_dt = float(env.unwrapped.step_dt)
                             mpc[i] = MPC_Controller(
                                 path_i,
                                 trajectory_samples=samples_i,
                                 desired_v=args_cli.speed,
                                 v_max=args_cli.speed,
-                                w_max=args_cli.speed,
+                                w_max=args_cli.mpc_max_yaw_rate,
                                 max_acc=args_cli.minco_max_acc,
+                                max_yaw_acc=args_cli.mpc_max_yaw_acc,
+                                T=control_dt,
+                                allow_geometric_fallback=not args_cli.enable_minco,
                             )
                         else:
-                            mpc[i].update_reference(
+                            updated = mpc[i].update_reference(
                                 path_i,
                                 trajectory_samples=samples_i,
                                 desired_v=args_cli.speed,
                             )
-                        last_applied_plan_id[i] = current_plan_id
+                            if not updated:
+                                action_list.append(np.zeros(2, dtype=np.float32))
+                                print(f"[MPC] env={i} rejected missing MINCO samples, stopping")
+                                continue
+                        last_applied_plan_id[i] = env_plan_id
 
                     with control_timer.section("visualize_ms"):
                         vis_image = vis_manager[i].visualize_trajectory(
@@ -535,7 +668,7 @@ try:
                             all_trajectories_values=current_all_values[i] if current_all_values is not None else None,
                             raw_trajectory_points=current_raw_top1[i] if current_raw_top1 is not None else None,
                             selected_candidate_points=current_selected_candidate[i] if current_selected_candidate is not None else None,
-                            control_points=current_control_points[i] if current_control_points is not None else None,
+                            sparse_guide_points=current_sparse_guide_points[i] if current_sparse_guide_points is not None else None,
                             esdf=minco_adapter.esdf if minco_adapter is not None else None,
                             minco_info=current_minco_info[i] if current_minco_info is not None else None,
                         )
@@ -564,7 +697,7 @@ try:
                     if not np.isfinite(v) or not np.isfinite(w):
                         v, w = 0.0, 0.0
                     v = float(np.clip(v, 0.0, args_cli.speed))
-                    w = float(np.clip(w, -args_cli.speed, args_cli.speed))
+                    w = float(np.clip(w, -args_cli.mpc_max_yaw_rate, args_cli.mpc_max_yaw_rate))
                     action = torch.tensor([v, w], device="cuda:0")
                     action_cpu = action.cpu().numpy()
                     joint_velocities = controller.forward(action_cpu).joint_velocities
@@ -577,7 +710,7 @@ try:
                         ref_v_print = planned_v if planned_v is not None else float("nan")
                         ref_w_print = planned_w if planned_w is not None else float("nan")
                         print(
-                            f"[ControlRef] env={i} plan={current_plan_id} idx={mpc_i.progress_idx} "
+                            f"[ControlRef] env={i} plan={env_plan_id} status={status_i} idx={mpc_i.progress_idx} "
                             f"actual_v={robot_vel_batch[i]:.2f} ref_v={ref_v_print:.2f} "
                             f"ref_w={ref_w_print:.2f} cmd_v={v:.2f} cmd_w={w:.2f}"
                         )
@@ -604,7 +737,7 @@ try:
                             vis_image = draw_box_with_text(vis_image,0,820,430,50,"point goal:(%.2f, %.2f)"%(goals[i][0],goals[i][1]))
                             if current_minco_info is not None:
                                 info = current_minco_info[i]
-                                status = "MINCO ok" if info.get("success", False) else "MINCO fallback"
+                                status = info.get("status", "MINCO_OK" if info.get("success", False) else "MINCO_STOP")
                                 vis_image = draw_box_with_text(
                                     vis_image,
                                     0,
@@ -671,6 +804,8 @@ try:
                     if mpc[i] is not None:
                         mpc[i].reset()
                     last_applied_plan_id[i] = -1
+                    minco_hold_cache[i] = None
+                    per_env_plan_id[i] += 1
                     with input_lock:
                         if planning_input.episode_generation is None:
                             planning_input.episode_generation = episode_generation.copy()

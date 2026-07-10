@@ -338,7 +338,7 @@ class VisualizationManager:
         all_trajectories_values=None,
         raw_trajectory_points=None,
         selected_candidate_points=None,
-        control_points=None,
+        sparse_guide_points=None,
         esdf=None,
         minco_info=None,
     ):
@@ -493,10 +493,10 @@ class VisualizationManager:
                 except Exception:
                     pass
 
-        if control_points is not None:
+        if sparse_guide_points is not None:
             self.draw_points_world(
                 vis_image,
-                control_points,
+                sparse_guide_points,
                 robot_pose,
                 color=RGB_YELLOW,
                 radius=4,
@@ -521,7 +521,7 @@ class VisualizationManager:
 
         legend_y = 16
         cv2.putText(vis_image, "green MINCO | orange raw", (8, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_GREEN, 1, cv2.LINE_AA)
-        cv2.putText(vis_image, "cyan selected | yellow waypoint", (8, legend_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_CYAN, 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "cyan selected | yellow sparse guide", (8, legend_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_CYAN, 1, cv2.LINE_AA)
         cv2.putText(vis_image, "red obstacle | gray history", (8, legend_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_RED, 1, cv2.LINE_AA)
         cv2.putText(vis_image, "red/orange dot min ESDF", (8, legend_y + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_ORANGE, 1, cv2.LINE_AA)
         
