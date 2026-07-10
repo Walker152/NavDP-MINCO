@@ -4,7 +4,7 @@ from collections import deque
 from scipy.ndimage import binary_dilation
 
 class VisualizationManager:
-    def __init__(self, history_size=5):
+    def __init__(self, history_size=5, show_all_candidates=False):
         self.history_size = history_size
         self.occupancy_history = deque(maxlen=history_size)  # Will store (grid, min_coords, robot_pose)
         self.resolution = 0.05  # 5cm per pixel
@@ -12,6 +12,7 @@ class VisualizationManager:
         self.speed_history = deque(maxlen=150)
         self.esdf_overlay_cache = None
         self.esdf_overlay_pose = None
+        self.show_all_candidates = bool(show_all_candidates)
     
     def reset(self):
         self.occupancy_history.clear()
@@ -23,16 +24,31 @@ class VisualizationManager:
         try:
             """Convert depth image to occupancy grid in BEV"""
             if len(depth_map.shape) == 3:
-                depth_map = depth_map[:,:,0]
-            height, width = depth_map.shape
-            uu, vv = np.meshgrid(np.arange(width), np.arange(height))
-            z = depth_map
-            x = (uu - intrinsic[0, 2]) * z / intrinsic[0, 0]
-            y = (vv - intrinsic[1, 2]) * z / intrinsic[1, 1]
-            
-            # Filter valid points
-            valid_mask = (z > 0) & np.isfinite(z) & (z < 10)
-            points_3d = np.stack((x[valid_mask], y[valid_mask], z[valid_mask]), axis=-1)
+                depth_map = depth_map[:, :, 0]
+
+            depth_map = np.asarray(depth_map, dtype=np.float32)
+            depth_map = np.nan_to_num(depth_map, nan=0.0, posinf=0.0, neginf=0.0)
+
+            stride = 4
+            depth_small = depth_map[::stride, ::stride]
+            h, w = depth_small.shape
+            if h <= 0 or w <= 0:
+                return np.zeros((100, 100), dtype=np.int8), np.array([0.0, 0.0])
+
+            uu, vv = np.meshgrid(
+                np.arange(0, depth_map.shape[1], stride)[:w],
+                np.arange(0, depth_map.shape[0], stride)[:h],
+            )
+
+            z = depth_small
+            valid_mask = (z > 0.05) & np.isfinite(z) & (z < 8.0)
+            if np.count_nonzero(valid_mask) < 50:
+                return np.zeros((100, 100), dtype=np.int8), np.array([0.0, 0.0])
+
+            zv = z[valid_mask]
+            x = (uu[valid_mask] - intrinsic[0, 2]) * zv / intrinsic[0, 0]
+            y = (vv[valid_mask] - intrinsic[1, 2]) * zv / intrinsic[1, 1]
+            points_3d = np.stack((x, y, zv), axis=-1)
             
             # Apply camera roll
             roll = camera_roll * np.pi / 180
@@ -46,36 +62,62 @@ class VisualizationManager:
             point_3d_world[:, 0] = point_3d_flat[:, 2]
             point_3d_world[:, 1] = -point_3d_flat[:, 0]
             point_3d_world[:, 2] = -point_3d_flat[:, 1]
-            bins = np.arange(np.min(point_3d_world[:, 2]), np.max(point_3d_world[:, 2]), 0.05)
-            try:
+
+            if point_3d_world.shape[0] == 0:
+                return np.zeros((100, 100), dtype=np.int8), np.array([0.0, 0.0])
+
+            point_3d_world = point_3d_world[np.all(np.isfinite(point_3d_world), axis=1)]
+            if point_3d_world.shape[0] == 0:
+                return np.zeros((100, 100), dtype=np.int8), np.array([0.0, 0.0])
+
+            z_min = float(np.min(point_3d_world[:, 2]))
+            z_max = float(np.max(point_3d_world[:, 2]))
+            bins = np.arange(z_min, z_max, 0.05)
+            if bins.size >= 2:
                 hist, bin_edges = np.histogram(point_3d_world[:, 2], bins=bins)
                 max_freq_index = np.argmax(hist)
                 point_3d_world[:, 2] -= bin_edges[max_freq_index]
-                # print(f"bin_edges[max_freq_index] {bin_edges[max_freq_index]}")
-            except:
+            else:
                 point_3d_world[:, 2] -= -0.5
             
             # Filter points within height range
             filtered_points = point_3d_world[(point_3d_world[:, 2] >= 0.2) & (point_3d_world[:, 2] <= 1.5)]
             if filtered_points.shape[0] == 0:
-                min_coords = np.array([-5.0,-5.0,-5.0])
-                max_coords = np.array([5.0,5.0,5.0])
-                grid_size = np.ceil((max_coords - min_coords) / self.resolution + 1).astype(int)
-                occupancy_grid = np.zeros(grid_size[:2], dtype=np.int8)
-                return occupancy_grid, min_coords
+                return np.zeros((100, 100), dtype=np.int8), np.array([0.0, 0.0])
+
+            filtered_points = filtered_points[np.all(np.isfinite(filtered_points[:, :2]), axis=1)]
+            if filtered_points.shape[0] == 0:
+                return np.zeros((100, 100), dtype=np.int8), np.array([0.0, 0.0])
                 
             # Create occupancy grid
             min_coords = np.min(filtered_points, axis=0)
             max_coords = np.max(filtered_points, axis=0)
-            grid_size = np.ceil((max_coords - min_coords) / self.resolution + 1).astype(int)
+            if not np.all(np.isfinite(min_coords)) or not np.all(np.isfinite(max_coords)):
+                return np.zeros((100, 100), dtype=np.int8), np.array([0.0, 0.0])
+
+            grid_size_float = np.ceil((max_coords - min_coords) / self.resolution + 1)
+            max_grid_size = 400
+            if (
+                not np.all(np.isfinite(grid_size_float)) or
+                grid_size_float[0] <= 0 or grid_size_float[1] <= 0 or
+                grid_size_float[0] > max_grid_size or grid_size_float[1] > max_grid_size
+            ):
+                return np.zeros((100, 100), dtype=np.int8), np.array([0.0, 0.0])
+
+            grid_size = grid_size_float.astype(int)
             occupancy_grid = np.zeros(grid_size[:2], dtype=np.int8)
             
             grid_coords = ((filtered_points[:, :2] - min_coords[:2]) / self.resolution).astype(int)
+            valid_grid = (
+                (grid_coords[:, 0] >= 0) & (grid_coords[:, 0] < occupancy_grid.shape[0]) &
+                (grid_coords[:, 1] >= 0) & (grid_coords[:, 1] < occupancy_grid.shape[1])
+            )
+            grid_coords = grid_coords[valid_grid]
             occupancy_grid[grid_coords[:, 0], grid_coords[:, 1]] = 1
             
-        except:
-            occupancy_grid = np.zeros((100,100),dtype=np.int8)
-            min_coords = np.array([0,0])
+        except Exception:
+            occupancy_grid = np.zeros((100, 100), dtype=np.int8)
+            min_coords = np.array([0.0, 0.0])
         
         return occupancy_grid, min_coords
 
@@ -151,8 +193,8 @@ class VisualizationManager:
         grid_size = vis_image.shape[0]
         center = grid_size // 2
         rows, cols = np.indices((grid_size, grid_size))
-        dx = -(cols - center) * self.resolution
-        dy = -(rows - center) * self.resolution
+        dx = -(rows - center) * self.resolution
+        dy = -(cols - center) * self.resolution
 
         world_x = robot_pose[0] + dx
         world_y = robot_pose[1] + dy
@@ -164,22 +206,47 @@ class VisualizationManager:
         dist = np.full((grid_size, grid_size), np.nan, dtype=np.float64)
         dist[valid] = distance[my[valid], mx[valid]]
 
-        overlay = np.zeros_like(vis_image)
+        # Render ESDF as a continuous gradient (not discrete TSDF-like buckets).
+        # Clamp distances to a fixed range for visualization, then map through
+        # a perceptually uniform colormap so the user sees the true field shape.
         unknown = ~np.isfinite(dist)
-        occupied = dist <= 0.0
-        unsafe = (dist > 0.0) & (dist <= safe_dist)
-        near = (dist > safe_dist) & (dist <= 1.0)
-        free = dist > 1.0
+        known = np.isfinite(dist)
 
-        overlay[unknown] = (30, 30, 30)
-        overlay[occupied] = (40, 40, 160)
-        overlay[unsafe] = (0, 140, 255)
-        overlay[near] = (100, 120, 60)
-        overlay[free] = (30, 50, 30)
+        colored = np.zeros_like(vis_image)
+        colored[unknown] = (30, 30, 30)  # dark gray for unknown / out-of-bounds
+
+        if np.any(known):
+            vmin, vmax = -0.5, 2.0  # meters: inside obstacle … far free
+            d_clamped = np.clip(dist, vmin, vmax)
+            gray = np.zeros((grid_size, grid_size), dtype=np.uint8)
+            gray[known] = ((d_clamped[known] - vmin) / (vmax - vmin) * 255).astype(np.uint8)
+            colored = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
 
         alpha = 0.45
-        vis_image[:] = cv2.addWeighted(vis_image, 1.0 - alpha, overlay, alpha, 0)
+        vis_image[:] = cv2.addWeighted(vis_image, 1.0 - alpha, colored, alpha, 0)
         return vis_image
+
+    def query_esdf_distance(self, esdf, points_xy):
+        points_xy = np.asarray(points_xy, dtype=np.float64)
+        if points_xy.ndim != 2 or points_xy.shape[1] < 2:
+            return np.zeros((0,), dtype=np.float64)
+
+        distance = np.asarray(esdf["distance"], dtype=np.float64)
+        origin = np.asarray(esdf["origin"], dtype=np.float64)
+        res = float(esdf["resolution"])
+
+        out = []
+        for p in points_xy[:, :2]:
+            if not np.all(np.isfinite(p)):
+                out.append(float("nan"))
+                continue
+            mx = int(np.floor((p[0] - origin[0]) / res))
+            my = int(np.floor((p[1] - origin[1]) / res))
+            if 0 <= mx < distance.shape[1] and 0 <= my < distance.shape[0]:
+                out.append(float(distance[my, mx]))
+            else:
+                out.append(float("nan"))
+        return np.asarray(out, dtype=np.float64)
 
     def update_speed_history(self, actual_v, actual_w, cmd_v=None, cmd_w=None, planned_v=None):
         self.speed_history.append({
@@ -286,9 +353,12 @@ class VisualizationManager:
         center_offset = grid_size // 2
         if esdf is not None:
             try:
-                vis_image = self.render_esdf_overlay(vis_image, robot_pose, esdf, safe_dist=0.30)
-            except Exception as exc:
-                print(f"[Visualization] ESDF overlay failed: {exc}")
+                overlay_safe_dist = 0.30
+                if isinstance(minco_info, dict):
+                    overlay_safe_dist = float(minco_info.get("safe_dist", overlay_safe_dist))
+                vis_image = self.render_esdf_overlay(vis_image, robot_pose, esdf, safe_dist=overlay_safe_dist)
+            except Exception:
+                pass
         
         # Draw historical occupancy grids
         all_hist_world_points_list = []
@@ -322,48 +392,15 @@ class VisualizationManager:
         else:
             all_hist_world_points = np.array([])
 
-        # Helper function to transform world points to vis_coords
-        def transform_to_vis_coords(world_pts, current_pose, res, offset, size):
-            if world_pts.size == 0:
-                return np.array([])
-                
-            # Transform world points to yaw=0 frame centered at current robot position
-            dx = world_pts[:, 0] - current_pose[0]
-            dy = world_pts[:, 1] - current_pose[1]
-            
-            current_rotation = np.array([
-                [np.cos(0), -np.sin(0)],
-                [np.sin(0), np.cos(0)]
-            ])
-            transformed_points = (current_rotation @ np.vstack([dx, dy])).T
-            
-            # Convert to grid coordinates relative to center
-            center_coords = (transformed_points / res).astype(int)
-            
-            # Filter points within visualization range
-            valid_mask = (np.abs(center_coords[:, 0]) < size//2) & (np.abs(center_coords[:, 1]) < size//2)
-            center_coords = center_coords[valid_mask]
-            
-            # Convert to visualization coordinates (adjust for image coordinate system)
-            vis_coords = np.zeros_like(center_coords)
-            vis_coords[:, 0] = -center_coords[:, 0] + offset  # Flip x axis
-            vis_coords[:, 1] = -center_coords[:, 1] + offset   # Keep y axis
-            
-            # Final boundary check
-            valid_mask = (vis_coords[:, 0] >= 0) & (vis_coords[:, 0] < size) & \
-                        (vis_coords[:, 1] >= 0) & (vis_coords[:, 1] < size)
-            vis_coords = vis_coords[valid_mask]
-            return vis_coords
-
         # Draw historical points (Gray)
-        vis_coords_hist = transform_to_vis_coords(all_hist_world_points, robot_pose, self.resolution, center_offset, grid_size)
+        vis_coords_hist = self.world_to_vis_points(all_hist_world_points, robot_pose, grid_size, center_offset)
         if vis_coords_hist.size > 0:
-            vis_image[vis_coords_hist[:, 0], vis_coords_hist[:, 1]] = (128, 128, 128) # Gray
+            vis_image[vis_coords_hist[:, 1], vis_coords_hist[:, 0]] = (128, 128, 128) # Gray
 
         # Draw current points (Red)
-        vis_coords_current = transform_to_vis_coords(current_world_points, robot_pose, self.resolution, center_offset, grid_size)
+        vis_coords_current = self.world_to_vis_points(current_world_points, robot_pose, grid_size, center_offset)
         if vis_coords_current.size > 0:
-            vis_image[vis_coords_current[:, 0], vis_coords_current[:, 1]] = (0, 0, 255) # Red
+            vis_image[vis_coords_current[:, 1], vis_coords_current[:, 0]] = (0, 0, 255) # Red
         
         if raw_trajectory_points is not None:
             self.draw_polyline_world(
@@ -399,6 +436,46 @@ class VisualizationManager:
             if len(vis_points) > 0:
                 cv2.circle(vis_image, tuple(vis_points[0]), 3, (255, 0, 0), -1, cv2.LINE_AA)
                 cv2.circle(vis_image, tuple(vis_points[-1]), 3, (0, 0, 255), -1, cv2.LINE_AA)
+
+            if esdf is not None:
+                try:
+                    dists = self.query_esdf_distance(esdf, trajectory_points)
+                    traj_np = np.asarray(trajectory_points, dtype=np.float64)
+
+                    danger_mask = np.isfinite(dists) & (dists <= 0.0)
+                    unsafe_mask = np.isfinite(dists) & (dists > 0.0) & (dists <= 0.50)
+
+                    if np.any(unsafe_mask):
+                        self.draw_points_world(
+                            vis_image,
+                            traj_np[unsafe_mask],
+                            robot_pose,
+                            color=(0, 140, 255),
+                            radius=3,
+                        )
+
+                    if np.any(danger_mask):
+                        self.draw_points_world(
+                            vis_image,
+                            traj_np[danger_mask],
+                            robot_pose,
+                            color=(0, 0, 255),
+                            radius=5,
+                        )
+
+                    min_py_esdf = np.nanmin(dists) if np.any(np.isfinite(dists)) else np.nan
+                    cv2.putText(
+                        vis_image,
+                        f"py min esdf:{min_py_esdf:.2f}",
+                        (8, 64),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.4,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                except Exception:
+                    pass
 
         if control_points is not None:
             self.draw_points_world(
@@ -437,21 +514,26 @@ class VisualizationManager:
         vis_resized = cv2.GaussianBlur(vis_resized, (3, 3), 0.5)
         # Concatenate images
         combined_image = np.concatenate((rgb_image, vis_resized), axis=1)
-        
-        # If no all_trajectories_points, return original combined image
-        if all_trajectories_points is None or len(all_trajectories_points) == 0:
+
+        if (
+            not self.show_all_candidates
+            or all_trajectories_points is None
+            or len(all_trajectories_points) == 0
+        ):
             return combined_image
-        # print(f"all_trajectories_points: {len(all_trajectories_points)}")
+        
         # --- Create additional visualization for all trajectories ---
         # Create a new image for all trajectories visualization
         vis_image_all = np.zeros((grid_size, grid_size, 3), dtype=np.uint8)
         
         # Draw the same occupancy grid
         if vis_coords_hist.size > 0:
-            vis_image_all[vis_coords_hist[:, 0], vis_coords_hist[:, 1]] = (128, 128, 128) # Gray
+            vis_image_all[vis_coords_hist[:, 1], vis_coords_hist[:, 0]] = (128, 128, 128) # Gray
         if vis_coords_current.size > 0:
-            vis_image_all[vis_coords_current[:, 0], vis_coords_current[:, 1]] = (0, 0, 255) # Red
+            vis_image_all[vis_coords_current[:, 1], vis_coords_current[:, 0]] = (0, 0, 255) # Red
             
+        has_all_trajectories = all_trajectories_points is not None and len(all_trajectories_points) > 0
+
         # Draw all trajectories with colors based on values
         # Define color mapping function from value to color (blue to red gradient)
         def value_to_color(value, values_min, values_max):
@@ -479,28 +561,29 @@ class VisualizationManager:
             
             return (int(b), int(g), int(r))  # Return BGR color
         
-        # Set default colors if no values provided
-        if all_trajectories_values is None:
-            colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
-            trajectory_colors = [colors[idx % len(colors)] for idx in range(len(all_trajectories_points))]
-        else:
-            # Get min and max values for normalization
-            values_min = np.min(all_trajectories_values)
-            values_max = np.max(all_trajectories_values)
-            # Generate color for each trajectory
-            trajectory_colors = [value_to_color(v, values_min, values_max) for v in all_trajectories_values]
-        
-        for idx, traj in enumerate(all_trajectories_points):
-            color = trajectory_colors[idx]
-            vis_points_all = self.world_to_vis_points(traj, robot_pose, grid_size, center_offset)
+        if has_all_trajectories:
+            # Set default colors if no values provided
+            if all_trajectories_values is None:
+                colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
+                trajectory_colors = [colors[idx % len(colors)] for idx in range(len(all_trajectories_points))]
+            else:
+                # Get min and max values for normalization
+                values_min = np.min(all_trajectories_values)
+                values_max = np.max(all_trajectories_values)
+                # Generate color for each trajectory
+                trajectory_colors = [value_to_color(v, values_min, values_max) for v in all_trajectories_values]
 
-            # Draw trajectory with anti-aliased lines
-            for i in range(len(vis_points_all) - 1):
-                cv2.line(vis_image_all, tuple(vis_points_all[i]), tuple(vis_points_all[i+1]), color, 1, cv2.LINE_AA)
-                
-            # Draw start and end points with anti-aliasing
-            if len(vis_points_all) > 0:
-                cv2.circle(vis_image_all, tuple(vis_points_all[0]), 2, color, -1, cv2.LINE_AA)
+            for idx, traj in enumerate(all_trajectories_points):
+                color = trajectory_colors[idx]
+                vis_points_all = self.world_to_vis_points(traj, robot_pose, grid_size, center_offset)
+
+                # Draw trajectory with anti-aliased lines
+                for i in range(len(vis_points_all) - 1):
+                    cv2.line(vis_image_all, tuple(vis_points_all[i]), tuple(vis_points_all[i+1]), color, 1, cv2.LINE_AA)
+
+                # Draw start and end points with anti-aliasing
+                if len(vis_points_all) > 0:
+                    cv2.circle(vis_image_all, tuple(vis_points_all[0]), 2, color, -1, cv2.LINE_AA)
         
         # Draw robot position with anti-aliasing
         cv2.polylines(vis_image_all, [corners_int], True, (255, 255, 255), 1, cv2.LINE_AA)  # White robot outline

@@ -622,19 +622,18 @@ bool MincoPipeline::isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d
   if (!map_) {
     return true;
   }
+
   const double resolution = std::max(1e-2, map_->resolution());
-  const int steps = std::max(1, static_cast<int>(std::ceil((p2 - p1).norm() / resolution)));
+  const double step = std::max(0.5 * resolution, 0.02);
+  const int steps = std::max(
+    1,
+    static_cast<int>(std::ceil((p2 - p1).head<2>().norm() / step)));
+
   for (int i = 0; i <= steps; ++i) {
     const double ratio = static_cast<double>(i) / static_cast<double>(steps);
-    const Eigen::Vector3d p = p1 + ratio * (p2 - p1);
-    unsigned int mx = 0U;
-    unsigned int my = 0U;
-    if (map_->worldToMap(p.x(), p.y(), mx, my)) {
-      if (!map_->isFree(mx, my)) {
-        return false;
-      }
-      continue;
-    }
+    Eigen::Vector3d p = p1 + ratio * (p2 - p1);
+    p.z() = 0.0;
+
     const auto query = map_->query(p);
     if (!query.ok || query.distance <= config_.optimizer.safe_dist) {
       return false;

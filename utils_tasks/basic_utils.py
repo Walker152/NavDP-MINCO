@@ -15,6 +15,8 @@ class PlanningInput:
     current_depth: Optional[np.ndarray] = None
     camera_pos: Optional[np.ndarray] = None
     camera_rot: Optional[np.ndarray] = None
+    robot_pos_w: Optional[np.ndarray] = None
+    robot_yaw_w: Optional[np.ndarray] = None
     robot_lin_vel_w: Optional[np.ndarray] = None
     robot_ang_vel_w: Optional[np.ndarray] = None
 

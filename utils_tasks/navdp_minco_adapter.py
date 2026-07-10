@@ -115,10 +115,17 @@ class NavDPMincoAdapter:
                 if waypoints.ndim != 2 or waypoints.shape[0] < 2 or waypoints.shape[1] < 2:
                     failures.append(f"idx={selected_idx}: invalid_waypoints")
                     continue
+                py_min_esdf = self._query_min_esdf(waypoints)
+                if not np.isfinite(py_min_esdf) or py_min_esdf <= self.safe_dist:
+                    failures.append(
+                        f"idx={selected_idx}: PY_ESDF_UNSAFE py_min={py_min_esdf:.3f} safe={self.safe_dist:.3f}"
+                    )
+                    continue
                 scored = dict(result)
                 scored["selected_index"] = int(selected_idx)
                 scored["python_call_ms"] = candidate_call_ms
                 scored["cpp_optimize_time_ms"] = cpp_ms
+                scored["py_min_esdf"] = py_min_esdf
                 if best is None or self._is_better(scored, best):
                     best = scored
 
@@ -162,6 +169,8 @@ class NavDPMincoAdapter:
                     "selected_index": int(best["selected_index"]),
                     "objective": float(best.get("objective", np.inf)),
                     "min_esdf": float(best.get("min_esdf", np.nan)),
+                    "py_min_esdf": float(best.get("py_min_esdf", np.nan)),
+                    "safe_dist": self.safe_dist,
                     "failure_reason": best.get("failure_reason", "NONE"),
                     "fallback": False,
                     "time_ms": elapsed_ms,
@@ -182,6 +191,7 @@ class NavDPMincoAdapter:
                     "[NavDP-Minco] "
                     f"env={env_idx} success=1 fallback=0 selected_idx={result['selected_index']} "
                     f"objective={result['objective']:.4f} min_esdf={result['min_esdf']:.4f} "
+                    f"py_esdf={result['py_min_esdf']:.4f} "
                     f"adapter_ms={elapsed_ms:.2f} cpp_ms={result['selected_cpp_optimize_time_ms']:.2f}"
                 )
             else:
@@ -199,6 +209,8 @@ class NavDPMincoAdapter:
             "selected_index": -1,
             "objective": float("inf"),
             "min_esdf": float("nan"),
+            "py_min_esdf": float("nan"),
+            "safe_dist": self.safe_dist,
             "failure_reason": reason,
             "fallback": self.fallback_to_raw,
             "time_ms": elapsed_ms,
@@ -220,6 +232,27 @@ class NavDPMincoAdapter:
             f"adapter_ms={elapsed_ms:.2f} reason={reason}"
         )
         return result
+
+    def _query_min_esdf(self, points):
+        points = np.asarray(points, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] < 2 or points.shape[0] == 0:
+            return float("nan")
+
+        distance = np.asarray(self.esdf["distance"], dtype=np.float64)
+        origin = np.asarray(self.esdf["origin"], dtype=np.float64)
+        res = float(self.esdf["resolution"])
+
+        vals = []
+        for p in points[:, :2]:
+            if not np.all(np.isfinite(p)):
+                continue
+            mx = int(np.floor((p[0] - origin[0]) / res))
+            my = int(np.floor((p[1] - origin[1]) / res))
+            if 0 <= mx < distance.shape[1] and 0 <= my < distance.shape[0]:
+                vals.append(float(distance[my, mx]))
+        if not vals:
+            return float("nan")
+        return float(np.min(vals))
 
     @staticmethod
     def _candidate_order(values, candidate_count):

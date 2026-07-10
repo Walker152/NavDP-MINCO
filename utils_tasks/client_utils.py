@@ -20,6 +20,20 @@ def navigator_reset(intrinsic=None,stop_threshold=-0.5,batch_size=1,port=8888,en
         response = requests.post(url,json={'env_id':env_id}, timeout=REQUEST_TIMEOUT_S)
     return json.loads(response.text)['algo']
 
+def navigator_close(port=8888, intrinsic=None, stop_threshold=-0.5, batch_size=1):
+    url = "http://localhost:%d/navigator_close"%port
+    try:
+        response = requests.post(url, json={}, timeout=REQUEST_TIMEOUT_S)
+        data = json.loads(response.text)
+        return bool(data.get("ok", False))
+    except Exception:
+        if intrinsic is None:
+            raise
+        # Backward-compatible fallback for an older NavDP server without /navigator_close:
+        # reset closes the previous writer before opening the next one, finalizing the run video.
+        navigator_reset(intrinsic=intrinsic, stop_threshold=stop_threshold, batch_size=batch_size, port=port)
+        return True
+
 def nogoal_step(rgb_images,depth_images,port=8888):
     concat_images = np.concatenate([img for img in rgb_images],axis=0)
     concat_depths = np.concatenate([img for img in depth_images],axis=0)
@@ -115,7 +129,5 @@ def imagegoal_step(image_goals,rgb_images,depth_images,port=8888):
     all_trajectory = json.loads(response.text)['all_trajectory']
     all_value = json.loads(response.text)['all_values']
     return np.array(trajectory),np.array(all_trajectory),np.array(all_value)
-
-
 
 

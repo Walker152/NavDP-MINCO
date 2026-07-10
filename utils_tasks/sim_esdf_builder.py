@@ -2,7 +2,7 @@ import os
 import time
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import binary_closing, binary_dilation, binary_fill_holes, distance_transform_edt
 
 
 class SimEsdfBuilder:
@@ -14,6 +14,12 @@ class SimEsdfBuilder:
         "resolution",
         "ground_z",
         "scene_scale",
+        "padding",
+        "obstacle_min_height",
+        "obstacle_max_height",
+        "ground_quantile",
+        "fill_footprint",
+        "footprint_inflate_cells",
     )
 
     def __init__(
@@ -27,6 +33,8 @@ class SimEsdfBuilder:
         obstacle_max_height=1.50,
         cache_name="esdf_2d.npz",
         force_rebuild=False,
+        fill_footprint=True,
+        footprint_inflate_cells=1,
     ):
         self.resolution = float(resolution)
         self.padding = float(padding)
@@ -37,6 +45,8 @@ class SimEsdfBuilder:
         self.obstacle_max_height = float(obstacle_max_height)
         self.cache_name = cache_name
         self.force_rebuild = bool(force_rebuild)
+        self.fill_footprint = bool(fill_footprint)
+        self.footprint_inflate_cells = int(footprint_inflate_cells)
 
     def build_or_load_from_stage(
         self,
@@ -100,6 +110,17 @@ class SimEsdfBuilder:
                 if 0 <= mx < width and 0 <= my < height:
                     occupied[my, mx] = True
 
+        if self.fill_footprint:
+            occupied = binary_closing(occupied, structure=np.ones((3, 3), dtype=bool))
+            occupied = binary_fill_holes(occupied)
+
+        if self.footprint_inflate_cells > 0:
+            occupied = binary_dilation(
+                occupied,
+                structure=np.ones((3, 3), dtype=bool),
+                iterations=int(self.footprint_inflate_cells),
+            )
+
         occupied[0, :] = True
         occupied[-1, :] = True
         occupied[:, 0] = True
@@ -122,6 +143,12 @@ class SimEsdfBuilder:
             "resolution": self.resolution,
             "ground_z": ground_z,
             "scene_scale": float(scene_scale),
+            "padding": self.padding,
+            "obstacle_min_height": self.obstacle_min_height,
+            "obstacle_max_height": self.obstacle_max_height,
+            "ground_quantile": self.ground_quantile,
+            "fill_footprint": self.fill_footprint,
+            "footprint_inflate_cells": self.footprint_inflate_cells,
         }
         cache_write_start = time.perf_counter()
         save_esdf = {k: v for k, v in esdf.items() if k != "timing"}
@@ -187,7 +214,22 @@ class SimEsdfBuilder:
                 return None
             resolution = float(np.asarray(data["resolution"]))
             cached_scene_scale = float(np.asarray(data["scene_scale"]))
-            if not np.isclose(resolution, self.resolution) or not np.isclose(cached_scene_scale, scene_scale):
+            cache_params = {
+                "padding": self.padding,
+                "obstacle_min_height": self.obstacle_min_height,
+                "obstacle_max_height": self.obstacle_max_height,
+                "ground_quantile": self.ground_quantile,
+                "footprint_inflate_cells": self.footprint_inflate_cells,
+            }
+            for key, expected in cache_params.items():
+                if not np.isclose(float(np.asarray(data[key])), float(expected)):
+                    return None
+            cached_fill_footprint = bool(np.asarray(data["fill_footprint"]))
+            if (
+                not np.isclose(resolution, self.resolution)
+                or not np.isclose(cached_scene_scale, scene_scale)
+                or cached_fill_footprint != self.fill_footprint
+            ):
                 return None
             return {
                 "distance": np.asarray(data["distance"], dtype=np.float64),
@@ -197,6 +239,12 @@ class SimEsdfBuilder:
                 "resolution": resolution,
                 "ground_z": float(np.asarray(data["ground_z"])),
                 "scene_scale": cached_scene_scale,
+                "padding": float(np.asarray(data["padding"])),
+                "obstacle_min_height": float(np.asarray(data["obstacle_min_height"])),
+                "obstacle_max_height": float(np.asarray(data["obstacle_max_height"])),
+                "ground_quantile": float(np.asarray(data["ground_quantile"])),
+                "fill_footprint": cached_fill_footprint,
+                "footprint_inflate_cells": int(np.asarray(data["footprint_inflate_cells"])),
             }
         except Exception as exc:
             print(f"[SimESDF] cache load failed: {exc}")

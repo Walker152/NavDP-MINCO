@@ -32,6 +32,9 @@ parser.add_argument("--esdf_force_rebuild", action="store_true")
 parser.add_argument("--esdf_cache_name", type=str, default="esdf_2d.npz")
 parser.add_argument("--esdf_obstacle_min_height", type=float, default=0.08)
 parser.add_argument("--esdf_obstacle_max_height", type=float, default=1.50)
+parser.add_argument("--esdf_fill_footprint", type=int, default=1)
+parser.add_argument("--esdf_footprint_inflate_cells", type=int, default=1)
+parser.add_argument("--use_robot_base_frame", type=int, default=1)
 parser.add_argument("--timing_log_interval", type=int, default=10)
 parser.add_argument("--show_timing_overlay", action="store_true")
 args_cli = parser.parse_args()
@@ -61,7 +64,7 @@ from utils_tasks.basic_utils import PlanningInput, PlanningOutput, find_usd_path
 from configs.robots import *
 from configs.scenes import *
 from configs.tasks import *
-from utils_tasks.client_utils import navigator_reset,pointgoal_step
+from utils_tasks.client_utils import navigator_close,navigator_reset,pointgoal_step
 from utils_tasks.visualization_utils import VisualizationManager
 from utils_tasks.tracking_utils import MPC_Controller
 from utils_tasks.timing_utils import (
@@ -80,6 +83,28 @@ output_lock = threading.Lock()
 stop_event = threading.Event()
 vis_manager = [VisualizationManager(history_size=5) for i in range(args_cli.num_envs)]
 mpc = [None for _ in range(args_cli.num_envs)]
+use_robot_base_frame = bool(args_cli.use_robot_base_frame)
+
+def query_esdf_polyline(esdf, points):
+    if esdf is None or points is None:
+        return float("nan")
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] < 2:
+        return float("nan")
+
+    distance = np.asarray(esdf["distance"], dtype=np.float64)
+    origin = np.asarray(esdf["origin"], dtype=np.float64)
+    res = float(esdf["resolution"])
+
+    vals = []
+    for p in points[:, :2]:
+        if not np.all(np.isfinite(p)):
+            continue
+        mx = int(np.floor((p[0] - origin[0]) / res))
+        my = int(np.floor((p[1] - origin[1]) / res))
+        if 0 <= mx < distance.shape[1] and 0 <= my < distance.shape[0]:
+            vals.append(float(distance[my, mx]))
+    return float(np.min(vals)) if vals else float("nan")
 
 def planning_thread(env, camera_intrinsic, minco_adapter=None):
     global mpc
@@ -100,6 +125,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     depth = planning_input.current_depth.copy()
                     camera_pos = planning_input.camera_pos.copy()
                     camera_rot = planning_input.camera_rot.copy()
+                    robot_pos_w = planning_input.robot_pos_w.copy() if planning_input.robot_pos_w is not None else None
+                    robot_yaw_w = planning_input.robot_yaw_w.copy() if planning_input.robot_yaw_w is not None else None
                     robot_lin_vel_w = planning_input.robot_lin_vel_w.copy() if planning_input.robot_lin_vel_w is not None else None
                     robot_ang_vel_w = planning_input.robot_ang_vel_w.copy() if planning_input.robot_ang_vel_w is not None else None
             with output_lock:
@@ -119,6 +146,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             continue
                         point_local = np.array([point[0], point[1], 0.0])
                         point_world = camera_pos[idx] + camera_rot[idx] @ point_local
+                        if use_robot_base_frame and robot_pos_w is not None:
+                            point_world[:2] += robot_pos_w[idx, :2] - camera_pos[idx, :2]
                         trajectory_points_world.append(point_world[:2])
                     trajectory_points_world = np.array(trajectory_points_world)
                     raw_top1_world.append(trajectory_points_world)
@@ -134,6 +163,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         for point in traj_camera:
                             point_local = np.array([point[0], point[1], 0.0])
                             point_world = camera_pos[idx] + camera_rot[idx] @ point_local
+                            if use_robot_base_frame and robot_pos_w is not None:
+                                point_world[:2] += robot_pos_w[idx, :2] - camera_pos[idx, :2]
                             traj_world.append(point_world[:3])
                         all_trajectories_world.append(np.array(traj_world))
                     batch_all_points_world.append(all_trajectories_world)
@@ -154,11 +185,17 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         vel = robot_lin_vel_w[idx].copy() if robot_lin_vel_w is not None else np.zeros(3)
                         vel[2] = 0.0
                         yaw_rate = float(robot_ang_vel_w[idx]) if robot_ang_vel_w is not None else 0.0
+                        if use_robot_base_frame and robot_pos_w is not None and robot_yaw_w is not None:
+                            state_position = np.array([robot_pos_w[idx, 0], robot_pos_w[idx, 1], 0.0])
+                            state_yaw = float(robot_yaw_w[idx])
+                        else:
+                            state_position = np.array([camera_pos[idx, 0], camera_pos[idx, 1], 0.0])
+                            state_yaw = float(np.arctan2(camera_rot[idx, 1, 0], camera_rot[idx, 0, 0]))
                         states.append({
-                            "position": np.array([camera_pos[idx, 0], camera_pos[idx, 1], 0.0]),
+                            "position": state_position,
                             "velocity": vel,
                             "acceleration": np.zeros(3),
-                            "yaw": float(np.arctan2(camera_rot[idx, 1, 0], camera_rot[idx, 0, 0])),
+                            "yaw": state_yaw,
                             "yaw_rate": yaw_rate,
                         })
 
@@ -216,10 +253,11 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             "selected_index": -1,
                             "objective": float("inf"),
                             "min_esdf": float("nan"),
+                            "py_min_esdf": float("nan"),
+                            "safe_dist": args_cli.minco_safe_dist,
                             "adapter_total_ms": 0.0,
                             "selected_cpp_optimize_time_ms": float("nan"),
                         })
-                mpc = next_mpc
 
             planning_total_ms = planning_timer.elapsed_ms(planning_total_start)
 
@@ -234,6 +272,7 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
 
             # Update shared state
             with output_lock:
+                mpc = next_mpc
                 planning_output.trajectory_points_world = batch_optimal_points_world
                 planning_output.all_trajectories_world = batch_all_points_world_vis
                 planning_output.all_values_camera = all_values_camera
@@ -306,6 +345,8 @@ if args_cli.enable_minco:
         force_rebuild=args_cli.esdf_force_rebuild,
         obstacle_min_height=args_cli.esdf_obstacle_min_height,
         obstacle_max_height=args_cli.esdf_obstacle_max_height,
+        fill_footprint=bool(args_cli.esdf_fill_footprint),
+        footprint_inflate_cells=args_cli.esdf_footprint_inflate_cells,
     )
     esdf = esdf_builder.build_or_load_from_stage(
         stage=stage,
@@ -362,6 +403,18 @@ try:
             camera_rot_quat = env.unwrapped.scene.sensors['camera_sensor'].data.quat_w_world.cpu().numpy()
             camera_rot_quat = camera_rot_quat[:,[1, 2, 3, 0]]
             camera_rot = R.from_quat(camera_rot_quat).as_matrix()
+            robot_pos_w = env.unwrapped.scene.articulations['robot'].data.root_pos_w[:, :3].cpu().numpy()
+            robot_quat_w = env.unwrapped.scene.articulations['robot'].data.root_quat_w.cpu().numpy()
+            robot_quat_xyzw = robot_quat_w[:, [1, 2, 3, 0]]
+            robot_rot = R.from_quat(robot_quat_xyzw).as_matrix()
+            robot_yaw_w = np.arctan2(robot_rot[:, 1, 0], robot_rot[:, 0, 0])
+
+            if frame_idx % max(1, args_cli.timing_log_interval) == 0:
+                offset_xy = camera_pos[0, :2] - robot_pos_w[0, :2]
+                print(
+                    f"[FrameCheck] camera-base offset xy={offset_xy} "
+                    f"norm={np.linalg.norm(offset_xy):.3f}"
+                )
         
             with input_lock:
                 planning_input.current_goal = goals.copy()
@@ -369,6 +422,8 @@ try:
                 planning_input.current_depth = depths.copy()
                 planning_input.camera_pos = camera_pos.copy()
                 planning_input.camera_rot = camera_rot.copy()
+                planning_input.robot_pos_w = robot_pos_w.copy()
+                planning_input.robot_yaw_w = robot_yaw_w.copy()
                 planning_input.robot_lin_vel_w = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :3].cpu().numpy().copy()
                 planning_input.robot_ang_vel_w = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy().copy()
 
@@ -376,13 +431,22 @@ try:
             robot_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :2].norm(dim=1).cpu().numpy()
             robot_ang_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy()
 
-            x0 = np.stack([
-                camera_pos[:, 0],
-                camera_pos[:, 1],
-                np.arctan2(camera_rot[:, 1, 0], camera_rot[:, 0, 0]),
-                robot_vel_batch,
-                robot_ang_vel_batch,
-            ], axis=-1)
+            if use_robot_base_frame:
+                x0 = np.stack([
+                    robot_pos_w[:, 0],
+                    robot_pos_w[:, 1],
+                    robot_yaw_w,
+                    robot_vel_batch,
+                    robot_ang_vel_batch,
+                ], axis=-1)
+            else:
+                x0 = np.stack([
+                    camera_pos[:, 0],
+                    camera_pos[:, 1],
+                    np.arctan2(camera_rot[:, 1, 0], camera_rot[:, 0, 0]),
+                    robot_vel_batch,
+                    robot_ang_vel_batch,
+                ], axis=-1)
             current_trajectory = None
             current_all_trajectories = None
             current_all_values = None
@@ -393,6 +457,7 @@ try:
             current_minco_speed_profile = None
             current_minco_info = None
             current_planning_timing = None
+            current_mpc = None
             with output_lock:
                 if planning_output.trajectory_points_world is not None:
                     current_trajectory = planning_output.trajectory_points_world.copy() if planning_output.trajectory_points_world is not None else None
@@ -405,6 +470,7 @@ try:
                     current_minco_speed_profile = planning_output.minco_speed_profile
                     current_minco_info = planning_output.minco_info
                     current_planning_timing = planning_output.planning_timing.copy() if planning_output.planning_timing is not None else None
+                    current_mpc = list(mpc) if isinstance(mpc, list) else mpc
         
             if current_trajectory is not None:
                 action_list = []
@@ -426,7 +492,21 @@ try:
                             minco_info=current_minco_info[i] if current_minco_info is not None else None,
                         )
 
-                    mpc_i = mpc[i] if isinstance(mpc, list) and i < len(mpc) else mpc
+                    if (
+                        minco_adapter is not None
+                        and current_minco_info is not None
+                        and current_trajectory is not None
+                        and frame_idx % max(1, args_cli.timing_log_interval) == 0
+                    ):
+                        py_min = query_esdf_polyline(minco_adapter.esdf, current_trajectory[i])
+                        cpp_min = current_minco_info[i].get("min_esdf", float("nan"))
+                        adapter_py_min = current_minco_info[i].get("py_min_esdf", float("nan"))
+                        print(
+                            f"[ESDFCheck] env={i} cpp_min={cpp_min:.3f} "
+                            f"adapter_py_min={adapter_py_min:.3f} vis_py_min={py_min:.3f}"
+                        )
+
+                    mpc_i = current_mpc[i] if isinstance(current_mpc, list) and i < len(current_mpc) else current_mpc
                     if mpc_i is None:
                         action_list.append(np.zeros(2, dtype=np.float32))
                         continue
@@ -491,14 +571,15 @@ try:
                             vis_image = draw_timing_overlay(vis_image, current_planning_timing, control_timing)
 
                         if not stop_event.is_set():
+                            vis_image = np.ascontiguousarray(np.asarray(vis_image, dtype=np.uint8))
                             cv2.imwrite(f"frame_test.png", cv2.cvtColor(vis_image, cv2.COLOR_RGB2BGR))
                             with control_timer.section("video_write_ms"):
                                 fps_writer[i].append_data(vis_image)
                             control_timing = control_timer.snapshot()
                             control_timing["env_step_ms"] = 0.0
                             control_timing_records.append(control_timing)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        print(f"[Video] write failed env={i}: {exc}")
                 
                 action = torch.as_tensor(np.stack(action_list, axis=0),device="cuda:0")
                 env_step_timer = StageTimer()
@@ -546,9 +627,18 @@ except KeyboardInterrupt:
 finally:
     stop_event.set()
     try:
-        planning_thread_obj.join(timeout=3.0)
+        planning_thread_obj.join(timeout=6.0)
     except Exception as exc:
         print(f"[Shutdown] planning thread join failed: {exc}")
+    try:
+        navigator_close(
+            port=args_cli.port,
+            intrinsic=camera_intrinsic.cpu().numpy(),
+            stop_threshold=args_cli.stop_threshold,
+            batch_size=scene_config.num_envs,
+        )
+    except Exception as exc:
+        print(f"[Shutdown] NavDP video writer close failed: {exc}")
     for writer in fps_writer:
         try:
             writer.close()

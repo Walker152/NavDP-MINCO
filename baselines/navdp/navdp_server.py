@@ -8,6 +8,8 @@ import time
 import datetime
 import json
 import os
+import atexit
+import threading
 
 from PIL import Image, ImageDraw, ImageFont
 import argparse
@@ -19,6 +21,40 @@ args = parser.parse_known_args()[0]
 app = Flask(__name__)
 navdp_navigator = None
 navdp_fps_writer = None
+navdp_writer_lock = threading.Lock()
+
+def make_navdp_writer():
+    format_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y%m%d_%H%M%S")
+    return imageio.get_writer(
+        "{}_fps_pointgoal.mp4".format(format_time),
+        fps=7,
+        codec="libx264",
+        pixelformat="yuv420p",
+        macro_block_size=16,
+        output_params=["-movflags", "faststart"],
+    )
+
+def close_navdp_writer():
+    global navdp_fps_writer
+    with navdp_writer_lock:
+        if navdp_fps_writer is not None:
+            navdp_fps_writer.close()
+            navdp_fps_writer = None
+    return True
+
+def append_navdp_frame(frame):
+    global navdp_fps_writer
+    frame = np.ascontiguousarray(np.asarray(frame, dtype=np.uint8))
+    if frame.ndim == 2:
+        frame = np.repeat(frame[:, :, None], 3, axis=2)
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError(f"Invalid NavDP video frame shape: {frame.shape}")
+    with navdp_writer_lock:
+        if navdp_fps_writer is None:
+            navdp_fps_writer = make_navdp_writer()
+        navdp_fps_writer.append_data(frame)
+
+atexit.register(close_navdp_writer)
 
 @app.route("/navigator_reset",methods=['POST'])
 def navdp_reset():
@@ -41,15 +77,16 @@ def navdp_reset():
         navdp_navigator.reset(batchsize,threshold)
 
     if navdp_fps_writer is None:
-        format_time = datetime.datetime.fromtimestamp(time.time())
-        format_time = format_time.strftime("%Y-%m-%d %H:%M:%S")
-        navdp_fps_writer = imageio.get_writer("{}_fps_pointgoal.mp4".format(format_time),fps=7)
+        navdp_fps_writer = make_navdp_writer()
     else:
-        navdp_fps_writer.close()
-        format_time = datetime.datetime.fromtimestamp(time.time())
-        format_time = format_time.strftime("%Y-%m-%d %H:%M:%S")
-        navdp_fps_writer = imageio.get_writer("{}_fps_pointgoal.mp4".format(format_time),fps=7)
+        close_navdp_writer()
+        navdp_fps_writer = make_navdp_writer()
     return jsonify({"algo":"navdp"})
+
+@app.route("/navigator_close",methods=['POST'])
+def navdp_close():
+    close_navdp_writer()
+    return jsonify({"ok": True})
 
 @app.route("/navigator_reset_env",methods=['POST'])
 def navdp_reset_env():
@@ -85,7 +122,7 @@ def navdp_step_xy():
     phase2_time = time.time()
     execute_trajectory, all_trajectory, all_values, trajectory_mask = navdp_navigator.step_pointgoal(goal,image,depth)
     phase3_time = time.time()
-    navdp_fps_writer.append_data(trajectory_mask)
+    append_navdp_frame(trajectory_mask)
     phase4_time = time.time()
     print("phase1:%f, phase2:%f, phase3:%f, phase4:%f, all:%f"%(phase1_time - start_time, phase2_time - phase1_time, phase3_time - phase2_time, phase4_time-phase3_time, time.time() - start_time))
 
@@ -123,7 +160,7 @@ def navdp_step_pixel():
     phase2_time = time.time()
     execute_trajectory, all_trajectory, all_values, trajectory_mask = navdp_navigator.step_pixelgoal(goal,image,depth)
     phase3_time = time.time()
-    navdp_fps_writer.append_data(trajectory_mask)
+    append_navdp_frame(trajectory_mask)
     phase4_time = time.time()
     print("phase1:%f, phase2:%f, phase3:%f, phase4:%f, all:%f"%(phase1_time - start_time, phase2_time - phase1_time, phase3_time - phase2_time, phase4_time-phase3_time, time.time() - start_time))
     return jsonify({'trajectory': execute_trajectory.tolist(),
@@ -163,7 +200,7 @@ def navdp_step_image():
     phase2_time = time.time()
     execute_trajectory, all_trajectory, all_values, trajectory_mask = navdp_navigator.step_imagegoal(goal,image,depth)
     phase3_time = time.time()
-    navdp_fps_writer.append_data(trajectory_mask)
+    append_navdp_frame(trajectory_mask)
     phase4_time = time.time()
     print("phase1:%f, phase2:%f, phase3:%f, phase4:%f, all:%f"%(phase1_time - start_time, phase2_time - phase1_time, phase3_time - phase2_time, phase4_time-phase3_time, time.time() - start_time))
     return jsonify({'trajectory': execute_trajectory.tolist(),
@@ -194,7 +231,7 @@ def navdp_step_nogoal():
     phase2_time = time.time()
     execute_trajectory, all_trajectory, all_values, trajectory_mask = navdp_navigator.step_nogoal(image,depth)
     phase3_time = time.time()
-    navdp_fps_writer.append_data(trajectory_mask)
+    append_navdp_frame(trajectory_mask)
     phase4_time = time.time()
     print("phase1:%f, phase2:%f, phase3:%f, phase4:%f, all:%f"%(phase1_time - start_time, phase2_time - phase1_time, phase3_time - phase2_time, phase4_time-phase3_time, time.time() - start_time))
     return jsonify({'trajectory': execute_trajectory.tolist(),
@@ -238,7 +275,7 @@ def navdp_step_ip_mixgoal():
     phase2_time = time.time()
     execute_trajectory, all_trajectory, all_values, trajectory_mask = navdp_navigator.step_point_image_goal(point_goal,image_goal,image,depth)
     phase3_time = time.time()
-    navdp_fps_writer.append_data(trajectory_mask)
+    append_navdp_frame(trajectory_mask)
     phase4_time = time.time()
     print("phase1:%f, phase2:%f, phase3:%f, phase4:%f, all:%f"%(phase1_time - start_time, phase2_time - phase1_time, phase3_time - phase2_time, phase4_time-phase3_time, time.time() - start_time))
     return jsonify({'trajectory': execute_trajectory.tolist(),
