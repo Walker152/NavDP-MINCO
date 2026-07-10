@@ -60,7 +60,15 @@ import torchvision.transforms as F
 import time
 import threading
 
-from utils_tasks.basic_utils import PlanningInput, PlanningOutput, find_usd_path, write_metrics, draw_box_with_text,adjust_usd_scale
+from utils_tasks.basic_utils import (
+    PlanningInput,
+    PlanningOutput,
+    compute_forward_velocity,
+    find_usd_path,
+    write_metrics,
+    draw_box_with_text,
+    adjust_usd_scale,
+)
 from configs.robots import *
 from configs.scenes import *
 from configs.tasks import *
@@ -69,7 +77,7 @@ from utils_tasks.visualization_utils import VisualizationManager
 from utils_tasks.tracking_utils import MPC_Controller
 from utils_tasks.timing_utils import (
     StageTimer,
-    draw_timing_overlay,
+    append_timing_panel,
     format_control_summary,
     format_minco_summary,
     format_planning_summary,
@@ -83,6 +91,8 @@ output_lock = threading.Lock()
 stop_event = threading.Event()
 vis_manager = [VisualizationManager(history_size=5) for i in range(args_cli.num_envs)]
 mpc = [None for _ in range(args_cli.num_envs)]
+last_applied_plan_id = [-1 for _ in range(args_cli.num_envs)]
+episode_generation = np.zeros(args_cli.num_envs, dtype=np.int64)
 use_robot_base_frame = bool(args_cli.use_robot_base_frame)
 
 def query_esdf_polyline(esdf, points):
@@ -107,7 +117,6 @@ def query_esdf_polyline(esdf, points):
     return float(np.min(vals)) if vals else float("nan")
 
 def planning_thread(env, camera_intrinsic, minco_adapter=None):
-    global mpc
     """Thread function that continuously plans trajectories"""
     planning_iter = 0
     while not stop_event.is_set():
@@ -129,6 +138,11 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     robot_yaw_w = planning_input.robot_yaw_w.copy() if planning_input.robot_yaw_w is not None else None
                     robot_lin_vel_w = planning_input.robot_lin_vel_w.copy() if planning_input.robot_lin_vel_w is not None else None
                     robot_ang_vel_w = planning_input.robot_ang_vel_w.copy() if planning_input.robot_ang_vel_w is not None else None
+                    input_episode_generation = (
+                        planning_input.episode_generation.copy()
+                        if planning_input.episode_generation is not None
+                        else np.zeros(args_cli.num_envs, dtype=np.int64)
+                    )
             with output_lock:
                 planning_output.is_planning = True
             
@@ -216,7 +230,6 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                 planning_timer.records["minco_total_ms"] = 0.0
 
             with planning_timer.section("mpc_construct_ms"):
-                next_mpc = [None for _ in range(args_cli.num_envs)]
                 if used_minco:
                     for idx, result in enumerate(minco_results):
                         if result["success"] and result["waypoints"] is not None and len(result["waypoints"]) >= 2:
@@ -224,10 +237,6 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         else:
                             trajectory_points_world = np.asarray(raw_top1_world[idx])[:, :2]
                         batch_optimal_points_world.append(trajectory_points_world)
-                        next_mpc[idx] = MPC_Controller(trajectory_points_world,
-                                                       desired_v=args_cli.speed,
-                                                       v_max=args_cli.speed,
-                                                       w_max=args_cli.speed)
                         batch_raw_top1_world.append(result.get("raw_top1"))
                         batch_selected_candidate_world.append(result.get("selected_candidate"))
                         batch_control_points_world.append(result.get("control_points"))
@@ -238,10 +247,6 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     for idx in range(len(raw_top1_world)):
                         trajectory_points_world = np.asarray(raw_top1_world[idx])[:, :2]
                         batch_optimal_points_world.append(trajectory_points_world)
-                        next_mpc[idx] = MPC_Controller(trajectory_points_world,
-                                                       desired_v=args_cli.speed,
-                                                       v_max=args_cli.speed,
-                                                       w_max=args_cli.speed)
                         batch_raw_top1_world.append(trajectory_points_world)
                         batch_selected_candidate_world.append(None)
                         batch_control_points_world.append(None)
@@ -272,7 +277,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
 
             # Update shared state
             with output_lock:
-                mpc = next_mpc
+                planning_output.plan_id += 1
+                planning_output.episode_generation = input_episode_generation.copy()
                 planning_output.trajectory_points_world = batch_optimal_points_world
                 planning_output.all_trajectories_world = batch_all_points_world_vis
                 planning_output.all_values_camera = all_values_camera
@@ -408,6 +414,9 @@ try:
             robot_quat_xyzw = robot_quat_w[:, [1, 2, 3, 0]]
             robot_rot = R.from_quat(robot_quat_xyzw).as_matrix()
             robot_yaw_w = np.arctan2(robot_rot[:, 1, 0], robot_rot[:, 0, 0])
+            robot_lin_vel_w_np = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :3].cpu().numpy().copy()
+            robot_ang_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy()
+            robot_vel_batch = compute_forward_velocity(robot_lin_vel_w_np, robot_yaw_w)
 
             if frame_idx % max(1, args_cli.timing_log_interval) == 0:
                 offset_xy = camera_pos[0, :2] - robot_pos_w[0, :2]
@@ -424,13 +433,11 @@ try:
                 planning_input.camera_rot = camera_rot.copy()
                 planning_input.robot_pos_w = robot_pos_w.copy()
                 planning_input.robot_yaw_w = robot_yaw_w.copy()
-                planning_input.robot_lin_vel_w = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :3].cpu().numpy().copy()
-                planning_input.robot_ang_vel_w = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy().copy()
+                planning_input.robot_lin_vel_w = robot_lin_vel_w_np.copy()
+                planning_input.robot_ang_vel_w = robot_ang_vel_batch.copy()
+                planning_input.episode_generation = episode_generation.copy()
 
             # based on the current world trajectory
-            robot_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_lin_vel_w[:, :2].norm(dim=1).cpu().numpy()
-            robot_ang_vel_batch = env.unwrapped.scene.articulations['robot'].data.root_ang_vel_w[:, 2].cpu().numpy()
-
             if use_robot_base_frame:
                 x0 = np.stack([
                     robot_pos_w[:, 0],
@@ -457,26 +464,67 @@ try:
             current_minco_speed_profile = None
             current_minco_info = None
             current_planning_timing = None
-            current_mpc = None
+            current_plan_id = -1
+            current_episode_generation = None
             with output_lock:
                 if planning_output.trajectory_points_world is not None:
+                    current_plan_id = planning_output.plan_id
+                    current_episode_generation = (
+                        planning_output.episode_generation.copy()
+                        if planning_output.episode_generation is not None
+                        else None
+                    )
                     current_trajectory = planning_output.trajectory_points_world.copy() if planning_output.trajectory_points_world is not None else None
                     current_all_trajectories = planning_output.all_trajectories_world.copy() if planning_output.all_trajectories_world is not None else None
                     current_all_values = planning_output.all_values_camera.copy() if planning_output.all_values_camera is not None else None
                     current_raw_top1 = planning_output.raw_top1_world.copy() if planning_output.raw_top1_world is not None else None
                     current_selected_candidate = planning_output.selected_candidate_world.copy() if planning_output.selected_candidate_world is not None else None
                     current_control_points = planning_output.minco_control_points_world.copy() if planning_output.minco_control_points_world is not None else None
-                    current_minco_samples = planning_output.minco_samples
+                    current_minco_samples = [
+                        np.asarray(s, dtype=np.float64).copy() if s is not None else None
+                        for s in planning_output.minco_samples
+                    ] if planning_output.minco_samples is not None else None
                     current_minco_speed_profile = planning_output.minco_speed_profile
-                    current_minco_info = planning_output.minco_info
+                    current_minco_info = [dict(info) for info in planning_output.minco_info] if planning_output.minco_info is not None else None
                     current_planning_timing = planning_output.planning_timing.copy() if planning_output.planning_timing is not None else None
-                    current_mpc = list(mpc) if isinstance(mpc, list) else mpc
         
             if current_trajectory is not None:
                 action_list = []
                 control_timing_records = []
                 for i in range(args_cli.num_envs):
                     control_timer = StageTimer()
+                    output_generation_i = (
+                        int(current_episode_generation[i])
+                        if current_episode_generation is not None and i < len(current_episode_generation)
+                        else -1
+                    )
+                    if output_generation_i != int(episode_generation[i]):
+                        action_list.append(np.zeros(2, dtype=np.float32))
+                        continue
+
+                    if current_plan_id != last_applied_plan_id[i]:
+                        path_i = np.asarray(current_trajectory[i], dtype=np.float64)
+                        samples_i = (
+                            current_minco_samples[i]
+                            if current_minco_samples is not None and i < len(current_minco_samples)
+                            else None
+                        )
+                        if mpc[i] is None:
+                            mpc[i] = MPC_Controller(
+                                path_i,
+                                trajectory_samples=samples_i,
+                                desired_v=args_cli.speed,
+                                v_max=args_cli.speed,
+                                w_max=args_cli.speed,
+                                max_acc=args_cli.minco_max_acc,
+                            )
+                        else:
+                            mpc[i].update_reference(
+                                path_i,
+                                trajectory_samples=samples_i,
+                                desired_v=args_cli.speed,
+                            )
+                        last_applied_plan_id[i] = current_plan_id
 
                     with control_timer.section("visualize_ms"):
                         vis_image = vis_manager[i].visualize_trajectory(
@@ -506,25 +554,33 @@ try:
                             f"adapter_py_min={adapter_py_min:.3f} vis_py_min={py_min:.3f}"
                         )
 
-                    mpc_i = current_mpc[i] if isinstance(current_mpc, list) and i < len(current_mpc) else current_mpc
+                    mpc_i = mpc[i]
                     if mpc_i is None:
                         action_list.append(np.zeros(2, dtype=np.float32))
                         continue
                     with control_timer.section("mpc_solve_ms"):
-                        opt_u_controls, opt_x_states = mpc_i.solve(x0[i, :3])
-                    v, w = opt_u_controls[1, 0], opt_u_controls[1, 1]
+                        opt_u_controls, opt_x_states = mpc_i.solve(x0[i, :5])
+                    v, w = opt_u_controls[0, 0], opt_u_controls[0, 1]
+                    if not np.isfinite(v) or not np.isfinite(w):
+                        v, w = 0.0, 0.0
+                    v = float(np.clip(v, 0.0, args_cli.speed))
+                    w = float(np.clip(w, -args_cli.speed, args_cli.speed))
                     action = torch.tensor([v, w], device="cuda:0")
                     action_cpu = action.cpu().numpy()
                     joint_velocities = controller.forward(action_cpu).joint_velocities
                     action_list.append(joint_velocities)
 
-                    planned_v = None
-                    if current_minco_speed_profile is not None:
-                        profile = current_minco_speed_profile[i]
-                        if profile is not None:
-                            profile_np = np.asarray(profile, dtype=np.float64).reshape(-1)
-                            if profile_np.size > 0 and np.isfinite(profile_np[0]):
-                                planned_v = float(profile_np[0])
+                    current_ref = mpc_i.get_current_reference()
+                    planned_v = float(current_ref[3]) if current_ref is not None and np.isfinite(current_ref[3]) else None
+                    planned_w = float(current_ref[4]) if current_ref is not None and np.isfinite(current_ref[4]) else None
+                    if frame_idx % max(1, args_cli.timing_log_interval) == 0 and current_ref is not None:
+                        ref_v_print = planned_v if planned_v is not None else float("nan")
+                        ref_w_print = planned_w if planned_w is not None else float("nan")
+                        print(
+                            f"[ControlRef] env={i} plan={current_plan_id} idx={mpc_i.progress_idx} "
+                            f"actual_v={robot_vel_batch[i]:.2f} ref_v={ref_v_print:.2f} "
+                            f"ref_w={ref_w_print:.2f} cmd_v={v:.2f} cmd_w={w:.2f}"
+                        )
 
                     with control_timer.section("speed_plot_ms"):
                         vis_manager[i].update_speed_history(
@@ -568,7 +624,12 @@ try:
                         control_timing["env_step_ms"] = 0.0
 
                         if args_cli.show_timing_overlay:
-                            vis_image = draw_timing_overlay(vis_image, current_planning_timing, control_timing)
+                            vis_image = append_timing_panel(
+                                vis_image,
+                                current_planning_timing,
+                                control_timing,
+                                env_index=i,
+                            )
 
                         if not stop_event.is_set():
                             vis_image = np.ascontiguousarray(np.asarray(vis_image, dtype=np.uint8))
@@ -606,6 +667,22 @@ try:
                 if stop_event.is_set():
                     break
                 if dones[i] == True:
+                    episode_generation[i] += 1
+                    if mpc[i] is not None:
+                        mpc[i].reset()
+                    last_applied_plan_id[i] = -1
+                    with input_lock:
+                        if planning_input.episode_generation is None:
+                            planning_input.episode_generation = episode_generation.copy()
+                        else:
+                            planning_input.episode_generation = planning_input.episode_generation.copy()
+                            planning_input.episode_generation[i] = episode_generation[i]
+                    with output_lock:
+                        if planning_output.episode_generation is None:
+                            planning_output.episode_generation = np.full(args_cli.num_envs, -1, dtype=np.int64)
+                        else:
+                            planning_output.episode_generation = planning_output.episode_generation.copy()
+                        planning_output.episode_generation[i] = episode_generation[i] - 1
                     episode_num += 1
                     navigator_reset(env_id=i,port=args_cli.port)
                     success_flag = (np.sqrt(np.square(goals[i]).sum())<1.0).astype(np.float32)

@@ -1,13 +1,26 @@
-import casadi as ca
-import numpy as np
-import time
+import math
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from scipy.interpolate import interp1d
-from typing import Optional, List, Tuple
+import time
 from dataclasses import dataclass
 from queue import Queue
+from typing import List, Optional, Tuple
+
+import casadi as ca
+import numpy as np
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+
+SAMPLE_T = 0
+SAMPLE_POS_X = 1
+SAMPLE_POS_Y = 2
+SAMPLE_VEL_X = 4
+SAMPLE_VEL_Y = 5
+SAMPLE_YAW = 13
+SAMPLE_YAW_DOT = 14
+MIN_SAMPLE_COLS = 15
+
 
 @dataclass
 class PlanningInput:
@@ -19,110 +32,418 @@ class PlanningInput:
     robot_lin_vel_w: Optional[np.ndarray] = None
     robot_ang_vel_w: Optional[np.ndarray] = None
 
+
 @dataclass
 class PlanningOutput:
     trajectory_points_world: Optional[np.ndarray] = None
     all_trajectories_world: Optional[List[np.ndarray]] = None
     all_values_camera: Optional[np.ndarray] = None
+    plan_id: int = 0
     is_planning: bool = False
     planning_error: Optional[str] = None
 
+
 class MPC_Controller:
-    def __init__(self, global_planed_traj, N = 15, desired_v = 0.5, v_max = 0.5, w_max = 0.5, ref_gap = 3):
-        self.N, self.desired_v, self.ref_gap, self.T = N, desired_v, ref_gap, 0.1
-        
-        self.ref_traj = self.make_ref_denser(global_planed_traj)
-        self.ref_traj_len = N // ref_gap + 1
+    def __init__(
+        self,
+        global_planed_traj,
+        N=15,
+        desired_v=0.5,
+        v_max=0.5,
+        w_max=0.5,
+        ref_gap=3,
+        trajectory_samples=None,
+        T=0.1,
+        max_acc=4.0,
+        max_yaw_acc=4.0,
+    ):
+        self.N = int(N)
+        self.T = float(T)
+        self.desired_v = float(desired_v)
+        self.v_max = float(v_max)
+        self.w_max = float(w_max)
+        self.ref_gap = int(ref_gap)
+        self.max_acc = float(max_acc)
+        self.max_yaw_acc = float(max_yaw_acc)
 
-        # setup mpc problem
-        opti = ca.Opti()
-        opt_controls = opti.variable(N, 2)
-        v, w = opt_controls[:, 0], opt_controls[:, 1]
+        self.q_xy = 20.0
+        self.q_yaw = 3.0
+        self.q_v = 8.0
+        self.q_w = 2.0
+        self.r_v = 1.0
+        self.r_w = 0.5
+        self.r_dv = 4.0
+        self.r_dw = 1.5
+        self.terminal_scale = 1.5
 
-        opt_states = opti.variable(N+1, 3)
-        x, y, theta = opt_states[:, 0], opt_states[:, 1], opt_states[:, 2]
-
-        # parameters 
-        opt_x0 = opti.parameter(3)
-        opt_xs = opti.parameter(3 * self.ref_traj_len) # the intermidia state may also be the parameter
-
-        # system dynamics for mobile manipulator
-        f = lambda x_, u_: ca.vertcat(*[u_[0]*ca.cos(x_[2]), u_[0]*ca.sin(x_[2]), u_[1]])
-
-        # init_condition
-        opti.subject_to(opt_states[0, :] == opt_x0.T)
-        for i in range(N):
-            x_next = opt_states[i, :] + f(opt_states[i, :], opt_controls[i, :]).T*self.T
-            opti.subject_to(opt_states[i+1, :]==x_next)
-
-        # define the cost function
-        Q = np.diag([10.0,10.0,0.0])
-        R = np.diag([0.02,0.15])
-        obj = 0 
-        for i in range(N):
-            obj = obj +ca.mtimes([opt_controls[i, :], R, opt_controls[i, :].T])
-            if i % ref_gap == 0:
-                nn = i // ref_gap
-                obj = obj + ca.mtimes([(opt_states[i, :]-opt_xs[nn*3:nn*3+3].T), Q, (opt_states[i, :]-opt_xs[nn*3:nn*3+3].T).T])
-        opti.minimize(obj)
-
-        # boundrary and control conditions
-        opti.subject_to(opti.bounded(0.0, v, v_max))
-        opti.subject_to(opti.bounded(-w_max, w, w_max))
-        
-        opts_setting = {'ipopt.max_iter':100, 'ipopt.print_level':0, 'print_time':0, 'ipopt.acceptable_tol':1e-8, 'ipopt.acceptable_obj_change_tol':1e-6}
-        opti.solver('ipopt', opts_setting)
-        
-        self.opti = opti
-        self.opt_xs = opt_xs
-        self.opt_x0 = opt_x0
-        self.opt_controls = opt_controls
-        self.opt_states = opt_states
+        self.reference = None
+        self.progress_idx = 0
+        self._needs_global_alignment = True
+        self._current_reference = None
+        self._last_reference_horizon = None
+        self._last_solve_error = None
+        self._last_error_print_time = 0.0
         self.last_opt_x_states = None
         self.last_opt_u_controls = None
-    def make_ref_denser(self, ref_traj, ratio = 50):
-        x_orig = np.arange(len(ref_traj))
-        new_x = np.linspace(0, len(ref_traj) - 1, num=len(ref_traj) * ratio)
-        interp_func_x = interp1d(x_orig, ref_traj[:, 0], kind='linear')
-        interp_func_y = interp1d(x_orig, ref_traj[:, 1], kind='linear')
-        uniform_x = interp_func_x(new_x)
-        uniform_y = interp_func_y(new_x)
-        ref_traj = np.stack((uniform_x, uniform_y), axis=1)
-        return ref_traj
-    
-    def solve(self, x00):
-        ref_traj = self.find_reference_traj(x00, self.ref_traj)
-        # fake a yaw angle
-        ref_traj = np.concatenate((ref_traj, np.zeros((ref_traj.shape[0], 1))), axis=1).reshape(-1, 1)
-        self.opti.set_value(self.opt_xs, ref_traj.reshape(-1, 1)) 
-        u0 = np.zeros((self.N, 2)) if self.last_opt_u_controls is None else self.last_opt_u_controls
-        x0 = np.zeros((self.N+1, 3)) if self.last_opt_x_states is None else self.last_opt_x_states
-        self.opti.set_value(self.opt_x0, x00)
-        self.opti.set_initial(self.opt_controls, u0)
-        self.opti.set_initial(self.opt_states, x0)
-        sol = self.opti.solve()
-        self.last_opt_u_controls = sol.value(self.opt_controls)
-        self.last_opt_x_states = sol.value(self.opt_states)
+        self.last_command = np.zeros(2, dtype=np.float64)
 
-        return self.last_opt_u_controls, self.last_opt_x_states
+        self._build_problem()
+        self.update_reference(
+            global_planed_traj,
+            trajectory_samples=trajectory_samples,
+            desired_v=desired_v,
+        )
+
+    def _build_problem(self):
+        opti = ca.Opti()
+        opt_controls = opti.variable(self.N, 2)
+        opt_states = opti.variable(self.N + 1, 5)
+        opt_x0 = opti.parameter(5)
+        opt_refs = opti.parameter(self.N + 1, 5)
+
+        opti.subject_to(opt_states[0, :] == opt_x0.T)
+        for i in range(self.N):
+            x_i = opt_states[i, :]
+            u_i = opt_controls[i, :]
+            x_next = ca.horzcat(
+                x_i[0] + x_i[3] * ca.cos(x_i[2]) * self.T,
+                x_i[1] + x_i[3] * ca.sin(x_i[2]) * self.T,
+                x_i[2] + x_i[4] * self.T,
+                u_i[0],
+                u_i[1],
+            )
+            opti.subject_to(opt_states[i + 1, :] == x_next)
+            opti.subject_to(opti.bounded(-self.max_acc * self.T, u_i[0] - x_i[3], self.max_acc * self.T))
+            opti.subject_to(opti.bounded(-self.max_yaw_acc * self.T, u_i[1] - x_i[4], self.max_yaw_acc * self.T))
+
+        opti.subject_to(opti.bounded(0.0, opt_controls[:, 0], self.v_max))
+        opti.subject_to(opti.bounded(-self.w_max, opt_controls[:, 1], self.w_max))
+
+        obj = 0
+        for i in range(self.N):
+            yaw_error = self._casadi_yaw_error(opt_states[i, 2], opt_refs[i, 2])
+            obj += self.q_xy * (
+                (opt_states[i, 0] - opt_refs[i, 0]) ** 2
+                + (opt_states[i, 1] - opt_refs[i, 1]) ** 2
+            )
+            obj += self.q_yaw * yaw_error ** 2
+            obj += self.q_v * (opt_states[i, 3] - opt_refs[i, 3]) ** 2
+            obj += self.q_w * (opt_states[i, 4] - opt_refs[i, 4]) ** 2
+            obj += self.r_v * (opt_controls[i, 0] - opt_refs[i + 1, 3]) ** 2
+            obj += self.r_w * (opt_controls[i, 1] - opt_refs[i + 1, 4]) ** 2
+            obj += self.r_dv * (opt_controls[i, 0] - opt_states[i, 3]) ** 2
+            obj += self.r_dw * (opt_controls[i, 1] - opt_states[i, 4]) ** 2
+
+        terminal_yaw_error = self._casadi_yaw_error(opt_states[self.N, 2], opt_refs[self.N, 2])
+        obj += self.terminal_scale * (
+            self.q_xy * (
+                (opt_states[self.N, 0] - opt_refs[self.N, 0]) ** 2
+                + (opt_states[self.N, 1] - opt_refs[self.N, 1]) ** 2
+            )
+            + self.q_yaw * terminal_yaw_error ** 2
+            + self.q_v * (opt_states[self.N, 3] - opt_refs[self.N, 3]) ** 2
+            + self.q_w * (opt_states[self.N, 4] - opt_refs[self.N, 4]) ** 2
+        )
+        opti.minimize(obj)
+
+        opts_setting = {
+            "ipopt.max_iter": 100,
+            "ipopt.print_level": 0,
+            "print_time": 0,
+            "ipopt.acceptable_tol": 1e-8,
+            "ipopt.acceptable_obj_change_tol": 1e-6,
+        }
+        opti.solver("ipopt", opts_setting)
+
+        self.opti = opti
+        self.opt_x0 = opt_x0
+        self.opt_refs = opt_refs
+        self.opt_controls = opt_controls
+        self.opt_states = opt_states
+
+    @staticmethod
+    def _casadi_yaw_error(yaw, yaw_ref):
+        return ca.atan2(ca.sin(yaw - yaw_ref), ca.cos(yaw - yaw_ref))
+
+    def update_reference(self, global_planed_traj, trajectory_samples=None, desired_v=None):
+        if desired_v is not None:
+            self.desired_v = float(desired_v)
+        reference = self._parse_minco_samples(trajectory_samples)
+        if reference is None:
+            reference = self._build_fallback_reference(global_planed_traj)
+        self.reference = reference
+        self.progress_idx = 0
+        self._needs_global_alignment = True
+        self._current_reference = None
+        self._last_reference_horizon = None
+
+    def _parse_minco_samples(self, samples):
+        if samples is None:
+            return None
+        samples = np.asarray(samples, dtype=np.float64)
+        if samples.ndim != 2 or samples.shape[0] < 2 or samples.shape[1] < MIN_SAMPLE_COLS:
+            return None
+
+        required = samples[:, [SAMPLE_T, SAMPLE_POS_X, SAMPLE_POS_Y, SAMPLE_VEL_X, SAMPLE_VEL_Y, SAMPLE_YAW_DOT]]
+        valid_rows = np.all(np.isfinite(required), axis=1)
+        if np.count_nonzero(valid_rows) < 2:
+            return None
+        samples = samples[valid_rows]
+
+        t = samples[:, SAMPLE_T]
+        if np.any(np.diff(t) < -1e-9):
+            return None
+        keep = np.ones(t.shape[0], dtype=bool)
+        keep[1:] = np.diff(t) > 1e-9
+        samples = samples[keep]
+        if samples.shape[0] < 2:
+            return None
+
+        t = samples[:, SAMPLE_T] - samples[0, SAMPLE_T]
+        x = samples[:, SAMPLE_POS_X]
+        y = samples[:, SAMPLE_POS_Y]
+        vx = samples[:, SAMPLE_VEL_X]
+        vy = samples[:, SAMPLE_VEL_Y]
+        yaw = self._repair_yaw(x, y, vx, vy, samples[:, SAMPLE_YAW])
+        if yaw is None:
+            return None
+        yaw = np.unwrap(yaw)
+        v = np.clip(np.hypot(vx, vy), 0.0, self.v_max)
+        w = np.clip(samples[:, SAMPLE_YAW_DOT], -self.w_max, self.w_max)
+        reference = np.column_stack((t, x, y, yaw, v, w))
+        if reference.shape[0] < 2 or not np.all(np.isfinite(reference)):
+            return None
+        return reference
+
+    def _repair_yaw(self, x, y, vx, vy, yaw_raw):
+        yaw = np.asarray(yaw_raw, dtype=np.float64).copy()
+        speed = np.hypot(vx, vy)
+        path_yaw = self._path_tangent_yaw(np.column_stack((x, y)))
+        for i in range(yaw.shape[0]):
+            if np.isfinite(yaw[i]):
+                continue
+            if speed[i] > 1e-3:
+                yaw[i] = math.atan2(vy[i], vx[i])
+            elif i > 0 and np.isfinite(yaw[i - 1]):
+                yaw[i] = yaw[i - 1]
+            elif np.isfinite(path_yaw[i]):
+                yaw[i] = path_yaw[i]
+            else:
+                future = np.flatnonzero(np.isfinite(yaw[i + 1 :]))
+                if future.size > 0:
+                    yaw[i] = yaw[i + 1 + future[0]]
+        if not np.all(np.isfinite(yaw)):
+            finite = np.flatnonzero(np.isfinite(yaw))
+            if finite.size == 0:
+                return None
+            first = finite[0]
+            yaw[:first] = yaw[first]
+            for i in range(first + 1, yaw.shape[0]):
+                if not np.isfinite(yaw[i]):
+                    yaw[i] = yaw[i - 1]
+        return yaw
+
+    def _build_fallback_reference(self, path):
+        path = self._clean_path(path)
+        if path.shape[0] < 2:
+            x, y = (path[0] if path.shape[0] == 1 else np.zeros(2, dtype=np.float64))
+            return np.array(
+                [
+                    [0.0, x, y, 0.0, 0.0, 0.0],
+                    [self.T, x, y, 0.0, 0.0, 0.0],
+                ],
+                dtype=np.float64,
+            )
+
+        segment_lengths = np.linalg.norm(np.diff(path, axis=0), axis=1)
+        arc = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+        total = arc[-1]
+        remaining = np.maximum(0.0, total - arc)
+        desired = max(0.0, min(float(self.desired_v), self.v_max))
+        v_stop_limit = np.sqrt(np.maximum(0.0, 2.0 * max(self.max_acc, 1e-6) * remaining))
+        v_ref = np.minimum(desired, v_stop_limit)
+        v_ref[-1] = 0.0
+
+        t = np.zeros(path.shape[0], dtype=np.float64)
+        for i in range(1, path.shape[0]):
+            avg_v = max(0.5 * (v_ref[i - 1] + v_ref[i]), 0.05)
+            t[i] = t[i - 1] + segment_lengths[i - 1] / avg_v
+
+        yaw = np.unwrap(self._path_tangent_yaw(path))
+        if not np.all(np.isfinite(yaw)):
+            yaw = np.nan_to_num(yaw, nan=0.0)
+        w_ref = np.gradient(yaw, t, edge_order=1) if path.shape[0] > 2 else np.zeros_like(yaw)
+        w_ref = np.clip(w_ref, -self.w_max, self.w_max)
+        return np.column_stack((t, path[:, 0], path[:, 1], yaw, v_ref, w_ref))
+
+    @staticmethod
+    def _clean_path(path):
+        if path is None:
+            return np.zeros((0, 2), dtype=np.float64)
+        path = np.asarray(path, dtype=np.float64)
+        if path.ndim != 2 or path.shape[1] < 2:
+            return np.zeros((0, 2), dtype=np.float64)
+        path = path[:, :2]
+        path = path[np.all(np.isfinite(path), axis=1)]
+        if path.shape[0] <= 1:
+            return path
+        keep = np.ones(path.shape[0], dtype=bool)
+        keep[1:] = np.linalg.norm(np.diff(path, axis=0), axis=1) > 1e-6
+        return path[keep]
+
+    @staticmethod
+    def _path_tangent_yaw(path):
+        path = np.asarray(path, dtype=np.float64)
+        if path.shape[0] < 2:
+            return np.zeros(path.shape[0], dtype=np.float64)
+        deltas = np.diff(path[:, :2], axis=0)
+        seg_yaw = np.arctan2(deltas[:, 1], deltas[:, 0])
+        yaw = np.empty(path.shape[0], dtype=np.float64)
+        yaw[:-1] = seg_yaw
+        yaw[-1] = seg_yaw[-1]
+        return yaw
+
+    def _find_progress_index(self, current_xy):
+        ref_xy = self.reference[:, 1:3]
+        if self._needs_global_alignment:
+            start = 0
+        else:
+            start = max(0, self.progress_idx - 3)
+        local_idx = int(np.argmin(np.linalg.norm(ref_xy[start:] - current_xy.reshape(1, 2), axis=1)))
+        self.progress_idx = start + local_idx
+        self._needs_global_alignment = False
+        return self.progress_idx
+
+    def _build_reference_horizon(self, current_state):
+        if self.reference is None or self.reference.shape[0] == 0:
+            self.reference = self._build_fallback_reference(None)
+        idx = self._find_progress_index(current_state[:2])
+        t0 = self.reference[idx, 0]
+        t_ref = t0 + np.arange(self.N + 1, dtype=np.float64) * self.T
+        src_t = self.reference[:, 0]
+        horizon = np.empty((self.N + 1, 5), dtype=np.float64)
+        for out_col, ref_col in enumerate([1, 2, 3, 4, 5]):
+            horizon[:, out_col] = np.interp(
+                t_ref,
+                src_t,
+                self.reference[:, ref_col],
+                left=self.reference[0, ref_col],
+                right=self.reference[-1, ref_col],
+            )
+        beyond_tail = t_ref > src_t[-1]
+        horizon[beyond_tail, 3] = 0.0
+        horizon[beyond_tail, 4] = 0.0
+        horizon[:, 2] = np.unwrap(horizon[:, 2])
+        self._current_reference = horizon[0].copy()
+        self._last_reference_horizon = horizon.copy()
+        return horizon
+
+    def solve(self, x00):
+        state = self._coerce_state(x00)
+        horizon = self._build_reference_horizon(state)
+        self.opti.set_value(self.opt_x0, state)
+        self.opti.set_value(self.opt_refs, horizon)
+        self.opti.set_initial(self.opt_controls, self._initial_u_guess(state, horizon))
+        self.opti.set_initial(self.opt_states, self._initial_x_guess(state, horizon))
+        try:
+            sol = self.opti.solve()
+            u_sol = np.asarray(sol.value(self.opt_controls), dtype=np.float64)
+            x_sol = np.asarray(sol.value(self.opt_states), dtype=np.float64)
+            if not np.all(np.isfinite(u_sol)) or not np.all(np.isfinite(x_sol)):
+                raise RuntimeError("MPC solve returned non-finite values")
+        except Exception as exc:
+            return self._safe_deceleration_solution(state, exc)
+
+        self.last_command = u_sol[0].copy()
+        self.last_opt_u_controls = np.vstack([u_sol[1:], u_sol[-1:]])
+        self.last_opt_x_states = np.vstack([x_sol[1:], x_sol[-1:]])
+        self._last_solve_error = None
+        return u_sol, x_sol
+
+    def _coerce_state(self, x00):
+        state_in = np.asarray(x00, dtype=np.float64).reshape(-1)
+        state = np.zeros(5, dtype=np.float64)
+        count = min(state_in.size, 5)
+        state[:count] = state_in[:count]
+        if state_in.size < 4:
+            state[3:] = self.last_command
+        elif state_in.size < 5:
+            state[4] = self.last_command[1]
+        state = np.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
+        state[3] = max(0.0, state[3])
+        return state
+
+    def _initial_u_guess(self, state, horizon):
+        if self.last_opt_u_controls is not None:
+            return self.last_opt_u_controls
+        guess = np.zeros((self.N, 2), dtype=np.float64)
+        current_v = state[3]
+        current_w = state[4]
+        for i in range(self.N):
+            target_v = np.clip(horizon[min(i + 1, self.N), 3], 0.0, self.v_max)
+            target_w = np.clip(horizon[min(i + 1, self.N), 4], -self.w_max, self.w_max)
+            current_v = self._move_toward(current_v, target_v, self.max_acc * self.T)
+            current_w = self._move_toward(current_w, target_w, self.max_yaw_acc * self.T)
+            guess[i] = [current_v, current_w]
+        return guess
+
+    def _initial_x_guess(self, state, horizon):
+        if self.last_opt_x_states is not None:
+            return self.last_opt_x_states
+        guess = np.zeros((self.N + 1, 5), dtype=np.float64)
+        guess[0] = state
+        guess[1:] = horizon[1:]
+        guess[:, 3] = np.clip(guess[:, 3], 0.0, self.v_max)
+        guess[:, 4] = np.clip(guess[:, 4], -self.w_max, self.w_max)
+        return guess
+
+    def _safe_deceleration_solution(self, state, exc):
+        now = time.time()
+        error_text = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        if error_text != self._last_solve_error or now - self._last_error_print_time > 2.0:
+            print(f"[MPC] solve failed, using safe deceleration: {error_text}")
+            self._last_solve_error = error_text
+            self._last_error_print_time = now
+
+        controls = np.zeros((self.N, 2), dtype=np.float64)
+        states = np.zeros((self.N + 1, 5), dtype=np.float64)
+        states[0] = state
+        current_v = state[3]
+        current_w = state[4]
+        for i in range(self.N):
+            current_v = max(0.0, current_v - self.max_acc * self.T)
+            current_w = self._move_toward(current_w, 0.0, self.max_yaw_acc * self.T)
+            current_v = float(np.clip(current_v, 0.0, self.v_max))
+            current_w = float(np.clip(current_w, -self.w_max, self.w_max))
+            controls[i] = [current_v, current_w]
+            states[i + 1, 0] = states[i, 0] + states[i, 3] * math.cos(states[i, 2]) * self.T
+            states[i + 1, 1] = states[i, 1] + states[i, 3] * math.sin(states[i, 2]) * self.T
+            states[i + 1, 2] = states[i, 2] + states[i, 4] * self.T
+            states[i + 1, 3] = current_v
+            states[i + 1, 4] = current_w
+
+        self.last_command = controls[0].copy()
+        self.last_opt_u_controls = controls.copy()
+        self.last_opt_x_states = states.copy()
+        return controls, states
+
+    @staticmethod
+    def _move_toward(value, target, step):
+        if value < target:
+            return min(value + step, target)
+        return max(value - step, target)
+
+    def get_current_reference(self):
+        if self._current_reference is None:
+            return None
+        return self._current_reference.copy()
+
     def reset(self):
         self.last_opt_x_states = None
         self.last_opt_u_controls = None
-        
-    def find_reference_traj(self, x0, global_planed_traj):
-        ref_traj_pts = []
-        # find the nearest point in global_planed_traj
-        nearest_idx = np.argmin(np.linalg.norm(global_planed_traj - x0[:2].reshape((1, 2)), axis=1))
-        desire_arc_length = self.desired_v * self.ref_gap * self.T 
-        cum_dist = np.cumsum(np.linalg.norm(np.diff(global_planed_traj, axis=0), axis=1))
-
-        # select the reference points from the nearest point to the end of global_planed_traj
-        for i in range(nearest_idx, len(global_planed_traj) - 1):
-            if cum_dist[i] - cum_dist[nearest_idx] >= desire_arc_length * len(ref_traj_pts):
-                ref_traj_pts.append(global_planed_traj[i, :])
-                if len(ref_traj_pts) == self.ref_traj_len:
-                    break
-        # if the target is reached before the reference trajectory is complete, add the last point of global_planed_traj 
-        while len(ref_traj_pts) < self.ref_traj_len:
-            ref_traj_pts.append(global_planed_traj[-1, :])
-        return np.array(ref_traj_pts)
+        self.last_command = np.zeros(2, dtype=np.float64)
+        self.progress_idx = 0
+        self._needs_global_alignment = True
+        self._current_reference = None
+        self._last_reference_horizon = None
+        self._last_solve_error = None

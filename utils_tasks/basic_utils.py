@@ -19,12 +19,15 @@ class PlanningInput:
     robot_yaw_w: Optional[np.ndarray] = None
     robot_lin_vel_w: Optional[np.ndarray] = None
     robot_ang_vel_w: Optional[np.ndarray] = None
+    episode_generation: Optional[np.ndarray] = None
 
 @dataclass
 class PlanningOutput:
     trajectory_points_world: Optional[np.ndarray] = None
     all_trajectories_world: Optional[List[np.ndarray]] = None
     all_values_camera: Optional[np.ndarray] = None
+    plan_id: int = 0
+    episode_generation: Optional[np.ndarray] = None
 
     raw_top1_world: Optional[np.ndarray] = None
     selected_candidate_world: Optional[np.ndarray] = None
@@ -37,6 +40,17 @@ class PlanningOutput:
     sub_pointgoal_pd: Optional[np.ndarray] = None
     is_planning: bool = False
     planning_error: Optional[str] = None
+
+def compute_forward_velocity(robot_lin_vel_w, robot_yaw_w, clamp_reverse=True):
+    robot_lin_vel_w = np.asarray(robot_lin_vel_w, dtype=np.float64)
+    robot_yaw_w = np.asarray(robot_yaw_w, dtype=np.float64)
+    v_forward = (
+        robot_lin_vel_w[:, 0] * np.cos(robot_yaw_w)
+        + robot_lin_vel_w[:, 1] * np.sin(robot_yaw_w)
+    )
+    if clamp_reverse:
+        v_forward = np.maximum(v_forward, 0.0)
+    return v_forward
 
 def find_usd_path(dir,task='pointgoal'):
     paths = os.listdir(dir)

@@ -3,6 +3,17 @@ import cv2
 from collections import deque
 from scipy.ndimage import binary_dilation
 
+RGB_GREEN = (0, 255, 0)
+RGB_ORANGE = (255, 165, 0)
+RGB_YELLOW = (255, 255, 0)
+RGB_CYAN = (0, 255, 255)
+RGB_RED = (255, 0, 0)
+RGB_BLUE = (0, 0, 255)
+RGB_WHITE = (255, 255, 255)
+RGB_GRAY = (128, 128, 128)
+RGB_BLACK = (0, 0, 0)
+
+
 class VisualizationManager:
     def __init__(self, history_size=5, show_all_candidates=False):
         self.history_size = history_size
@@ -181,7 +192,7 @@ class VisualizationManager:
         center_offset = grid_size // 2
         vis_points = self.world_to_vis_points(points, robot_pose, grid_size, center_offset)
         for p in vis_points:
-            cv2.circle(vis_image, tuple(p), radius + 1, (0, 0, 0), -1, cv2.LINE_AA)
+            cv2.circle(vis_image, tuple(p), radius + 1, RGB_BLACK, -1, cv2.LINE_AA)
             cv2.circle(vis_image, tuple(p), radius, color, -1, cv2.LINE_AA)
         return vis_image
 
@@ -220,9 +231,11 @@ class VisualizationManager:
             d_clamped = np.clip(dist, vmin, vmax)
             gray = np.zeros((grid_size, grid_size), dtype=np.uint8)
             gray[known] = ((d_clamped[known] - vmin) / (vmax - vmin) * 255).astype(np.uint8)
-            colored = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
+            colored_bgr = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
+            colored = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+            colored[unknown] = (30, 30, 30)
 
-        alpha = 0.45
+        alpha = 0.35
         vis_image[:] = cv2.addWeighted(vis_image, 1.0 - alpha, colored, alpha, 0)
         return vis_image
 
@@ -295,9 +308,9 @@ class VisualizationManager:
         cv2.line(plot, (40, plot_h - 30), (plot_w - 20, plot_h - 30), (80, 80, 80), 1, cv2.LINE_AA)
 
         for pts, color in [
-            (series_to_points(actual), (255, 255, 255)),
-            (series_to_points(cmd), (0, 255, 0)),
-            (series_to_points(planned), (0, 255, 255)),
+            (series_to_points(actual), RGB_WHITE),
+            (series_to_points(cmd), RGB_GREEN),
+            (series_to_points(planned), RGB_YELLOW),
         ]:
             if len(pts) >= 2:
                 cv2.polylines(plot, [pts], False, color, 2, cv2.LINE_AA)
@@ -395,19 +408,19 @@ class VisualizationManager:
         # Draw historical points (Gray)
         vis_coords_hist = self.world_to_vis_points(all_hist_world_points, robot_pose, grid_size, center_offset)
         if vis_coords_hist.size > 0:
-            vis_image[vis_coords_hist[:, 1], vis_coords_hist[:, 0]] = (128, 128, 128) # Gray
+            vis_image[vis_coords_hist[:, 1], vis_coords_hist[:, 0]] = RGB_GRAY
 
         # Draw current points (Red)
         vis_coords_current = self.world_to_vis_points(current_world_points, robot_pose, grid_size, center_offset)
         if vis_coords_current.size > 0:
-            vis_image[vis_coords_current[:, 1], vis_coords_current[:, 0]] = (0, 0, 255) # Red
+            vis_image[vis_coords_current[:, 1], vis_coords_current[:, 0]] = RGB_RED
         
         if raw_trajectory_points is not None:
             self.draw_polyline_world(
                 vis_image,
                 raw_trajectory_points,
                 robot_pose,
-                color=(0, 165, 255),
+                color=RGB_ORANGE,
                 thickness=1,
                 dashed=True,
             )
@@ -417,7 +430,7 @@ class VisualizationManager:
                 vis_image,
                 selected_candidate_points,
                 robot_pose,
-                color=(255, 255, 0),
+                color=RGB_CYAN,
                 thickness=1,
                 dashed=False,
             )
@@ -428,49 +441,52 @@ class VisualizationManager:
                 vis_image,
                 trajectory_points,
                 robot_pose,
-                color=(0, 255, 0),
+                color=RGB_GREEN,
                 thickness=2,
                 dashed=False,
             )
             vis_points = self.world_to_vis_points(trajectory_points, robot_pose, grid_size, center_offset)
             if len(vis_points) > 0:
-                cv2.circle(vis_image, tuple(vis_points[0]), 3, (255, 0, 0), -1, cv2.LINE_AA)
-                cv2.circle(vis_image, tuple(vis_points[-1]), 3, (0, 0, 255), -1, cv2.LINE_AA)
+                cv2.circle(vis_image, tuple(vis_points[0]), 3, RGB_BLUE, -1, cv2.LINE_AA)
+                cv2.circle(vis_image, tuple(vis_points[-1]), 3, RGB_RED, -1, cv2.LINE_AA)
 
             if esdf is not None:
                 try:
                     dists = self.query_esdf_distance(esdf, trajectory_points)
                     traj_np = np.asarray(trajectory_points, dtype=np.float64)
+                    finite_mask = np.isfinite(dists)
 
-                    danger_mask = np.isfinite(dists) & (dists <= 0.0)
-                    unsafe_mask = np.isfinite(dists) & (dists > 0.0) & (dists <= 0.50)
+                    min_py_esdf = np.nan
+                    if np.any(finite_mask):
+                        finite_indices = np.flatnonzero(finite_mask)
+                        min_local_idx = int(np.argmin(dists[finite_mask]))
+                        min_idx = int(finite_indices[min_local_idx])
+                        min_py_esdf = float(dists[min_idx])
+                        min_point = traj_np[min_idx:min_idx + 1]
+                        if min_py_esdf <= 0.0:
+                            self.draw_points_world(
+                                vis_image,
+                                min_point,
+                                robot_pose,
+                                color=RGB_RED,
+                                radius=5,
+                            )
+                        elif min_py_esdf <= 0.50:
+                            self.draw_points_world(
+                                vis_image,
+                                min_point,
+                                robot_pose,
+                                color=RGB_ORANGE,
+                                radius=4,
+                            )
 
-                    if np.any(unsafe_mask):
-                        self.draw_points_world(
-                            vis_image,
-                            traj_np[unsafe_mask],
-                            robot_pose,
-                            color=(0, 140, 255),
-                            radius=3,
-                        )
-
-                    if np.any(danger_mask):
-                        self.draw_points_world(
-                            vis_image,
-                            traj_np[danger_mask],
-                            robot_pose,
-                            color=(0, 0, 255),
-                            radius=5,
-                        )
-
-                    min_py_esdf = np.nanmin(dists) if np.any(np.isfinite(dists)) else np.nan
                     cv2.putText(
                         vis_image,
                         f"py min esdf:{min_py_esdf:.2f}",
-                        (8, 64),
+                        (grid_size - 112, 16),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.4,
-                        (255, 255, 255),
+                        RGB_WHITE,
                         1,
                         cv2.LINE_AA,
                     )
@@ -482,7 +498,7 @@ class VisualizationManager:
                 vis_image,
                 control_points,
                 robot_pose,
-                color=(0, 255, 255),
+                color=RGB_YELLOW,
                 radius=4,
             )
 
@@ -501,12 +517,13 @@ class VisualizationManager:
         rot_matrix = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
         rotated_corners = (rot_matrix @ corners.T).T + start_point
         corners_int = rotated_corners.astype(np.int32)
-        cv2.polylines(vis_image, [corners_int], True, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.polylines(vis_image, [corners_int], True, RGB_WHITE, 1, cv2.LINE_AA)
 
         legend_y = 16
-        cv2.putText(vis_image, "green: MINCO opt", (8, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
-        cv2.putText(vis_image, "orange: raw", (8, legend_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1, cv2.LINE_AA)
-        cv2.putText(vis_image, "yellow: ctrl", (8, legend_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "green MINCO | orange raw", (8, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_GREEN, 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "cyan selected | yellow waypoint", (8, legend_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_CYAN, 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "red obstacle | gray history", (8, legend_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_RED, 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "red/orange dot min ESDF", (8, legend_y + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_ORANGE, 1, cv2.LINE_AA)
         
         # Resize visualization to match RGB image height with better interpolation
         vis_resized = cv2.resize(vis_image, (int(rgb_image.shape[0]), int(rgb_image.shape[0])), interpolation=cv2.INTER_CUBIC)
@@ -528,9 +545,9 @@ class VisualizationManager:
         
         # Draw the same occupancy grid
         if vis_coords_hist.size > 0:
-            vis_image_all[vis_coords_hist[:, 1], vis_coords_hist[:, 0]] = (128, 128, 128) # Gray
+            vis_image_all[vis_coords_hist[:, 1], vis_coords_hist[:, 0]] = RGB_GRAY
         if vis_coords_current.size > 0:
-            vis_image_all[vis_coords_current[:, 1], vis_coords_current[:, 0]] = (0, 0, 255) # Red
+            vis_image_all[vis_coords_current[:, 1], vis_coords_current[:, 0]] = RGB_RED
             
         has_all_trajectories = all_trajectories_points is not None and len(all_trajectories_points) > 0
 
@@ -559,7 +576,7 @@ class VisualizationManager:
                 g = 255 * (2 - 2 * normalized)
                 r = 255 * (2 * normalized - 1)
             
-            return (int(b), int(g), int(r))  # Return BGR color
+            return (int(r), int(g), int(b))
         
         if has_all_trajectories:
             # Set default colors if no values provided
@@ -586,7 +603,7 @@ class VisualizationManager:
                     cv2.circle(vis_image_all, tuple(vis_points_all[0]), 2, color, -1, cv2.LINE_AA)
         
         # Draw robot position with anti-aliasing
-        cv2.polylines(vis_image_all, [corners_int], True, (255, 255, 255), 1, cv2.LINE_AA)  # White robot outline
+        cv2.polylines(vis_image_all, [corners_int], True, RGB_WHITE, 1, cv2.LINE_AA)
         
         # Resize all trajectories visualization - align width with rgb_image
         # Get target width (same as rgb_image width)
