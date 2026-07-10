@@ -12,4 +12,6 @@ assets/scenes/Materials/*
 assets/scenes/SkyTexture/*
 assets/scenes/embodiedscan/*
 *.db
+*.db-shm
+*.db-wal
 *.zip
