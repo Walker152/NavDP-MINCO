@@ -48,6 +48,7 @@ public:
     Eigen::Vector3d velocity{Eigen::Vector3d::Zero()};
     Eigen::Vector3d acceleration{Eigen::Vector3d::Zero()};
     double yaw{0.0};
+    double yaw_rate{0.0};
   };
 
   struct Request
@@ -135,6 +136,7 @@ private:
     geometry_utils::Trajectory & out_yaw_traj,
     PlanningState state,
     double current_yaw,
+    double current_yaw_rate,
     double goal_yaw,
     double now) const;
   std::vector<TrajectorySample> sampleTrajectory(const geometry_utils::Trajectory & pos_traj,

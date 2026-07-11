@@ -598,6 +598,7 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
         result.yaw_trajectory,
         result.planning_state,
         request.current.yaw,
+        request.current.yaw_rate,
         goal_yaw,
         request.now)) {
     Eigen::MatrixXd cMat(3, 6);
@@ -876,6 +877,7 @@ bool MincoPipeline::optimizeYaw(const Eigen::Matrix3d & start_state,
   geometry_utils::Trajectory & out_yaw_traj,
   PlanningState state,
   double current_yaw,
+  double current_yaw_rate,
   double goal_yaw,
   double now) const
 {
@@ -886,8 +888,17 @@ bool MincoPipeline::optimizeYaw(const Eigen::Matrix3d & start_state,
   }
   Eigen::Vector4d init_yaw_state = Eigen::Vector4d::Zero();
   Eigen::Vector4d goal_yaw_state = Eigen::Vector4d::Zero();
-  init_yaw_state(0) =
-    start_state.col(1).head<2>().norm() > 0.1 ? std::atan2(start_state.col(1).y(), start_state.col(1).x()) : current_yaw;
+  double init_yaw = current_yaw;
+  if (!std::isfinite(init_yaw)) {
+    const Eigen::Vector2d vel_xy = start_state.col(1).head<2>();
+    if (vel_xy.allFinite() && vel_xy.norm() > 0.1) {
+      init_yaw = std::atan2(vel_xy.y(), vel_xy.x());
+    } else {
+      init_yaw = 0.0;
+    }
+  }
+  init_yaw_state(0) = init_yaw;
+  init_yaw_state(1) = std::isfinite(current_yaw_rate) ? current_yaw_rate : 0.0;
   if (!std::isfinite(goal_yaw)) {
     goal_yaw = init_yaw_state(0);
   }

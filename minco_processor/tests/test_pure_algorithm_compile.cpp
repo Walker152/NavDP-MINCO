@@ -52,6 +52,9 @@ int main()
   request.guide_path = {
     Eigen::Vector3d::Zero(), Eigen::Vector3d(0.5, 0.0, 0.0), Eigen::Vector3d::UnitX()};
   request.current.position = Eigen::Vector3d::Zero();
+  request.current.velocity = Eigen::Vector3d(0.5, 0.0, 0.0);
+  request.current.yaw = 0.7;
+  request.current.yaw_rate = 0.35;
   request.now = 1.0;
   const auto local_result = pipeline.optimize(request);
   if (!local_result.success || local_result.local_end_is_goal ||
@@ -72,6 +75,10 @@ int main()
   if (!result.success || result.sparse_waypoints.size() < 2U || result.initial_times.size() == 0 ||
       result.samples.empty()) {
     return 2;
+  }
+  if (std::abs(result.samples.front().yaw - request.current.yaw) > 1e-6 ||
+      std::abs(result.samples.front().yaw_dot - request.current.yaw_rate) > 1e-6) {
+    return 10;
   }
   for (const auto & sample : result.samples) {
     if (sample.pos.z() != 0.0 || sample.vel.z() != 0.0 || sample.acc.z() != 0.0 ||

@@ -59,7 +59,6 @@ public:
     double yaw_rate,
     py::object terminal_goal)
   {
-    (void)yaw_rate;
     const auto t0 = std::chrono::steady_clock::now();
     minco_processor::MincoPipeline::Request request;
     request.guide_path.reserve(static_cast<size_t>(guide_path.rows()));
@@ -75,7 +74,8 @@ public:
     request.current.position = position;
     request.current.velocity = velocity;
     request.current.acceleration = acceleration;
-    request.current.yaw = yaw;
+    request.current.yaw = std::isfinite(yaw) ? yaw : 0.0;
+    request.current.yaw_rate = std::isfinite(yaw_rate) ? yaw_rate : 0.0;
     if (!terminal_goal.is_none()) {
       Eigen::VectorXd goal_vec = terminal_goal.cast<Eigen::VectorXd>();
       if (goal_vec.size() >= 3 && goal_vec.head<3>().allFinite()) {
