@@ -172,9 +172,12 @@ bool YawTrajOpt::optimize(const Eigen::Vector4d & istate_in,
     return false;
   }
   }
-  double max_yaw_rate = yaw_traj.getMaxVelRate();
-  if (max_yaw_rate > yaw_dot_max_ + 2.0) {
-    std::cout << "Yaw rate too large: " << max_yaw_rate << std::endl;
+  constexpr double kYawRateOverrunAllowance = 0.8;
+  const double max_yaw_rate = yaw_traj.getMaxVelRate();
+  if (!std::isfinite(max_yaw_rate) ||
+    max_yaw_rate > yaw_dot_max_ + kYawRateOverrunAllowance) {
+    std::cout << "Yaw rate too large: " << max_yaw_rate
+              << ", limit: " << yaw_dot_max_ + kYawRateOverrunAllowance << std::endl;
     return false;
   }
   out_traj = yaw_traj;

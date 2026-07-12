@@ -16,17 +16,21 @@ class NavDPMincoAdapter:
         max_vel=None,
         max_acc=4.0,
         max_iterations=64,
+        max_yaw_rate=0.5,
         enable=True,
     ):
         self.esdf = esdf
         self._esdf_grid = EsdfGridView.from_mapping(esdf)
         self.safe_dist = float(safe_dist)
-        self.top_k = int(top_k)
+        self.top_k = max(1, int(top_k))
         self.sample_dt = float(sample_dt)
         self.speed = float(speed)
         self.max_vel = float(self.speed if max_vel is None else max_vel)
         self.max_acc = float(max_acc)
         self.max_iterations = int(max_iterations)
+        self.max_yaw_rate = float(max_yaw_rate)
+        if not np.isfinite(self.max_yaw_rate) or self.max_yaw_rate <= 0.0:
+            raise ValueError("max_yaw_rate must be finite and positive")
         self.enabled = bool(enable)
         self.processor = None
         if self.enabled:
@@ -40,6 +44,7 @@ class NavDPMincoAdapter:
                     safe_dist=self.safe_dist,
                     sample_dt=self.sample_dt,
                     max_iterations=self.max_iterations,
+                    max_yaw_rate=self.max_yaw_rate,
                 )
             self.processor.set_static_esdf_2d(
                 distance=self._esdf_grid.distance,
@@ -77,10 +82,21 @@ class NavDPMincoAdapter:
             yaw_rate = float(state.get("yaw_rate", 0.0))
             terminal_goal = self._as_terminal_goal(terminal_goals_world[env_idx])
             order = self._candidate_order(critic_values[env_idx], len(candidates_world[env_idx]))
-            for selected_idx in order[:max(0, self.top_k)]:
+            candidate_indices = order[:min(self.top_k, len(order))]
+            for rank, selected_idx in enumerate(candidate_indices):
                 candidate = self._as_guide_path(candidates_world[env_idx][selected_idx])
                 if candidate is None:
                     failures.append(f"idx={selected_idx}: invalid_candidate")
+                    candidate_timings.append({
+                        "candidate_rank": int(rank),
+                        "selected_index": int(selected_idx),
+                        "python_call_ms": 0.0,
+                        "cpp_optimize_time_ms": float("nan"),
+                        "success": False,
+                        "objective": float("inf"),
+                        "min_esdf": float("nan"),
+                        "failure_reason": "invalid_candidate",
+                    })
                     continue
                 candidate_call_start = time.perf_counter()
                 try:
@@ -96,6 +112,7 @@ class NavDPMincoAdapter:
                 except Exception as exc:
                     candidate_call_ms = (time.perf_counter() - candidate_call_start) * 1000.0
                     candidate_timings.append({
+                        "candidate_rank": int(rank),
                         "selected_index": int(selected_idx),
                         "python_call_ms": float(candidate_call_ms),
                         "cpp_optimize_time_ms": float("nan"),
@@ -109,6 +126,7 @@ class NavDPMincoAdapter:
                 candidate_call_ms = (time.perf_counter() - candidate_call_start) * 1000.0
                 cpp_ms = float(result.get("cpp_optimize_time_ms", result.get("duration", 0.0) * 1000.0))
                 candidate_timings.append({
+                    "candidate_rank": int(rank),
                     "selected_index": int(selected_idx),
                     "python_call_ms": float(candidate_call_ms),
                     "cpp_optimize_time_ms": float(cpp_ms),
@@ -130,20 +148,26 @@ class NavDPMincoAdapter:
                 waypoints = np.asarray(result.get("waypoints", []), dtype=np.float64)
                 if waypoints.ndim != 2 or waypoints.shape[0] < 2 or waypoints.shape[1] < 2:
                     failures.append(f"idx={selected_idx}: invalid_waypoints")
+                    candidate_timings[-1]["success"] = False
+                    candidate_timings[-1]["failure_reason"] = "invalid_waypoints"
                     continue
                 py_min_esdf = self._query_min_esdf(waypoints)
                 if not np.isfinite(py_min_esdf) or py_min_esdf <= self.safe_dist:
-                    failures.append(
-                        f"idx={selected_idx}: PY_ESDF_UNSAFE py_min={py_min_esdf:.3f} safe={self.safe_dist:.3f}"
+                    unsafe_reason = (
+                        f"PY_ESDF_UNSAFE py_min={py_min_esdf:.3f} safe={self.safe_dist:.3f}"
                     )
+                    failures.append(f"idx={selected_idx}: {unsafe_reason}")
+                    candidate_timings[-1]["success"] = False
+                    candidate_timings[-1]["failure_reason"] = unsafe_reason
                     continue
                 scored = dict(result)
                 scored["selected_index"] = int(selected_idx)
+                scored["selected_candidate_rank"] = int(rank)
                 scored["python_call_ms"] = candidate_call_ms
                 scored["cpp_optimize_time_ms"] = cpp_ms
                 scored["py_min_esdf"] = py_min_esdf
-                if best is None or self._is_better(scored, best):
-                    best = scored
+                best = scored
+                break
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             if best is not None:
@@ -183,6 +207,12 @@ class NavDPMincoAdapter:
                     "waypoints": np.asarray(best["waypoints"], dtype=np.float64)[:, :2],
                     "samples": samples_np,
                     "selected_index": int(best["selected_index"]),
+                    "configured_top_k": int(self.top_k),
+                    "attempted_candidate_count": int(len(candidate_timings)),
+                    "attempted_candidate_indices": [
+                        int(item["selected_index"]) for item in candidate_timings
+                    ],
+                    "selected_candidate_rank": int(best["selected_candidate_rank"]),
                     "objective": float(best.get("objective", np.inf)),
                     "min_esdf": float(best.get("min_esdf", np.nan)),
                     "py_min_esdf": float(best.get("py_min_esdf", np.nan)),
@@ -211,6 +241,8 @@ class NavDPMincoAdapter:
                 print(
                     "[NavDP-Minco] "
                     f"env={env_idx} status=MINCO_OK selected_idx={result['selected_index']} "
+                    f"selected_rank={result['selected_candidate_rank']} "
+                    f"attempted={result['attempted_candidate_count']}/{result['configured_top_k']} "
                     f"planning_state={result['planning_state']} local_end_is_goal={int(result['local_end_is_goal'])} "
                     f"objective={result['objective']:.4f} min_esdf={result['min_esdf']:.4f} "
                     f"py_esdf={result['py_min_esdf']:.4f} "
@@ -221,7 +253,7 @@ class NavDPMincoAdapter:
                     f"adapter_ms={elapsed_ms:.2f} cpp_ms={result['selected_cpp_optimize_time_ms']:.2f}"
                 )
             else:
-                reason = "; ".join(failures[-3:]) if failures else "NO_VALID_CANDIDATE"
+                reason = "; ".join(failures) if failures else "NO_VALID_CANDIDATE"
                 result = self._fallback_result(env_idx, raw_top1_world[env_idx], reason, elapsed_ms, candidate_timings)
             results.append(result)
         return results
@@ -233,6 +265,12 @@ class NavDPMincoAdapter:
             "waypoints": None,
             "samples": None,
             "selected_index": -1,
+            "configured_top_k": int(self.top_k),
+            "attempted_candidate_count": int(len(candidate_timings or [])),
+            "attempted_candidate_indices": [
+                int(item["selected_index"]) for item in (candidate_timings or [])
+            ],
+            "selected_candidate_rank": -1,
             "objective": float("inf"),
             "min_esdf": float("nan"),
             "py_min_esdf": float("nan"),
@@ -260,6 +298,7 @@ class NavDPMincoAdapter:
         }
         print(
             f"[NavDP-Minco] env={env_idx} status=MINCO_FAIL fallback_mode=HOLD_LAST_OR_STOP "
+            f"attempted={result['attempted_candidate_count']}/{result['configured_top_k']} "
             f"adapter_ms={elapsed_ms:.2f} reason={reason}"
         )
         return result

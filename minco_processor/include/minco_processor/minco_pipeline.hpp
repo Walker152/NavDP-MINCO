@@ -40,6 +40,7 @@ public:
     double start_projection_margin{0.05};
     int max_sparse_waypoints{8};
     bool enable_yaw_opt{true};
+    double max_yaw_rate{0.5};
   };
 
   struct State

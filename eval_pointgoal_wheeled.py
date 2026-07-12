@@ -16,7 +16,7 @@ parser.add_argument(
     "--num_episodes", type=int, default=10)
 parser.add_argument(
     "--speed", type=float, default=1.0)
-parser.add_argument("--mpc_max_yaw_rate", type=float, default=1.0)
+parser.add_argument("--mpc_max_yaw_rate", type=float, default=0.5)
 parser.add_argument("--mpc_max_yaw_acc", type=float, default=2.0)
 parser.add_argument(
     "--mpc_max_wheel_speed",
@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--port", type=int, default=8888)
 parser.add_argument("--enable_minco", default=True, action=argparse.BooleanOptionalAction)
-parser.add_argument("--minco_top_k", type=int, default=1)
+parser.add_argument("--minco_top_k", type=int, default=2)
 parser.add_argument("--minco_safe_dist", type=float, default=0.60)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
 parser.add_argument("--minco_max_vel", type=float, default=1.0)
@@ -553,6 +553,7 @@ if args_cli.enable_minco:
         max_vel=args_cli.minco_max_vel,
         max_acc=args_cli.minco_max_acc,
         max_iterations=args_cli.minco_max_iterations,
+        max_yaw_rate=args_cli.mpc_max_yaw_rate,
         enable=True,
     )
 

@@ -22,10 +22,12 @@ class MincoProcessorPy
 public:
   MincoProcessorPy()
   {
-    configure(2.0, 4.0, 0.3, 0.05, 64);
+    configure(2.0, 4.0, 0.3, 0.05, 64, 0.5);
   }
 
-  void configure(double max_vel, double max_acc, double safe_dist, double sample_dt, int max_iterations)
+  void configure(
+    double max_vel, double max_acc, double safe_dist, double sample_dt, int max_iterations,
+    double max_yaw_rate)
   {
     minco_processor::MincoPipeline::Config config;
     config.sample_dt = sample_dt;
@@ -36,6 +38,7 @@ public:
     config.optimizer.max_acc = max_acc;
     config.optimizer.max_iterations = max_iterations;
     config.optimizer.print_optimizer_log = false;
+    config.max_yaw_rate = max_yaw_rate;
     pipeline_.setConfig(config);
   }
 
@@ -179,7 +182,8 @@ PYBIND11_MODULE(_minco_processor, m)
       py::arg("max_acc"),
       py::arg("safe_dist"),
       py::arg("sample_dt"),
-      py::arg("max_iterations"))
+      py::arg("max_iterations"),
+      py::arg("max_yaw_rate"))
     .def("set_static_esdf_2d", &MincoProcessorPy::set_static_esdf_2d,
       py::arg("distance"), py::arg("free"), py::arg("origin"), py::arg("resolution"))
     .def("optimize", &MincoProcessorPy::optimize,

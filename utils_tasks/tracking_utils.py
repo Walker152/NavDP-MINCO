@@ -246,7 +246,7 @@ class MPC_Controller:
         reference = self._derive_unicycle_reference(
             t, x, y, vx, vy, ax, ay, yaw_raw, yaw_dot_raw
         )
-        if reference.shape[0] < 2 or not np.all(np.isfinite(reference)):
+        if reference is None or reference.shape[0] < 2 or not np.all(np.isfinite(reference)):
             return None
         self._minco_motion_samples = np.ascontiguousarray(
             np.column_stack((t, x, y, vx, vy, ax, ay, jx, jy, reference[:, 3], reference[:, 5])),
@@ -258,6 +258,20 @@ class MPC_Controller:
         self, t, x, y, vx, vy, ax, ay, yaw_raw=None, yaw_dot_raw=None
     ):
         speed = np.hypot(vx, vy)
+        if not self.allow_geometric_fallback:
+            if yaw_raw is None or yaw_dot_raw is None:
+                return None
+            yaw_raw = np.asarray(yaw_raw, dtype=np.float64).reshape(-1)
+            yaw_dot_raw = np.asarray(yaw_dot_raw, dtype=np.float64).reshape(-1)
+            if yaw_raw.size != x.size or yaw_dot_raw.size != x.size:
+                return None
+            if not np.all(np.isfinite(yaw_raw)) or not np.all(np.isfinite(yaw_dot_raw)):
+                return None
+            yaw = np.unwrap(yaw_raw)
+            v_ref = np.clip(speed, 0.0, self.v_max)
+            w_ref = np.clip(yaw_dot_raw, -self.w_max, self.w_max)
+            return np.column_stack((t, x, y, yaw, v_ref, w_ref))
+
         yaw = self._derive_reference_yaw(x, y, vx, vy, yaw_raw)
         v_ref = np.clip(speed, 0.0, self.v_max)
 

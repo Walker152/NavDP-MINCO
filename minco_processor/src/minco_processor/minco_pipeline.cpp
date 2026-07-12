@@ -424,6 +424,9 @@ MincoPipeline::MincoPipeline(const Config & config)
 void MincoPipeline::setConfig(const Config & config)
 {
   config_ = config;
+  if (!std::isfinite(config_.max_yaw_rate) || config_.max_yaw_rate <= 0.0) {
+    config_.max_yaw_rate = 0.5;
+  }
   if (config_.optimizer.magnitudeBounds.size() != 3) {
     config_.optimizer.magnitudeBounds.resize(3);
   }
@@ -434,7 +437,7 @@ void MincoPipeline::setConfig(const Config & config)
     config_.optimizer.penaltyWeights << 1000.0, 1000.0, 10000.0, 1000.0, 100.0;
   }
   optimizer_ = std::make_unique<minco_planner::MincoOptimizer>(config_.optimizer);
-  yaw_optimizer_ = std::make_unique<traj_opt::YawTrajOpt>(3.14);
+  yaw_optimizer_ = std::make_unique<traj_opt::YawTrajOpt>(config_.max_yaw_rate);
   safety_checker_ = std::make_unique<minco_planner::TrajectorySafetyChecker>();
   safety_checker_->configure(config_.optimizer.safe_dist, config_.safety_sample_dt);
   setMap(map_);
@@ -898,7 +901,10 @@ bool MincoPipeline::optimizeYaw(const Eigen::Matrix3d & start_state,
     }
   }
   init_yaw_state(0) = init_yaw;
-  init_yaw_state(1) = std::isfinite(current_yaw_rate) ? current_yaw_rate : 0.0;
+  init_yaw_state(1) = std::clamp(
+    std::isfinite(current_yaw_rate) ? current_yaw_rate : 0.0,
+    -config_.max_yaw_rate,
+    config_.max_yaw_rate);
   if (!std::isfinite(goal_yaw)) {
     goal_yaw = init_yaw_state(0);
   }
