@@ -22,6 +22,7 @@ app = Flask(__name__)
 navdp_navigator = None
 navdp_fps_writer = None
 navdp_writer_lock = threading.Lock()
+navdp_state_lock = threading.RLock()
 
 def make_navdp_writer():
     format_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y%m%d_%H%M%S")
@@ -59,29 +60,30 @@ atexit.register(close_navdp_writer)
 @app.route("/navigator_reset",methods=['POST'])
 def navdp_reset():
     global navdp_navigator,navdp_fps_writer
-    intrinsic = np.array(request.get_json().get('intrinsic'))
-    threshold = np.array(request.get_json().get('stop_threshold'))
-    batchsize = np.array(request.get_json().get('batch_size'))
-    if navdp_navigator is None:
-        navdp_navigator = NavDP_Agent(intrinsic,
-                                image_size=224,
-                                memory_size=8,
-                                predict_size=24,
-                                temporal_depth=16,
-                                heads=8,
-                                token_dim=384,
-                                navi_model=args.checkpoint,
-                                device='cuda:0')
-        navdp_navigator.reset(batchsize,threshold)
-    else:
-        navdp_navigator.reset(batchsize,threshold)
+    with navdp_state_lock:
+        intrinsic = np.array(request.get_json().get('intrinsic'))
+        threshold = np.array(request.get_json().get('stop_threshold'))
+        batchsize = np.array(request.get_json().get('batch_size'))
+        if navdp_navigator is None:
+            navdp_navigator = NavDP_Agent(intrinsic,
+                                    image_size=224,
+                                    memory_size=8,
+                                    predict_size=24,
+                                    temporal_depth=16,
+                                    heads=8,
+                                    token_dim=384,
+                                    navi_model=args.checkpoint,
+                                    device='cuda:0')
+            navdp_navigator.reset(batchsize,threshold)
+        else:
+            navdp_navigator.reset(batchsize,threshold)
 
-    if navdp_fps_writer is None:
-        navdp_fps_writer = make_navdp_writer()
-    else:
-        close_navdp_writer()
-        navdp_fps_writer = make_navdp_writer()
-    return jsonify({"algo":"navdp"})
+        if navdp_fps_writer is None:
+            navdp_fps_writer = make_navdp_writer()
+        else:
+            close_navdp_writer()
+            navdp_fps_writer = make_navdp_writer()
+        return jsonify({"algo":"navdp"})
 
 @app.route("/navigator_close",methods=['POST'])
 def navdp_close():
@@ -91,12 +93,17 @@ def navdp_close():
 @app.route("/navigator_reset_env",methods=['POST'])
 def navdp_reset_env():
     global navdp_navigator
-    navdp_navigator.reset_env(int(request.get_json().get('env_id')))
-    return jsonify({"algo":"navdp"})
+    with navdp_state_lock:
+        navdp_navigator.reset_env(int(request.get_json().get('env_id')))
+        return jsonify({"algo":"navdp"})
 
 @app.route("/pointgoal_step",methods=['POST'])
 def navdp_step_xy():
     global navdp_navigator,navdp_fps_writer
+    with navdp_state_lock:
+        return _navdp_step_xy_locked()
+
+def _navdp_step_xy_locked():
     start_time = time.time()
     image_file = request.files['image']
     depth_file = request.files['depth']

@@ -157,7 +157,10 @@ class NavDP_Agent:
         process_depths = self.process_depth(depths)
         input_images = []
         for i in range(len(self.memory_queue)):
-            if len(self.memory_queue[i]) < self.memory_size:
+            if len(self.memory_queue[i]) == 0:
+                self.memory_queue[i] = [process_images[i].copy() for _ in range(self.memory_size)]
+                input_image = np.asarray(self.memory_queue[i])
+            elif len(self.memory_queue[i]) < self.memory_size:
                 self.memory_queue[i].append(process_images[i])
                 input_image = np.array(self.memory_queue[i])
                 input_image = np.pad(input_image,((self.memory_size - input_image.shape[0],0),(0,0),(0,0),(0,0)))
