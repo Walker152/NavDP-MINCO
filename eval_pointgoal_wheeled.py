@@ -19,6 +19,12 @@ parser.add_argument(
 parser.add_argument("--mpc_max_yaw_rate", type=float, default=1.0)
 parser.add_argument("--mpc_max_yaw_acc", type=float, default=2.0)
 parser.add_argument(
+    "--mpc_max_wheel_speed",
+    type=float,
+    default=0.0,
+    help="Maximum wheel-joint angular speed in rad/s; <= 0 disables the MPC wheel constraint",
+)
+parser.add_argument(
     "--port", type=int, default=8888)
 parser.add_argument("--enable_minco", action="store_true")
 parser.add_argument("--minco_top_k", type=int, default=4)
@@ -76,6 +82,7 @@ from configs.tasks import *
 from utils_tasks.client_utils import navigator_close,navigator_reset,pointgoal_step
 from utils_tasks.visualization_utils import VisualizationManager
 from utils_tasks.tracking_utils import MPC_Controller
+from utils_tasks.esdf_query_utils import query_esdf_polyline
 from utils_tasks.timing_utils import (
     StageTimer,
     append_timing_panel,
@@ -97,27 +104,13 @@ per_env_plan_id = np.zeros(args_cli.num_envs, dtype=np.int64)
 minco_hold_cache = [None for _ in range(args_cli.num_envs)]
 episode_generation = np.zeros(args_cli.num_envs, dtype=np.int64)
 use_robot_base_frame = bool(args_cli.use_robot_base_frame)
-
-def query_esdf_polyline(esdf, points):
-    if esdf is None or points is None:
-        return float("nan")
-    points = np.asarray(points, dtype=np.float64)
-    if points.ndim != 2 or points.shape[1] < 2:
-        return float("nan")
-
-    distance = np.asarray(esdf["distance"], dtype=np.float64)
-    origin = np.asarray(esdf["origin"], dtype=np.float64)
-    res = float(esdf["resolution"])
-
-    vals = []
-    for p in points[:, :2]:
-        if not np.all(np.isfinite(p)):
-            continue
-        mx = int(np.floor((p[0] - origin[0]) / res))
-        my = int(np.floor((p[1] - origin[1]) / res))
-        if 0 <= mx < distance.shape[1] and 0 <= my < distance.shape[0]:
-            vals.append(float(distance[my, mx]))
-    return float(np.min(vals)) if vals else float("nan")
+wheel_constraint_enabled = (
+    np.isfinite(args_cli.mpc_max_wheel_speed)
+    and args_cli.mpc_max_wheel_speed > 0.0
+)
+mpc_max_wheel_speed = (
+    float(args_cli.mpc_max_wheel_speed) if wheel_constraint_enabled else None
+)
 
 def transform_navdp_local_point(point_xy, env_idx, camera_pos, camera_rot, robot_pos_w=None):
     point_local = np.array([point_xy[0], point_xy[1], 0.0], dtype=np.float64)
@@ -176,17 +169,17 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     if planning_input.current_goal is None or planning_input.current_image is None or planning_input.current_depth is None or planning_input.camera_pos is None or planning_input.camera_rot is None:
                         time.sleep(0.01)
                         continue
-                    goal = planning_input.current_goal.copy()
-                    image = planning_input.current_image.copy()
-                    depth = planning_input.current_depth.copy()
-                    camera_pos = planning_input.camera_pos.copy()
-                    camera_rot = planning_input.camera_rot.copy()
-                    robot_pos_w = planning_input.robot_pos_w.copy() if planning_input.robot_pos_w is not None else None
-                    robot_yaw_w = planning_input.robot_yaw_w.copy() if planning_input.robot_yaw_w is not None else None
-                    robot_lin_vel_w = planning_input.robot_lin_vel_w.copy() if planning_input.robot_lin_vel_w is not None else None
-                    robot_ang_vel_w = planning_input.robot_ang_vel_w.copy() if planning_input.robot_ang_vel_w is not None else None
+                    goal = planning_input.current_goal
+                    image = planning_input.current_image
+                    depth = planning_input.current_depth
+                    camera_pos = planning_input.camera_pos
+                    camera_rot = planning_input.camera_rot
+                    robot_pos_w = planning_input.robot_pos_w
+                    robot_yaw_w = planning_input.robot_yaw_w
+                    robot_lin_vel_w = planning_input.robot_lin_vel_w
+                    robot_ang_vel_w = planning_input.robot_ang_vel_w
                     input_episode_generation = (
-                        planning_input.episode_generation.copy()
+                        planning_input.episode_generation
                         if planning_input.episode_generation is not None
                         else np.zeros(args_cli.num_envs, dtype=np.int64)
                     )
@@ -476,9 +469,14 @@ planning_thread_obj = threading.Thread(target=planning_thread, args=(env, camera
 planning_thread_obj.daemon = True
 planning_thread_obj.start()
 
-controller = DifferentialController(name="simple_control", 
-                                    wheel_radius=DINGO_WHEEL_RADIUS,
-                                    wheel_base=DINGO_WHEEL_BASE)
+controller_kwargs = {
+    "name": "simple_control",
+    "wheel_radius": DINGO_WHEEL_RADIUS,
+    "wheel_base": DINGO_WHEEL_BASE,
+}
+if wheel_constraint_enabled:
+    controller_kwargs["max_wheel_speed"] = mpc_max_wheel_speed
+controller = DifferentialController(**controller_kwargs)
 algo = navigator_reset(camera_intrinsic.cpu().numpy(),batch_size=scene_config.num_envs,stop_threshold=args_cli.stop_threshold,port=args_cli.port)
 
 episode_num = args_cli.num_envs - 1
@@ -568,26 +566,23 @@ try:
                 if planning_output.trajectory_points_world is not None:
                     current_plan_id = planning_output.plan_id
                     current_episode_generation = (
-                        planning_output.episode_generation.copy()
+                        planning_output.episode_generation
                         if planning_output.episode_generation is not None
                         else None
                     )
-                    current_trajectory = planning_output.trajectory_points_world.copy() if planning_output.trajectory_points_world is not None else None
-                    current_all_trajectories = planning_output.all_trajectories_world.copy() if planning_output.all_trajectories_world is not None else None
-                    current_all_values = planning_output.all_values_camera.copy() if planning_output.all_values_camera is not None else None
-                    current_raw_top1 = planning_output.raw_top1_world.copy() if planning_output.raw_top1_world is not None else None
-                    current_selected_candidate = planning_output.selected_candidate_world.copy() if planning_output.selected_candidate_world is not None else None
-                    current_sparse_guide_points = planning_output.minco_sparse_waypoints_world.copy() if planning_output.minco_sparse_waypoints_world is not None else None
-                    current_minco_samples = [
-                        np.asarray(s, dtype=np.float64).copy() if s is not None else None
-                        for s in planning_output.minco_samples
-                    ] if planning_output.minco_samples is not None else None
+                    current_trajectory = planning_output.trajectory_points_world
+                    current_all_trajectories = planning_output.all_trajectories_world
+                    current_all_values = planning_output.all_values_camera
+                    current_raw_top1 = planning_output.raw_top1_world
+                    current_selected_candidate = planning_output.selected_candidate_world
+                    current_sparse_guide_points = planning_output.minco_sparse_waypoints_world
+                    current_minco_samples = planning_output.minco_samples
                     current_minco_speed_profile = planning_output.minco_speed_profile
-                    current_minco_info = [dict(info) for info in planning_output.minco_info] if planning_output.minco_info is not None else None
-                    current_per_env_plan_id = planning_output.per_env_plan_id.copy() if planning_output.per_env_plan_id is not None else None
-                    current_stop_required = planning_output.stop_required.copy() if planning_output.stop_required is not None else None
-                    current_minco_status = list(planning_output.minco_status) if planning_output.minco_status is not None else None
-                    current_planning_timing = planning_output.planning_timing.copy() if planning_output.planning_timing is not None else None
+                    current_minco_info = planning_output.minco_info
+                    current_per_env_plan_id = planning_output.per_env_plan_id
+                    current_stop_required = planning_output.stop_required
+                    current_minco_status = planning_output.minco_status
+                    current_planning_timing = planning_output.planning_timing
         
             if current_trajectory is not None:
                 action_list = []
@@ -646,6 +641,9 @@ try:
                                 max_yaw_acc=args_cli.mpc_max_yaw_acc,
                                 T=control_dt,
                                 allow_geometric_fallback=not args_cli.enable_minco,
+                                wheel_radius=DINGO_WHEEL_RADIUS,
+                                wheel_base=DINGO_WHEEL_BASE,
+                                max_wheel_speed=mpc_max_wheel_speed,
                             )
                         else:
                             updated = mpc[i].update_reference(

@@ -2,6 +2,8 @@ import time
 
 import numpy as np
 
+from utils_tasks.esdf_query_utils import EsdfGridView
+
 
 class NavDPMincoAdapter:
     def __init__(
@@ -15,9 +17,9 @@ class NavDPMincoAdapter:
         max_acc=4.0,
         max_iterations=64,
         enable=True,
-        fallback_to_raw=False,
     ):
         self.esdf = esdf
+        self._esdf_grid = EsdfGridView.from_mapping(esdf)
         self.safe_dist = float(safe_dist)
         self.top_k = int(top_k)
         self.sample_dt = float(sample_dt)
@@ -26,7 +28,6 @@ class NavDPMincoAdapter:
         self.max_acc = float(max_acc)
         self.max_iterations = int(max_iterations)
         self.enabled = bool(enable)
-        self.fallback_to_raw = False
         self.processor = None
         if self.enabled:
             import minco_processor
@@ -41,10 +42,10 @@ class NavDPMincoAdapter:
                     max_iterations=self.max_iterations,
                 )
             self.processor.set_static_esdf_2d(
-                distance=np.asarray(esdf["distance"], dtype=np.float64),
+                distance=self._esdf_grid.distance,
                 free=np.asarray(esdf["free"], dtype=np.uint8),
-                origin=np.asarray(esdf["origin"], dtype=np.float64),
-                resolution=float(esdf["resolution"]),
+                origin=self._esdf_grid.origin,
+                resolution=self._esdf_grid.resolution,
             )
 
     def optimize_candidates(
@@ -67,6 +68,14 @@ class NavDPMincoAdapter:
             best = None
             failures = []
             candidate_timings = []
+            state = states[env_idx]
+            zero_state = np.zeros(3, dtype=np.float64)
+            position = np.asarray(state.get("position", zero_state), dtype=np.float64)
+            velocity = np.asarray(state.get("velocity", zero_state), dtype=np.float64)
+            acceleration = np.asarray(state.get("acceleration", zero_state), dtype=np.float64)
+            yaw = float(state.get("yaw", 0.0))
+            yaw_rate = float(state.get("yaw_rate", 0.0))
+            terminal_goal = self._as_terminal_goal(terminal_goals_world[env_idx])
             order = self._candidate_order(critic_values[env_idx], len(candidates_world[env_idx]))
             for selected_idx in order[:max(0, self.top_k)]:
                 candidate = self._as_guide_path(candidates_world[env_idx][selected_idx])
@@ -75,14 +84,13 @@ class NavDPMincoAdapter:
                     continue
                 candidate_call_start = time.perf_counter()
                 try:
-                    terminal_goal = self._as_terminal_goal(terminal_goals_world[env_idx])
                     result = self.processor.optimize(
                         guide_path=candidate,
-                        position=np.asarray(states[env_idx].get("position", np.zeros(3)), dtype=np.float64),
-                        velocity=np.asarray(states[env_idx].get("velocity", np.zeros(3)), dtype=np.float64),
-                        acceleration=np.asarray(states[env_idx].get("acceleration", np.zeros(3)), dtype=np.float64),
-                        yaw=float(states[env_idx].get("yaw", 0.0)),
-                        yaw_rate=float(states[env_idx].get("yaw_rate", 0.0)),
+                        position=position,
+                        velocity=velocity,
+                        acceleration=acceleration,
+                        yaw=yaw,
+                        yaw_rate=yaw_rate,
                         terminal_goal=terminal_goal,
                     )
                 except Exception as exc:
@@ -257,25 +265,7 @@ class NavDPMincoAdapter:
         return result
 
     def _query_min_esdf(self, points):
-        points = np.asarray(points, dtype=np.float64)
-        if points.ndim != 2 or points.shape[1] < 2 or points.shape[0] == 0:
-            return float("nan")
-
-        distance = np.asarray(self.esdf["distance"], dtype=np.float64)
-        origin = np.asarray(self.esdf["origin"], dtype=np.float64)
-        res = float(self.esdf["resolution"])
-
-        vals = []
-        for p in points[:, :2]:
-            if not np.all(np.isfinite(p)):
-                continue
-            mx = int(np.floor((p[0] - origin[0]) / res))
-            my = int(np.floor((p[1] - origin[1]) / res))
-            if 0 <= mx < distance.shape[1] and 0 <= my < distance.shape[0]:
-                vals.append(float(distance[my, mx]))
-        if not vals:
-            return float("nan")
-        return float(np.min(vals))
+        return self._esdf_grid.query_polyline(points)
 
     @staticmethod
     def _candidate_order(values, candidate_count):

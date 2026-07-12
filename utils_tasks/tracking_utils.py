@@ -1,15 +1,10 @@
 import math
-import os
-import sys
 import time
-from dataclasses import dataclass
-from queue import Queue
-from typing import List, Optional, Tuple
 
 import casadi as ca
 import numpy as np
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils_tasks.differential_drive_utils import DifferentialDriveLimits
 
 
 SAMPLE_T = 0
@@ -19,30 +14,16 @@ SAMPLE_VEL_X = 4
 SAMPLE_VEL_Y = 5
 SAMPLE_ACC_X = 7
 SAMPLE_ACC_Y = 8
+SAMPLE_JERK_X = 10
+SAMPLE_JERK_Y = 11
 SAMPLE_YAW = 13
 SAMPLE_YAW_DOT = 14
 MIN_SAMPLE_COLS = 15
 
-
-@dataclass
-class PlanningInput:
-    current_goal: Optional[np.ndarray] = None
-    current_image: Optional[np.ndarray] = None
-    current_depth: Optional[np.ndarray] = None
-    camera_pos: Optional[np.ndarray] = None
-    camera_rot: Optional[np.ndarray] = None
-    robot_lin_vel_w: Optional[np.ndarray] = None
-    robot_ang_vel_w: Optional[np.ndarray] = None
-
-
-@dataclass
-class PlanningOutput:
-    trajectory_points_world: Optional[np.ndarray] = None
-    all_trajectories_world: Optional[List[np.ndarray]] = None
-    all_values_camera: Optional[np.ndarray] = None
-    plan_id: int = 0
-    is_planning: bool = False
-    planning_error: Optional[str] = None
+YAW_MOVING_SPEED = 1e-3
+YAW_CONSISTENCY_MIN_SAMPLES = 3
+YAW_SEVERE_ERROR = 0.75 * np.pi
+YAW_SEVERE_FRACTION = 0.75
 
 
 class MPC_Controller:
@@ -59,6 +40,9 @@ class MPC_Controller:
         max_acc=4.0,
         max_yaw_acc=4.0,
         allow_geometric_fallback=True,
+        wheel_radius=None,
+        wheel_base=None,
+        max_wheel_speed=None,
     ):
         self.N = int(N)
         self.T = float(T)
@@ -69,6 +53,8 @@ class MPC_Controller:
         self.max_acc = float(max_acc)
         self.max_yaw_acc = float(max_yaw_acc)
         self.allow_geometric_fallback = bool(allow_geometric_fallback)
+        self._horizon_time_offsets = np.arange(self.N + 1, dtype=np.float64) * self.T
+        self._configure_wheel_constraints(wheel_radius, wheel_base, max_wheel_speed)
 
         self.q_xy = 20.0
         self.q_yaw = 4.0
@@ -80,7 +66,10 @@ class MPC_Controller:
         self.terminal_yaw_scale = 1.0
 
         self.reference = None
+        self._minco_motion_samples = None
         self.progress_idx = 0
+        self.progress_idx_float = 0.0
+        self.progress_time = 0.0
         self._needs_global_alignment = True
         self._current_reference = None
         self._last_reference_horizon = None
@@ -120,6 +109,10 @@ class MPC_Controller:
             prev_u = opt_u_prev if i == 0 else opt_controls[i - 1, :]
             opti.subject_to(opti.bounded(-self.max_acc * self.T, u_i[0] - prev_u[0], self.max_acc * self.T))
             opti.subject_to(opti.bounded(-self.max_yaw_acc * self.T, u_i[1] - prev_u[1], self.max_yaw_acc * self.T))
+            if self.wheel_constraints_enabled:
+                wheel_left, wheel_right = self._drive_limits.wheel_speeds(u_i[0], u_i[1])
+                opti.subject_to(opti.bounded(-self.max_wheel_speed, wheel_left, self.max_wheel_speed))
+                opti.subject_to(opti.bounded(-self.max_wheel_speed, wheel_right, self.max_wheel_speed))
 
         opti.subject_to(opti.bounded(0.0, opt_controls[:, 0], self.v_max))
         opti.subject_to(opti.bounded(-self.w_max, opt_controls[:, 1], self.w_max))
@@ -170,6 +163,18 @@ class MPC_Controller:
     def _casadi_yaw_error(yaw, yaw_ref):
         return ca.atan2(ca.sin(yaw - yaw_ref), ca.cos(yaw - yaw_ref))
 
+    def _configure_wheel_constraints(self, wheel_radius, wheel_base, max_wheel_speed):
+        self._drive_limits = DifferentialDriveLimits.create(
+            wheel_radius, wheel_base, max_wheel_speed
+        )
+        self.wheel_constraints_enabled = self._drive_limits.enabled
+        self.wheel_radius = self._drive_limits.wheel_radius
+        self.wheel_base = self._drive_limits.wheel_base
+        self.max_wheel_speed = self._drive_limits.max_wheel_speed
+
+    def _project_wheel_feasible_command(self, command):
+        return self._drive_limits.project(command, self.v_max, self.w_max)
+
     def update_reference(self, global_planed_traj, trajectory_samples=None, desired_v=None):
         if desired_v is not None:
             self.desired_v = float(desired_v)
@@ -177,13 +182,25 @@ class MPC_Controller:
         if reference is None:
             if not self.allow_geometric_fallback:
                 return False
+            self._minco_motion_samples = None
             reference = self._build_fallback_reference(global_planed_traj)
         self.reference = reference
+        self._cache_reference_segments()
         self.progress_idx = 0
+        self.progress_idx_float = 0.0
+        self.progress_time = float(reference[0, 0])
         self._needs_global_alignment = True
         self._current_reference = None
         self._last_reference_horizon = None
         return True
+
+    def _cache_reference_segments(self):
+        points = np.ascontiguousarray(self.reference[:, 1:3], dtype=np.float64)
+        self._segment_start = points[:-1]
+        self._segment_delta = np.diff(points, axis=0)
+        self._segment_len_sq = np.einsum("ij,ij->i", self._segment_delta, self._segment_delta)
+        self._segment_dt = np.diff(self.reference[:, 0])
+        self._valid_segment = (self._segment_len_sq > 1e-12) & (self._segment_dt > 1e-12)
 
     def _parse_minco_samples(self, samples):
         if samples is None:
@@ -222,13 +239,24 @@ class MPC_Controller:
         vy = samples[:, SAMPLE_VEL_Y]
         ax = samples[:, SAMPLE_ACC_X]
         ay = samples[:, SAMPLE_ACC_Y]
-        yaw_raw = samples[:, SAMPLE_YAW] if samples.shape[1] > SAMPLE_YAW else None
-        reference = self._derive_unicycle_reference(t, x, y, vx, vy, ax, ay, yaw_raw)
+        jx = samples[:, SAMPLE_JERK_X]
+        jy = samples[:, SAMPLE_JERK_Y]
+        yaw_raw = samples[:, SAMPLE_YAW]
+        yaw_dot_raw = samples[:, SAMPLE_YAW_DOT]
+        reference = self._derive_unicycle_reference(
+            t, x, y, vx, vy, ax, ay, yaw_raw, yaw_dot_raw
+        )
         if reference.shape[0] < 2 or not np.all(np.isfinite(reference)):
             return None
+        self._minco_motion_samples = np.ascontiguousarray(
+            np.column_stack((t, x, y, vx, vy, ax, ay, jx, jy, reference[:, 3], reference[:, 5])),
+            dtype=np.float64,
+        )
         return reference
 
-    def _derive_unicycle_reference(self, t, x, y, vx, vy, ax, ay, yaw_raw=None):
+    def _derive_unicycle_reference(
+        self, t, x, y, vx, vy, ax, ay, yaw_raw=None, yaw_dot_raw=None
+    ):
         speed = np.hypot(vx, vy)
         yaw = self._derive_reference_yaw(x, y, vx, vy, yaw_raw)
         v_ref = np.clip(speed, 0.0, self.v_max)
@@ -238,34 +266,33 @@ class MPC_Controller:
         curvature_speed_eps = 1e-3
         w_curvature = (vx * ay - vy * ax) / np.maximum(speed_sq, curvature_eps)
         w_from_yaw = np.gradient(yaw, t, edge_order=1)
-        w_ref = np.where(speed_sq > curvature_speed_eps ** 2, w_curvature, w_from_yaw)
+        w_fallback = np.where(speed_sq > curvature_speed_eps ** 2, w_curvature, w_from_yaw)
+        if yaw_dot_raw is None:
+            w_ref = w_fallback
+        else:
+            yaw_dot_raw = np.asarray(yaw_dot_raw, dtype=np.float64)
+            w_ref = np.where(np.isfinite(yaw_dot_raw), yaw_dot_raw, w_fallback)
         w_ref = np.clip(w_ref, -self.w_max, self.w_max)
         return np.column_stack((t, x, y, yaw, v_ref, w_ref))
 
     def _derive_reference_yaw(self, x, y, vx, vy, yaw_raw=None):
         speed = np.hypot(vx, vy)
-        yaw = np.full(speed.shape, np.nan, dtype=np.float64)
-        moving = speed > 1e-3
-        yaw[moving] = np.arctan2(vy[moving], vx[moving])
-
         path_yaw = self._path_tangent_yaw(np.column_stack((x, y)))
-        raw = None
+        geometric_yaw = np.where(speed > YAW_MOVING_SPEED, np.arctan2(vy, vx), path_yaw)
         if yaw_raw is not None:
             raw = np.asarray(yaw_raw, dtype=np.float64)
+            if np.all(np.isfinite(raw)):
+                raw = np.unwrap(raw)
+                moving = speed > YAW_MOVING_SPEED
+                errors = np.abs(self._wrap_to_pi(raw[moving] - np.arctan2(vy[moving], vx[moving])))
+                consistent = (
+                    errors.size < YAW_CONSISTENCY_MIN_SAMPLES
+                    or np.mean(errors > YAW_SEVERE_ERROR) < YAW_SEVERE_FRACTION
+                )
+                if consistent:
+                    return raw
 
-        for i in range(yaw.size):
-            if np.isfinite(yaw[i]):
-                continue
-            if np.isfinite(path_yaw[i]):
-                yaw[i] = path_yaw[i]
-            elif i > 0 and np.isfinite(yaw[i - 1]):
-                yaw[i] = yaw[i - 1]
-            elif raw is not None and i < raw.size and np.isfinite(raw[i]):
-                yaw[i] = raw[i]
-            else:
-                future = np.flatnonzero(np.isfinite(yaw[i + 1 :]))
-                if future.size > 0:
-                    yaw[i] = yaw[i + 1 + future[0]]
+        yaw = np.asarray(geometric_yaw, dtype=np.float64).copy()
         if not np.all(np.isfinite(yaw)):
             finite = np.flatnonzero(np.isfinite(yaw))
             if finite.size == 0:
@@ -338,43 +365,79 @@ class MPC_Controller:
         return yaw
 
     def _find_progress_index(self, current_state):
-        ref_xy = self.reference[:, 1:3]
+        segment_count = self._segment_delta.shape[0]
+        if segment_count == 0 or not np.any(self._valid_segment):
+            self.progress_idx = 0
+            self.progress_idx_float = 0.0
+            self.progress_time = float(self.reference[0, 0])
+            self._needs_global_alignment = False
+            return self.progress_idx
         if self._needs_global_alignment:
             start = 0
-            end = self.reference.shape[0]
+            end = segment_count
         else:
             start = max(0, self.progress_idx - 3)
             forward_window = max(30, 3 * (self.N + 1))
-            end = min(self.reference.shape[0], self.progress_idx + forward_window)
+            end = min(segment_count, self.progress_idx + forward_window)
         indices = np.arange(start, end, dtype=np.int64)
-        position_distance = np.linalg.norm(ref_xy[indices] - current_state[:2].reshape(1, 2), axis=1)
-        heading_error = np.abs(self._wrap_to_pi(self.reference[indices, 3] - current_state[2]))
-        heading_weight = 0.05
-        local_idx = int(np.argmin(position_distance + heading_weight * heading_error))
-        self.progress_idx = int(indices[local_idx])
+        indices = indices[self._valid_segment[indices]]
+        if indices.size == 0:
+            indices = np.flatnonzero(self._valid_segment)
+
+        starts = self._segment_start[indices]
+        deltas = self._segment_delta[indices]
+        offsets = np.asarray(current_state[:2], dtype=np.float64) - starts
+        alpha = np.einsum("ij,ij->i", offsets, deltas) / self._segment_len_sq[indices]
+        alpha = np.clip(alpha, 0.0, 1.0)
+        projected = starts + alpha[:, None] * deltas
+        distance_sq = np.einsum(
+            "ij,ij->i", projected - current_state[:2], projected - current_state[:2]
+        )
+        min_distance_sq = float(np.min(distance_sq))
+        close = np.flatnonzero(distance_sq <= min_distance_sq + 1e-8)
+        if close.size > 1:
+            segment_yaw = np.arctan2(deltas[close, 1], deltas[close, 0])
+            heading_error = np.abs(self._wrap_to_pi(segment_yaw - current_state[2]))
+            local_idx = int(close[np.argmin(heading_error)])
+        else:
+            local_idx = int(close[0])
+
+        candidate_idx = int(indices[local_idx])
+        candidate_alpha = float(alpha[local_idx])
+        candidate_time = float(
+            self.reference[candidate_idx, 0] + candidate_alpha * self._segment_dt[candidate_idx]
+        )
+        if not self._needs_global_alignment and candidate_time + 1e-4 < self.progress_time:
+            return self.progress_idx
+        self.progress_idx = candidate_idx
+        self.progress_idx_float = candidate_idx + candidate_alpha
+        self.progress_time = candidate_time
         self._needs_global_alignment = False
         return self.progress_idx
 
     def _build_reference_horizon(self, current_state):
         if self.reference is None or self.reference.shape[0] == 0:
             self.reference = self._build_fallback_reference(None)
-        idx = self._find_progress_index(current_state)
-        t0 = self.reference[idx, 0]
-        t_ref = t0 + np.arange(self.N + 1, dtype=np.float64) * self.T
+        self._find_progress_index(current_state)
+        t_ref = self.progress_time + self._horizon_time_offsets
         src_t = self.reference[:, 0]
-        horizon = np.empty((self.N + 1, 5), dtype=np.float64)
-        for out_col, ref_col in enumerate([1, 2, 3, 4, 5]):
-            horizon[:, out_col] = np.interp(
-                t_ref,
-                src_t,
-                self.reference[:, ref_col],
-                left=self.reference[0, ref_col],
-                right=self.reference[-1, ref_col],
-            )
+        right = np.searchsorted(src_t, t_ref, side="right")
+        right = np.clip(right, 1, src_t.size - 1)
+        left = right - 1
+        interval = src_t[right] - src_t[left]
+        alpha = np.clip((t_ref - src_t[left]) / interval, 0.0, 1.0)
+        values_left = self.reference[left, 1:6]
+        values_right = self.reference[right, 1:6]
+        horizon = values_left + alpha[:, None] * (values_right - values_left)
         beyond_tail = t_ref > src_t[-1]
+        horizon[beyond_tail, :3] = self.reference[-1, 1:4]
         horizon[beyond_tail, 3] = 0.0
         horizon[beyond_tail, 4] = 0.0
         horizon[:, 2] = np.unwrap(horizon[:, 2])
+        yaw_offset = 2.0 * np.pi * np.round(
+            (current_state[2] - horizon[0, 2]) / (2.0 * np.pi)
+        )
+        horizon[:, 2] += yaw_offset
         self._current_reference = horizon[0].copy()
         self._last_reference_horizon = horizon.copy()
         return horizon
@@ -472,7 +535,8 @@ class MPC_Controller:
             current_w = self._move_toward(current_w, 0.0, self.max_yaw_acc * self.T)
             current_v = float(np.clip(current_v, 0.0, self.v_max))
             current_w = float(np.clip(current_w, -self.w_max, self.w_max))
-            controls[i] = [current_v, current_w]
+            controls[i] = self._project_wheel_feasible_command([current_v, current_w])
+            current_v, current_w = controls[i]
         states = self._rollout_controls(state, controls)
 
         self.last_command = controls[0].copy()
@@ -492,14 +556,7 @@ class MPC_Controller:
         return states
 
     def _clip_command(self, command):
-        command = np.asarray(command, dtype=np.float64).reshape(2)
-        return np.array(
-            [
-                np.clip(command[0], 0.0, self.v_max),
-                np.clip(command[1], -self.w_max, self.w_max),
-            ],
-            dtype=np.float64,
-        )
+        return self._project_wheel_feasible_command(command)
 
     @staticmethod
     def _move_toward(value, target, step):
@@ -518,6 +575,8 @@ class MPC_Controller:
         self.last_command = np.zeros(2, dtype=np.float64)
         self.has_valid_last_command = False
         self.progress_idx = 0
+        self.progress_idx_float = 0.0
+        self.progress_time = float(self.reference[0, 0]) if self.reference is not None else 0.0
         self._needs_global_alignment = True
         self._current_reference = None
         self._last_reference_horizon = None

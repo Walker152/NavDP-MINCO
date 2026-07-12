@@ -99,38 +99,38 @@ public:
 private:
   py::dict toDict(const minco_processor::MincoPipeline::Result & result, double duration) const
   {
-    Eigen::MatrixXd samples(static_cast<int>(result.samples.size()), 15);
-    for (int i = 0; i < samples.rows(); ++i) {
-      const auto & s = result.samples[static_cast<size_t>(i)];
-      samples(i, 0) = s.t;
-      samples.block<1, 3>(i, 1) = s.pos.transpose();
-      samples.block<1, 3>(i, 4) = s.vel.transpose();
-      samples.block<1, 3>(i, 7) = s.acc.transpose();
-      samples.block<1, 3>(i, 10) = s.jerk.transpose();
-      samples(i, 13) = s.yaw;
-      samples(i, 14) = s.yaw_dot;
-    }
-
-    Eigen::MatrixXd waypoints;
-    if (!result.samples.empty()) {
-      waypoints.resize(static_cast<int>(result.samples.size()), 3);
-      for (int i = 0; i < waypoints.rows(); ++i) {
-        waypoints.row(i) = result.samples[static_cast<size_t>(i)].pos.transpose();
-      }
-    } else {
-      waypoints.resize(static_cast<int>(result.sparse_waypoints.size()), 3);
-      for (int i = 0; i < waypoints.rows(); ++i) {
-        waypoints.row(i) = result.sparse_waypoints[static_cast<size_t>(i)].transpose();
-      }
-    }
-
     double min_esdf = std::numeric_limits<double>::infinity();
-    if (map_) {
-      for (int i = 0; i < waypoints.rows(); ++i) {
-        const auto q = map_->query(waypoints.row(i).transpose());
+    auto accumulateMinEsdf = [this, &min_esdf](const Eigen::Vector3d & point) {
+      if (map_) {
+        const auto q = map_->query(point);
         if (q.ok) {
           min_esdf = std::min(min_esdf, q.distance);
         }
+      }
+    };
+
+    const int sample_count = static_cast<int>(result.samples.size());
+    Eigen::MatrixXd samples(sample_count, 15);
+    Eigen::MatrixXd waypoints(
+      sample_count > 0 ? sample_count : static_cast<int>(result.sparse_waypoints.size()), 3);
+    if (sample_count > 0) {
+      for (int i = 0; i < sample_count; ++i) {
+        const auto & sample = result.samples[static_cast<size_t>(i)];
+        samples(i, 0) = sample.t;
+        samples.block<1, 3>(i, 1) = sample.pos.transpose();
+        samples.block<1, 3>(i, 4) = sample.vel.transpose();
+        samples.block<1, 3>(i, 7) = sample.acc.transpose();
+        samples.block<1, 3>(i, 10) = sample.jerk.transpose();
+        samples(i, 13) = sample.yaw;
+        samples(i, 14) = sample.yaw_dot;
+        waypoints.row(i) = sample.pos.transpose();
+        accumulateMinEsdf(sample.pos);
+      }
+    } else {
+      for (int i = 0; i < waypoints.rows(); ++i) {
+        const auto & waypoint = result.sparse_waypoints[static_cast<size_t>(i)];
+        waypoints.row(i) = waypoint.transpose();
+        accumulateMinEsdf(waypoint);
       }
     }
     if (!std::isfinite(min_esdf)) {
