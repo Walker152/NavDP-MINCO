@@ -3,9 +3,9 @@ from omni.isaac.lab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="A script to run a car control simulation")
 parser.add_argument(
-    "--scene_dir", type=str, default="./assets/scenes/cluttered_hard")
+    "--scene_dir", type=str, default="/home/alioth/NavDP/assets/scenes/cluttered_easy")
 parser.add_argument(
-    "--scene_index", type=int, default=8)
+    "--scene_index", type=int, default=0)
 parser.add_argument(
     "--scene_scale", type=float, default=1.0)
 parser.add_argument(
@@ -13,7 +13,7 @@ parser.add_argument(
 parser.add_argument(
     "--num_envs", type=int, default=1)
 parser.add_argument(
-    "--num_episodes", type=int, default=100)
+    "--num_episodes", type=int, default=10)
 parser.add_argument(
     "--speed", type=float, default=1.0)
 parser.add_argument("--mpc_max_yaw_rate", type=float, default=1.0)
@@ -26,12 +26,12 @@ parser.add_argument(
 )
 parser.add_argument(
     "--port", type=int, default=8888)
-parser.add_argument("--enable_minco", action="store_true")
-parser.add_argument("--minco_top_k", type=int, default=4)
-parser.add_argument("--minco_safe_dist", type=float, default=0.30)
+parser.add_argument("--enable_minco", default=True, action=argparse.BooleanOptionalAction)
+parser.add_argument("--minco_top_k", type=int, default=1)
+parser.add_argument("--minco_safe_dist", type=float, default=0.60)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
-parser.add_argument("--minco_max_vel", type=float, default=1.5)
-parser.add_argument("--minco_max_acc", type=float, default=1.0)
+parser.add_argument("--minco_max_vel", type=float, default=1.0)
+parser.add_argument("--minco_max_acc", type=float, default=2.0)
 parser.add_argument("--minco_max_iterations", type=int, default=64)
 parser.add_argument("--esdf_resolution", type=float, default=0.05)
 parser.add_argument("--esdf_padding", type=float, default=1.0)
@@ -42,8 +42,8 @@ parser.add_argument("--esdf_obstacle_max_height", type=float, default=1.50)
 parser.add_argument("--esdf_fill_footprint", type=int, default=1)
 parser.add_argument("--esdf_footprint_inflate_cells", type=int, default=1)
 parser.add_argument("--use_robot_base_frame", type=int, default=1)
-parser.add_argument("--timing_log_interval", type=int, default=10)
-parser.add_argument("--show_timing_overlay", action="store_true")
+parser.add_argument("--timing_log_interval", type=int, default=1)
+parser.add_argument("--show_timing_overlay", default=True, action=argparse.BooleanOptionalAction)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(headless=False, enable_cameras=True)
 simulation_app = app_launcher.app
@@ -97,7 +97,7 @@ planning_output = PlanningOutput()
 input_lock = threading.Lock()
 output_lock = threading.Lock()
 stop_event = threading.Event()
-vis_manager = [VisualizationManager(history_size=5) for i in range(args_cli.num_envs)]
+vis_manager = [VisualizationManager(history_size=5, show_all_candidates=True) for i in range(args_cli.num_envs)]
 mpc = [None for _ in range(args_cli.num_envs)]
 last_applied_plan_id = [-1 for _ in range(args_cli.num_envs)]
 per_env_plan_id = np.zeros(args_cli.num_envs, dtype=np.int64)
@@ -657,6 +657,13 @@ try:
                                 continue
                         last_applied_plan_id[i] = env_plan_id
 
+                    selected_candidate_index = (
+                        int(current_minco_info[i].get("selected_index", -1))
+                        if current_minco_info is not None
+                        and i < len(current_minco_info)
+                        and isinstance(current_minco_info[i], dict)
+                        else -1
+                    )
                     with control_timer.section("visualize_ms"):
                         vis_image = vis_manager[i].visualize_trajectory(
                             images[i], depths[i][:,:,None], camera_intrinsic.cpu().numpy(),
@@ -666,6 +673,7 @@ try:
                             all_trajectories_values=current_all_values[i] if current_all_values is not None else None,
                             raw_trajectory_points=current_raw_top1[i] if current_raw_top1 is not None else None,
                             selected_candidate_points=current_selected_candidate[i] if current_selected_candidate is not None else None,
+                            selected_candidate_index=selected_candidate_index,
                             sparse_guide_points=current_sparse_guide_points[i] if current_sparse_guide_points is not None else None,
                             esdf=minco_adapter.esdf if minco_adapter is not None else None,
                             minco_info=current_minco_info[i] if current_minco_info is not None else None,

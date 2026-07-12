@@ -11,6 +11,7 @@ RGB_RED = (255, 0, 0)
 RGB_BLUE = (0, 0, 255)
 RGB_WHITE = (255, 255, 255)
 RGB_GRAY = (128, 128, 128)
+RGB_CANDIDATE_OTHER = (96, 128, 160)
 RGB_BLACK = (0, 0, 0)
 
 
@@ -30,6 +31,49 @@ class VisualizationManager:
         self.speed_history.clear()
         self.esdf_overlay_cache = None
         self.esdf_overlay_pose = None
+
+    def _draw_candidate_trajectories(
+        self, image, trajectories, selected_index, robot_pose
+    ):
+        if trajectories is None:
+            return
+        try:
+            candidate_count = len(trajectories)
+        except TypeError:
+            return
+        selected_index = int(selected_index) if selected_index is not None else -1
+        if not 0 <= selected_index < candidate_count:
+            selected_index = -1
+
+        draw_order = [index for index in range(candidate_count) if index != selected_index]
+        if selected_index >= 0:
+            draw_order.append(selected_index)
+        for index in draw_order:
+            trajectory = np.asarray(trajectories[index], dtype=np.float64)
+            if trajectory.ndim != 2 or trajectory.shape[0] < 2 or trajectory.shape[1] < 2:
+                continue
+            is_selected = index == selected_index
+            self.draw_polyline_world(
+                image,
+                trajectory,
+                robot_pose,
+                color=RGB_CYAN if is_selected else RGB_CANDIDATE_OTHER,
+                thickness=3 if is_selected else 1,
+                dashed=False,
+            )
+
+    @staticmethod
+    def _compose_panels(rgb_image, main_panel, candidate_panel=None):
+        height = int(rgb_image.shape[0])
+
+        def resize_panel(panel):
+            resized = cv2.resize(panel, (height, height), interpolation=cv2.INTER_CUBIC)
+            return cv2.GaussianBlur(resized, (3, 3), 0.5)
+
+        panels = [rgb_image, resize_panel(main_panel)]
+        if candidate_panel is not None:
+            panels.append(resize_panel(candidate_panel))
+        return np.concatenate(panels, axis=1)
         
     def build_occupancy_grid(self, depth_map, intrinsic, camera_roll=0):
         try:
@@ -338,6 +382,7 @@ class VisualizationManager:
         all_trajectories_values=None,
         raw_trajectory_points=None,
         selected_candidate_points=None,
+        selected_candidate_index=-1,
         sparse_guide_points=None,
         esdf=None,
         minco_info=None,
@@ -346,13 +391,7 @@ class VisualizationManager:
         grid_size = int(10.0 / self.resolution)  # 20m in grid cells
         vis_image = np.zeros((grid_size, grid_size, 3), dtype=np.uint8)
 
-        # Resize visualization to match RGB image height with better interpolation
-        vis_resized = cv2.resize(vis_image, (int(rgb_image.shape[0]), int(rgb_image.shape[0])), interpolation=cv2.INTER_CUBIC)
-        # Apply slight Gaussian blur to smooth pixelated edges (adjust sigma as needed)
-        vis_resized = cv2.GaussianBlur(vis_resized, (3, 3), 0.5)
-        
-        # Concatenate images
-        combined_image = np.concatenate((rgb_image, vis_resized), axis=1)
+        combined_image = self._compose_panels(rgb_image, vis_image)
          
         # Build current occupancy grid
         occupancy_grid, min_coords = self.build_occupancy_grid(depth_image[..., 0], intrinsic, camera_roll)
@@ -415,7 +454,7 @@ class VisualizationManager:
         if vis_coords_current.size > 0:
             vis_image[vis_coords_current[:, 1], vis_coords_current[:, 0]] = RGB_RED
         
-        if raw_trajectory_points is not None:
+        if raw_trajectory_points is not None and selected_candidate_points is None:
             self.draw_polyline_world(
                 vis_image,
                 raw_trajectory_points,
@@ -520,109 +559,29 @@ class VisualizationManager:
         cv2.polylines(vis_image, [corners_int], True, RGB_WHITE, 1, cv2.LINE_AA)
 
         legend_y = 16
-        cv2.putText(vis_image, "green MINCO | orange raw", (8, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_GREEN, 1, cv2.LINE_AA)
-        cv2.putText(vis_image, "cyan selected | yellow sparse guide", (8, legend_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_CYAN, 1, cv2.LINE_AA)
-        cv2.putText(vis_image, "red obstacle | gray history", (8, legend_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_RED, 1, cv2.LINE_AA)
-        cv2.putText(vis_image, "red/orange dot min ESDF", (8, legend_y + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_ORANGE, 1, cv2.LINE_AA)
-        
-        # Resize visualization to match RGB image height with better interpolation
-        vis_resized = cv2.resize(vis_image, (int(rgb_image.shape[0]), int(rgb_image.shape[0])), interpolation=cv2.INTER_CUBIC)
-        # Apply slight Gaussian blur to smooth pixelated edges (adjust sigma as needed)
-        vis_resized = cv2.GaussianBlur(vis_resized, (3, 3), 0.5)
-        # Concatenate images
-        combined_image = np.concatenate((rgb_image, vis_resized), axis=1)
+        cv2.putText(vis_image, "green: MINCO", (8, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_GREEN, 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "cyan: source candidate", (8, legend_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_CYAN, 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "yellow: sparse guide", (8, legend_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_YELLOW, 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "red obstacle | gray history", (8, legend_y + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_RED, 1, cv2.LINE_AA)
+        cv2.putText(vis_image, "red/orange dot: min ESDF", (8, legend_y + 64), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_ORANGE, 1, cv2.LINE_AA)
 
-        if (
-            not self.show_all_candidates
-            or all_trajectories_points is None
-            or len(all_trajectories_points) == 0
-        ):
+        combined_image = self._compose_panels(rgb_image, vis_image)
+
+        if not self.show_all_candidates:
             return combined_image
         
-        # --- Create additional visualization for all trajectories ---
-        # Create a new image for all trajectories visualization
         vis_image_all = np.zeros((grid_size, grid_size, 3), dtype=np.uint8)
-        
-        # Draw the same occupancy grid
         if vis_coords_hist.size > 0:
             vis_image_all[vis_coords_hist[:, 1], vis_coords_hist[:, 0]] = RGB_GRAY
         if vis_coords_current.size > 0:
             vis_image_all[vis_coords_current[:, 1], vis_coords_current[:, 0]] = RGB_RED
-            
-        has_all_trajectories = all_trajectories_points is not None and len(all_trajectories_points) > 0
-
-        # Draw all trajectories with colors based on values
-        # Define color mapping function from value to color (blue to red gradient)
-        def value_to_color(value, values_min, values_max):
-            # Normalize value to [0, 1] based on a fixed range [-2, 0.5]
-            fixed_min = -1.2
-            fixed_max = 0.2
-
-            # Clamp the value to be within the fixed range
-            value = np.clip(value, fixed_min, fixed_max)
-
-            # Normalize value to [0, 1]
-            normalized = (value - fixed_min) / (fixed_max - fixed_min)
-
-            # Map to blue (low) -> green (mid) -> red (high)
-            if normalized < 0.5:
-                # Blue to green
-                b = 255 * (1 - 2 * normalized)
-                g = 255 * (2 * normalized)
-                r = 0
-            else:
-                # Green to red
-                b = 0
-                g = 255 * (2 - 2 * normalized)
-                r = 255 * (2 * normalized - 1)
-            
-            return (int(r), int(g), int(b))
-        
-        if has_all_trajectories:
-            # Set default colors if no values provided
-            if all_trajectories_values is None:
-                colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
-                trajectory_colors = [colors[idx % len(colors)] for idx in range(len(all_trajectories_points))]
-            else:
-                # Get min and max values for normalization
-                values_min = np.min(all_trajectories_values)
-                values_max = np.max(all_trajectories_values)
-                # Generate color for each trajectory
-                trajectory_colors = [value_to_color(v, values_min, values_max) for v in all_trajectories_values]
-
-            for idx, traj in enumerate(all_trajectories_points):
-                color = trajectory_colors[idx]
-                vis_points_all = self.world_to_vis_points(traj, robot_pose, grid_size, center_offset)
-
-                # Draw trajectory with anti-aliased lines
-                for i in range(len(vis_points_all) - 1):
-                    cv2.line(vis_image_all, tuple(vis_points_all[i]), tuple(vis_points_all[i+1]), color, 1, cv2.LINE_AA)
-
-                # Draw start and end points with anti-aliasing
-                if len(vis_points_all) > 0:
-                    cv2.circle(vis_image_all, tuple(vis_points_all[0]), 2, color, -1, cv2.LINE_AA)
-        
-        # Draw robot position with anti-aliasing
+        self._draw_candidate_trajectories(
+            vis_image_all,
+            all_trajectories_points,
+            selected_candidate_index,
+            robot_pose,
+        )
         cv2.polylines(vis_image_all, [corners_int], True, RGB_WHITE, 1, cv2.LINE_AA)
-        
-        # Resize all trajectories visualization - align width with rgb_image
-        # Get target width (same as rgb_image width)
-        target_width = rgb_image.shape[1]
-        # Calculate the height to maintain aspect ratio
-        target_height = int(vis_image_all.shape[0] * (target_width / vis_image_all.shape[1]))
-        # Resize with the calculated dimensions using better interpolation
-        vis_resized_all = cv2.resize(vis_image_all, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
-        # Apply slight Gaussian blur to smooth pixelated edges
-        vis_resized_all = cv2.GaussianBlur(vis_resized_all, (3, 3), 0.5)
-        
-        # Create black padding to match combined_image width
-        if combined_image.shape[1] > target_width:
-            # Add black padding to the right
-            padding_width = combined_image.shape[1] - target_width
-            padding = np.zeros((target_height, padding_width, 3), dtype=np.uint8)
-            vis_resized_all = np.concatenate((vis_resized_all, padding), axis=1)
-        
-        # Stack vertically: combined_image (top) and vis_resized_all (bottom)
-        final_combined_image = np.concatenate((combined_image, vis_resized_all), axis=0)
-        
-        return final_combined_image
+        cv2.putText(vis_image_all, "cyan: selected candidate", (8, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_CYAN, 1, cv2.LINE_AA)
+        cv2.putText(vis_image_all, "blue-gray: other candidates", (8, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_CANDIDATE_OTHER, 1, cv2.LINE_AA)
+        return self._compose_panels(rgb_image, vis_image, vis_image_all)
