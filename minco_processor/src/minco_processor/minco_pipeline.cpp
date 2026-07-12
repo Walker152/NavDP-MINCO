@@ -409,7 +409,7 @@ MincoPipeline::Config::Config()
   optimizer.magnitudeBounds.resize(3);
   optimizer.magnitudeBounds << optimizer.safe_dist, optimizer.max_vel, optimizer.max_acc;
   optimizer.penaltyWeights.resize(5);
-  optimizer.penaltyWeights << 1000.0, 1000.0, 10000.0, 1000.0, 100.0;
+  optimizer.penaltyWeights << 1000.0, 1000.0, 10000.0, 20.0, 100.0;
 }
 
 MincoPipeline::MincoPipeline() : MincoPipeline(Config{})

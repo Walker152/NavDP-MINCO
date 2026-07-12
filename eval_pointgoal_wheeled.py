@@ -17,7 +17,7 @@ parser.add_argument(
 parser.add_argument(
     "--speed", type=float, default=1.0)
 parser.add_argument("--mpc_max_yaw_rate", type=float, default=0.5)
-parser.add_argument("--mpc_max_yaw_acc", type=float, default=2.0)
+parser.add_argument("--mpc_max_yaw_acc", type=float, default=1.0)
 parser.add_argument(
     "--mpc_max_wheel_speed",
     type=float,
@@ -28,11 +28,17 @@ parser.add_argument(
     "--port", type=int, default=8888)
 parser.add_argument("--enable_minco", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--minco_top_k", type=int, default=2)
-parser.add_argument("--minco_safe_dist", type=float, default=0.60)
+parser.add_argument("--minco_safe_dist", type=float, default=0.40)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
 parser.add_argument("--minco_max_vel", type=float, default=1.0)
-parser.add_argument("--minco_max_acc", type=float, default=2.0)
+parser.add_argument("--minco_max_acc", type=float, default=1.0)
 parser.add_argument("--minco_max_iterations", type=int, default=64)
+parser.add_argument("--minco_penalty_weight_pos", type=float, default=10000.0)
+parser.add_argument("--minco_penalty_weight_vel", type=float, default=1000.0)
+parser.add_argument("--minco_penalty_weight_acc", type=float, default=1000.0)
+parser.add_argument("--minco_penalty_weight_attractor", type=float, default=20.0)
+parser.add_argument("--minco_time_weight", type=float, default=0.1)
+parser.add_argument("--minco_time_barrier_weight", type=float, default=10.0)
 parser.add_argument("--esdf_resolution", type=float, default=0.05)
 parser.add_argument("--esdf_padding", type=float, default=1.0)
 parser.add_argument("--esdf_force_rebuild", action="store_true")
@@ -91,6 +97,7 @@ from utils_tasks.timing_utils import (
     format_planning_summary,
     mean_timing,
 )
+from utils_tasks.episode_diagnostics import EpisodeStartupDiagnostics, infer_termination_reason
 
 planning_input = PlanningInput() 
 planning_output = PlanningOutput()
@@ -107,6 +114,7 @@ minco_hold_cache = [None for _ in range(args_cli.num_envs)]
 episode_generation = np.zeros(args_cli.num_envs, dtype=np.int64)
 reset_pending = np.zeros(args_cli.num_envs, dtype=bool)
 reset_stable_count = np.zeros(args_cli.num_envs, dtype=np.int32)
+episode_diagnostics = EpisodeStartupDiagnostics(args_cli.num_envs)
 RESET_CAMERA_BASE_OFFSET_TOL = 0.05
 RESET_STABLE_REQUIRED_FRAMES = 3
 use_robot_base_frame = bool(args_cli.use_robot_base_frame)
@@ -448,11 +456,19 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     continue
                 if used_minco:
                     for idx, result in enumerate(minco_results):
+                        accepted_valid_plan = False
                         if result["success"] and result["waypoints"] is not None and len(result["waypoints"]) >= 2:
                             cache = minco_cache_entry(result, input_episode_generation[idx])
                             if cache is not None:
                                 minco_hold_cache[idx] = cache
                                 per_env_plan_id[idx] = batch_per_env_plan_id[idx]
+                                accepted_valid_plan = True
+                        episode_diagnostics.note_planning_result(
+                            idx,
+                            input_episode_generation[idx],
+                            batch_minco_status[idx],
+                            accepted_valid_plan,
+                        )
                 planning_output.plan_id += 1
                 planning_output.episode_generation = input_episode_generation.copy()
                 planning_output.trajectory_points_world = batch_optimal_points_world
@@ -554,6 +570,12 @@ if args_cli.enable_minco:
         max_acc=args_cli.minco_max_acc,
         max_iterations=args_cli.minco_max_iterations,
         max_yaw_rate=args_cli.mpc_max_yaw_rate,
+        penalty_weight_pos=args_cli.minco_penalty_weight_pos,
+        penalty_weight_vel=args_cli.minco_penalty_weight_vel,
+        penalty_weight_acc=args_cli.minco_penalty_weight_acc,
+        penalty_weight_attractor=args_cli.minco_penalty_weight_attractor,
+        time_weight=args_cli.minco_time_weight,
+        time_barrier_weight=args_cli.minco_time_barrier_weight,
         enable=True,
     )
 
@@ -571,6 +593,8 @@ if wheel_constraint_enabled:
 controller = DifferentialController(**controller_kwargs)
 with navdp_http_lock:
     algo = navigator_reset(camera_intrinsic.cpu().numpy(),batch_size=scene_config.num_envs,stop_threshold=args_cli.stop_threshold,port=args_cli.port)
+for env_idx in range(args_cli.num_envs):
+    episode_diagnostics.begin_generation(env_idx, episode_generation[env_idx])
 
 episode_num = args_cli.num_envs - 1
 evaluation_metrics = []
@@ -960,7 +984,20 @@ try:
                     break
                 if dones[i] == True:
                     reset_in_progress.set()
+                    finished_generation = int(episode_generation[i])
+                    diagnostic = episode_diagnostics.snapshot(i, finished_generation)
+                    termination_reason = infer_termination_reason(infos, i)
+                    print(
+                        f"[EpisodeDone] env={i} generation={finished_generation} "
+                        f"reason={termination_reason} "
+                        f"first_valid_plan={str(diagnostic['first_valid_plan_received']).lower()} "
+                        f"done_before_first_plan={str(not diagnostic['first_valid_plan_received']).lower()} "
+                        f"startup_attempts={diagnostic['startup_attempt_count']} "
+                        f"startup_elapsed={diagnostic['startup_planning_elapsed']:.3f}s "
+                        f"last_minco_status={diagnostic['last_minco_status']}"
+                    )
                     episode_generation[i] += 1
+                    episode_diagnostics.begin_generation(i, episode_generation[i])
                     print(f"[EpisodeReset] env={i} generation={episode_generation[i]} state=BEGIN")
                     if mpc[i] is not None:
                         mpc[i].reset()

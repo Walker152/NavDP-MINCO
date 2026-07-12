@@ -22,12 +22,14 @@ class MincoProcessorPy
 public:
   MincoProcessorPy()
   {
-    configure(2.0, 4.0, 0.3, 0.05, 64, 0.5);
+    configure(2.0, 4.0, 0.3, 0.05, 64, 0.5, 1000.0, 1000.0, 10000.0, 20.0, 0.01, 100.0);
   }
 
   void configure(
     double max_vel, double max_acc, double safe_dist, double sample_dt, int max_iterations,
-    double max_yaw_rate)
+    double max_yaw_rate, double penalty_weight_pos, double penalty_weight_vel,
+    double penalty_weight_acc, double penalty_weight_attractor, double time_weight,
+    double time_barrier_weight)
   {
     minco_processor::MincoPipeline::Config config;
     config.sample_dt = sample_dt;
@@ -37,6 +39,10 @@ public:
     config.optimizer.max_vel = max_vel;
     config.optimizer.max_acc = max_acc;
     config.optimizer.max_iterations = max_iterations;
+    config.optimizer.rho = time_weight;
+    config.optimizer.penaltyWeights.resize(5);
+    config.optimizer.penaltyWeights << penalty_weight_pos, penalty_weight_vel, penalty_weight_acc,
+      penalty_weight_attractor, time_barrier_weight;
     config.optimizer.print_optimizer_log = false;
     config.max_yaw_rate = max_yaw_rate;
     pipeline_.setConfig(config);
@@ -183,7 +189,13 @@ PYBIND11_MODULE(_minco_processor, m)
       py::arg("safe_dist"),
       py::arg("sample_dt"),
       py::arg("max_iterations"),
-      py::arg("max_yaw_rate"))
+      py::arg("max_yaw_rate"),
+      py::arg("penalty_weight_pos") = 1000.0,
+      py::arg("penalty_weight_vel") = 1000.0,
+      py::arg("penalty_weight_acc") = 10000.0,
+      py::arg("penalty_weight_attractor") = 20.0,
+      py::arg("time_weight") = 0.01,
+      py::arg("time_barrier_weight") = 100.0)
     .def("set_static_esdf_2d", &MincoProcessorPy::set_static_esdf_2d,
       py::arg("distance"), py::arg("free"), py::arg("origin"), py::arg("resolution"))
     .def("optimize", &MincoProcessorPy::optimize,

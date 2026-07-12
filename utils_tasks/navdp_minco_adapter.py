@@ -17,6 +17,12 @@ class NavDPMincoAdapter:
         max_acc=4.0,
         max_iterations=64,
         max_yaw_rate=0.5,
+        penalty_weight_pos=1000.0,
+        penalty_weight_vel=1000.0,
+        penalty_weight_acc=10000.0,
+        penalty_weight_attractor=20.0,
+        time_weight=0.01,
+        time_barrier_weight=100.0,
         enable=True,
     ):
         self.esdf = esdf
@@ -29,8 +35,17 @@ class NavDPMincoAdapter:
         self.max_acc = float(max_acc)
         self.max_iterations = int(max_iterations)
         self.max_yaw_rate = float(max_yaw_rate)
+        self.penalty_weights = np.asarray(
+            [penalty_weight_pos, penalty_weight_vel, penalty_weight_acc,
+             penalty_weight_attractor, time_barrier_weight], dtype=np.float64
+        )
+        self.time_weight = float(time_weight)
         if not np.isfinite(self.max_yaw_rate) or self.max_yaw_rate <= 0.0:
             raise ValueError("max_yaw_rate must be finite and positive")
+        if not np.all(np.isfinite(self.penalty_weights)) or np.any(self.penalty_weights < 0.0):
+            raise ValueError("MINCO penalty weights must be finite and non-negative")
+        if not np.isfinite(self.time_weight) or self.time_weight < 0.0:
+            raise ValueError("MINCO time weight must be finite and non-negative")
         self.enabled = bool(enable)
         self.processor = None
         if self.enabled:
@@ -45,6 +60,12 @@ class NavDPMincoAdapter:
                     sample_dt=self.sample_dt,
                     max_iterations=self.max_iterations,
                     max_yaw_rate=self.max_yaw_rate,
+                    penalty_weight_pos=float(self.penalty_weights[0]),
+                    penalty_weight_vel=float(self.penalty_weights[1]),
+                    penalty_weight_acc=float(self.penalty_weights[2]),
+                    penalty_weight_attractor=float(self.penalty_weights[3]),
+                    time_weight=self.time_weight,
+                    time_barrier_weight=float(self.penalty_weights[4]),
                 )
             self.processor.set_static_esdf_2d(
                 distance=self._esdf_grid.distance,
