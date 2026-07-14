@@ -1,0 +1,1 @@
+PLOT_FILENAMES = ("success_rate_with_ci.png", "collision_rate_with_ci.png", "failure_reason_stacked_bar.png", "episode_duration_distribution.png", "actual_path_length_distribution.png", "spl_distribution.png", "paired_episode_duration_scatter.png", "paired_path_length_scatter.png")

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 1,
+  "manifest_id": "navdp_minco_mock_full_v1",
+  "seed": 0,
+  "scenes": [
+    {
+      "scene_id": "dense_mock_000", "scene_label": "DENSE", "scene_path": "mock://dense/000",
+      "episodes": [
+        {"scenario_id": "SCN-02", "episode_index": 0, "seed": 0, "navdp_seed": 2000, "start_pose": [0,0,0], "goal_pose": [3,2,0]},
+        {"scenario_id": "SCN-03", "episode_index": 1, "seed": 0, "navdp_seed": 2001, "start_pose": [0,0,0], "goal_pose": [2,1,0]},
+        {"scenario_id": "SCN-06", "episode_index": 2, "seed": 0, "navdp_seed": 2002, "start_pose": [0,0,0], "goal_pose": [2,-1,0]},
+        {"scenario_id": "SCN-08", "episode_index": 3, "seed": 0, "navdp_seed": 2003, "start_pose": [0,0,0], "goal_pose": [3,-2,0]}
+      ]
+    },
+    {
+      "scene_id": "sparse_mock_000", "scene_label": "SPARSE", "scene_path": "mock://sparse/000",
+      "episodes": [
+        {"scenario_id": "SCN-01", "episode_index": 0, "seed": 0, "navdp_seed": 1000, "start_pose": [0,0,0], "goal_pose": [3,0,0]},
+        {"scenario_id": "SCN-04", "episode_index": 1, "seed": 0, "navdp_seed": 1001, "start_pose": [0,0,1.57], "goal_pose": [2,1,0]},
+        {"scenario_id": "SCN-05", "episode_index": 2, "seed": 0, "navdp_seed": 1002, "start_pose": [0,0,0], "goal_pose": [8,0,0]},
+        {"scenario_id": "SCN-07", "episode_index": 3, "seed": 0, "navdp_seed": 1003, "start_pose": [0,0,0], "goal_pose": [4,0.5,0]}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+PLOT_FILENAMES = ("tracking_error_ecdf.png", "tracking_rmse_distribution.png", "tracking_p95_distribution.png", "mpc_failure_rate_bar.png", "command_saturation_rate_bar.png", "reference_age_ecdf.png", "tracking_error_vs_time_<episode>.png", "actual_reference_xy_<episode>.png", "actual_reference_speed_<episode>.png", "command_vw_vs_time_<episode>.png")

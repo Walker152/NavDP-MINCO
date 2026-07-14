@@ -1,0 +1,1 @@
+PLOT_FILENAMES = ("safety_transition_matrix.png", "repair_outcome_stacked_bar.png", "paired_clearance_scatter.png", "paired_clearance_delta.png", "paired_unsafe_ratio_delta.png", "failure_reason_bar.png", "clearance_vs_arclength_<plan>.png", "trajectory_esdf_overlay_<plan>.png")

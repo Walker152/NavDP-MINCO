@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from experiments.analyzers.run_analysis import analyze_run
+from experiments.analyzers.artifact_manifest import generate_artifact_manifest
 from experiments.analyzers.suite_analysis import analyze_suite
 from experiments.analyzers.validator import validate_run
 from experiments.core.layout import ResultLayout
@@ -17,11 +18,18 @@ from experiments.recorders.run_recorder import RunLifecycle, atomic_json
 from experiments.simulators.mock_backend import MockBackend
 
 
-def run_suite(config_path, backend_name="mock", resume=False):
+def run_suite(config_path, backend_name="mock", resume=False, retry_failed=False, dry_run=False, analysis_only=False):
     if backend_name != "mock": raise ValueError("only the safe mock backend is implemented; real simulation is never started implicitly")
     config = load_suite(config_path); manifest = load_manifest(config.manifest_path); layout = ResultLayout(config.output_root); backend = MockBackend()
     suite_dir = layout.suite_dir(config.suite_id); suite_dir.mkdir(parents=True, exist_ok=True)
     atomic_json(suite_dir / "suite_config.json", {"suite_id": config.suite_id, "manifest": str(config.manifest_path), "backend": backend.name, "data_source": "SIMULATED"})
+    atomic_json(suite_dir / "scenario_manifest.json", json.loads(config.manifest_path.read_text(encoding="utf-8")))
+    atomic_json(suite_dir / "suite_status.json", {"status":"RUNNING", "backend":backend.name, "data_source":"SIMULATED"})
+    if dry_run:
+        atomic_json(suite_dir / "dry_run_plan.json", {"backend":backend_name, "run_count":len(list(expand_runs(config, manifest))), "commands":[], "started_processes":0})
+        return SuiteResult(0, 0, 0)
+    if analysis_only:
+        analyze_suite(suite_dir); return SuiteResult(0, 0, 0)
     completed = skipped = failed = 0
     scenes = {scene.scene_id: scene for scene in manifest.scenes}
     for run in expand_runs(config, manifest):
@@ -44,4 +52,6 @@ def run_suite(config_path, backend_name="mock", resume=False):
             if lifecycle.status not in {"FAILED", "COMPLETE"}: lifecycle.status = "FAILED"; lifecycle._write(error=repr(error))
             raise
     analyze_suite(suite_dir)
+    atomic_json(suite_dir / "suite_status.json", {"status":"COMPLETE", "backend":backend.name, "data_source":"SIMULATED", "completed":completed, "skipped":skipped, "failed":failed})
+    generate_artifact_manifest(suite_dir)
     return SuiteResult(completed, skipped, failed)

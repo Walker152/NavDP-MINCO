@@ -1,0 +1,1 @@
+PLOT_FILENAMES = ("hot_accept_rate_bar.png", "hot_reject_reason_bar.png", "interplan_position_rmse_distribution.png", "initial_tangent_jump_distribution.png", "command_delta_w_distribution.png", "optimizer_time_distribution.png", "previous_vs_new_trajectory_<plan>.png", "trajectory_jump_vs_time_<episode>.png")

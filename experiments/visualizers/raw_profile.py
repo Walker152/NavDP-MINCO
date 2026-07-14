@@ -1,0 +1,1 @@
+PLOT_FILENAMES = ("raw_safety_class_bar.png", "raw_min_clearance_ecdf.png", "raw_unsafe_ratio_distribution.png", "raw_turn_class_bar.png", "raw_interplan_jump_ecdf.png", "critic_vs_clearance_scatter.png", "candidate_rank_safe_rate.png")
