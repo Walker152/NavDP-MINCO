@@ -1,0 +1,10 @@
+{
+  "suite_id": "navdp_minco_mock_smoke",
+  "output_root": "../../results",
+  "manifest": "mock_scenarios.json",
+  "runs": [
+    {"experiment_id": "EXP-01_raw_profile", "variant": "raw", "warm_start_mode": "cold"},
+    {"experiment_id": "EXP-02_safety_repair", "variant": "minco-cold", "warm_start_mode": "cold"},
+    {"experiment_id": "EXP-04_warm_start", "variant": "minco-hot", "warm_start_mode": "gated"}
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 1,
+  "manifest_id": "navdp_minco_mock_v1",
+  "seed": 0,
+  "scenes": [
+    {
+      "scene_id": "dense_mock_000",
+      "scene_label": "DENSE",
+      "scene_path": "mock://dense/000",
+      "episodes": [
+        {"scenario_id": "SCN-03", "episode_index": 0, "seed": 0, "navdp_seed": 1000, "start_pose": [0, 0, 0], "goal_pose": [3, 1, 0]}
+      ]
+    },
+    {
+      "scene_id": "sparse_mock_000",
+      "scene_label": "SPARSE",
+      "scene_path": "mock://sparse/000",
+      "episodes": [
+        {"scenario_id": "SCN-01", "episode_index": 0, "seed": 0, "navdp_seed": 1000, "start_pose": [0, 0, 0], "goal_pose": [3, 0, 0]}
+      ]
+    }
+  ]
+}

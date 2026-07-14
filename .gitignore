@@ -1,5 +1,7 @@
 *.ply
-__pycache__
+__pycache__/
+*.pyc
+.pytest_cache/
 minco_processor/build/
 *.pth
 *.ckpt
@@ -16,3 +18,7 @@ docs/*
 *.db-shm
 *.db-wal
 *.zip
+
+# Generated experiment runs and reports. Keep experiments/ source and configs tracked.
+/results/
+/experiment_outputs/
