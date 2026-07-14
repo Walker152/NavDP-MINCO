@@ -54,12 +54,14 @@ class NavDP_Policy(nn.Module):
                                        beta_schedule='squaredcos_cap_v2',
                                        clip_sample=True,
                                        prediction_type='epsilon')
+        self.generator = torch.Generator(device=self.device)
+        self.generator.manual_seed(0)
         
         self.tgt_mask = (torch.triu(torch.ones(predict_size, predict_size)) == 1).transpose(0, 1)
         self.tgt_mask = self.tgt_mask.float().masked_fill(self.tgt_mask == 0, float('-inf')).masked_fill(self.tgt_mask == 1, float(0.0))
         self.cond_critic_mask = torch.zeros((predict_size,4 + memory_size * 16))
         self.cond_critic_mask[:,0:4] = float('-inf')
-    
+
     def predict_noise(self,last_actions,timestep,goal_embed,rgbd_embed):
         action_embeds = self.input_embed(last_actions)
         time_embeds = self.time_emb(timestep.to(self.device)).unsqueeze(1).tile((last_actions.shape[0],1,1))
@@ -99,7 +101,7 @@ class NavDP_Policy(nn.Module):
             rgbd_embed = torch.repeat_interleave(rgbd_embed,sample_num,dim=0)
             pointgoal_embed = torch.repeat_interleave(pointgoal_embed,sample_num,dim=0)
             
-            noisy_action = torch.randn((sample_num * goal_point.shape[0], self.predict_size, 3), device=self.device)
+            noisy_action = torch.randn((sample_num * goal_point.shape[0], self.predict_size, 3), device=self.device, generator=self.generator)
             naction = noisy_action
             self.noise_scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
             for k in self.noise_scheduler.timesteps[:]:
@@ -134,7 +136,7 @@ class NavDP_Policy(nn.Module):
             rgbd_embed = torch.repeat_interleave(rgbd_embed,sample_num,dim=0)
             imagegoal_embed = torch.repeat_interleave(imagegoal_embed,sample_num,dim=0)
             
-            noisy_action = torch.randn((sample_num * goal_image.shape[0], self.predict_size, 3), device=self.device)
+            noisy_action = torch.randn((sample_num * goal_image.shape[0], self.predict_size, 3), device=self.device, generator=self.generator)
             naction = noisy_action
             self.noise_scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
             for k in self.noise_scheduler.timesteps[:]:
@@ -169,7 +171,7 @@ class NavDP_Policy(nn.Module):
             rgbd_embed = torch.repeat_interleave(rgbd_embed,sample_num,dim=0)
             pixelgoal_embed = torch.repeat_interleave(pixelgoal_embed,sample_num,dim=0)
             
-            noisy_action = torch.randn((sample_num * goal_image.shape[0], self.predict_size, 3), device=self.device)
+            noisy_action = torch.randn((sample_num * goal_image.shape[0], self.predict_size, 3), device=self.device, generator=self.generator)
             naction = noisy_action
             self.noise_scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
             for k in self.noise_scheduler.timesteps[:]:
@@ -203,7 +205,7 @@ class NavDP_Policy(nn.Module):
             rgbd_embed = torch.repeat_interleave(rgbd_embed,sample_num,dim=0)
             nogoal_embed = torch.repeat_interleave(nogoal_embed,sample_num,dim=0)
            
-            noisy_action = torch.randn((sample_num * input_images.shape[0], self.predict_size, 3), device=self.device)
+            noisy_action = torch.randn((sample_num * input_images.shape[0], self.predict_size, 3), device=self.device, generator=self.generator)
             naction = noisy_action
             self.noise_scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
             for k in self.noise_scheduler.timesteps[:]:
@@ -249,7 +251,7 @@ class NavDP_Policy(nn.Module):
             pointgoal_embed = torch.repeat_interleave(pointgoal_embed,sample_num,dim=0)
             imagegoal_embed = torch.repeat_interleave(imagegoal_embed,sample_num,dim=0)
             
-            noisy_action = torch.randn((sample_num * goal_image.shape[0], self.predict_size, 3), device=self.device)
+            noisy_action = torch.randn((sample_num * goal_image.shape[0], self.predict_size, 3), device=self.device, generator=self.generator)
             naction = noisy_action
             self.noise_scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
             for k in self.noise_scheduler.timesteps[:]:
@@ -273,7 +275,5 @@ class NavDP_Policy(nn.Module):
             topk_indices = sorted_indices[:,0:2]
             batch_indices = torch.arange(goal_image.shape[0]).unsqueeze(1).expand(-1, 2)
             negative_trajectory = all_trajectory[batch_indices, topk_indices]
-            
+
             return all_trajectory.cpu().numpy(), critic_values.cpu().numpy(), positive_trajectory.cpu().numpy(), negative_trajectory.cpu().numpy()
-    
-    

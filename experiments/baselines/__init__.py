@@ -1,0 +1,1 @@
+"""Provenance-preserving baseline adapters."""

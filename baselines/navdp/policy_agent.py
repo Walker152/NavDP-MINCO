@@ -26,10 +26,12 @@ class NavDP_Agent:
         self.navi_former.to(self.device)
         self.navi_former.eval()
     
-    def reset(self,batch_size,threshold):
+    def reset(self,batch_size,threshold,seed=None):
         self.batch_size = batch_size
         self.stop_threshold = threshold
         self.memory_queue = [[] for i in range(batch_size)]
+        if seed is not None:
+            self.navi_former.generator.manual_seed(int(seed))
     def reset_env(self,i):
         self.memory_queue[i] = []
     

@@ -16,20 +16,27 @@ from experiments.designers.suite import expand_runs, load_suite
 from experiments.recorders.async_writer import AsyncRecordWriter
 from experiments.recorders.run_recorder import RunLifecycle, atomic_json
 from experiments.simulators.mock_backend import MockBackend
+from experiments.simulators.isaac_navdp_backend import IsaacNavDPBackend
 
 
-def run_suite(config_path, backend_name="mock", resume=False, retry_failed=False, dry_run=False, analysis_only=False):
-    if backend_name != "mock": raise ValueError("only the safe mock backend is implemented; real simulation is never started implicitly")
-    config = load_suite(config_path); manifest = load_manifest(config.manifest_path); layout = ResultLayout(config.output_root); backend = MockBackend()
+def run_suite(config_path, backend_name="mock", resume=False, retry_failed=False, dry_run=False, analysis_only=False, allow_real_simulation=False):
+    if backend_name not in {"mock", "isaac"}: raise ValueError("backend must be mock or isaac")
+    config = load_suite(config_path); manifest = load_manifest(config.manifest_path); layout = ResultLayout(config.output_root); backend = MockBackend() if backend_name == "mock" else IsaacNavDPBackend(Path("."))
     suite_dir = layout.suite_dir(config.suite_id); suite_dir.mkdir(parents=True, exist_ok=True)
     atomic_json(suite_dir / "suite_config.json", {"suite_id": config.suite_id, "manifest": str(config.manifest_path), "backend": backend.name, "data_source": "SIMULATED"})
     atomic_json(suite_dir / "scenario_manifest.json", json.loads(config.manifest_path.read_text(encoding="utf-8")))
     atomic_json(suite_dir / "suite_status.json", {"status":"RUNNING", "backend":backend.name, "data_source":"SIMULATED"})
     if dry_run:
-        atomic_json(suite_dir / "dry_run_plan.json", {"backend":backend_name, "run_count":len(list(expand_runs(config, manifest))), "commands":[], "started_processes":0})
+        commands = []
+        scenes = {scene.scene_id:scene for scene in manifest.scenes}
+        for run in expand_runs(config, manifest):
+            episodes = [episode for episode in scenes[run.scene_id].episodes if episode.seed == run.seed]
+            if backend_name == "isaac": commands.append(backend.build_command(run, layout.run_dir(run), config.manifest_path, [episode.episode_uid for episode in episodes], run.seed, episodes[0].navdp_seed if episodes else run.seed))
+        atomic_json(suite_dir / "dry_run_plan.json", {"backend":backend_name, "run_count":len(list(expand_runs(config, manifest))), "commands":commands, "started_processes":0})
         return SuiteResult(0, 0, 0)
     if analysis_only:
         analyze_suite(suite_dir); return SuiteResult(0, 0, 0)
+    if backend_name == "isaac" and not allow_real_simulation: raise PermissionError("isaac backend requires --dry-run or --allow-real-simulation")
     completed = skipped = failed = 0
     scenes = {scene.scene_id: scene for scene in manifest.scenes}
     for run in expand_runs(config, manifest):

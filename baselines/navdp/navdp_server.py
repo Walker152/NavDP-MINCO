@@ -16,6 +16,11 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--port",type=int,default=8888)
 parser.add_argument("--checkpoint",type=str,default="/home/PJLAB/caiwenzhe/Desktop/navdp_bench/baselines/navdp/checkpoints/cross-waic-final4-125.ckpt")
+parser.add_argument("--save-video", default=False, action=argparse.BooleanOptionalAction)
+parser.add_argument("--output-dir", type=str, default=".")
+parser.add_argument("--run-id", type=str, default="navdp")
+parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--log-interval", type=int, default=20)
 args = parser.parse_known_args()[0]
 
 app = Flask(__name__)
@@ -26,8 +31,10 @@ navdp_state_lock = threading.RLock()
 
 def make_navdp_writer():
     format_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(args.output_dir, "navdp_server", args.run_id)
+    os.makedirs(output_dir, exist_ok=True)
     return imageio.get_writer(
-        "{}_fps_pointgoal.mp4".format(format_time),
+        os.path.join(output_dir, "{}_fps_pointgoal.mp4".format(format_time)),
         fps=7,
         codec="libx264",
         pixelformat="yuv420p",
@@ -45,6 +52,8 @@ def close_navdp_writer():
 
 def append_navdp_frame(frame):
     global navdp_fps_writer
+    if not args.save_video:
+        return False
     frame = np.ascontiguousarray(np.asarray(frame, dtype=np.uint8))
     if frame.ndim == 2:
         frame = np.repeat(frame[:, :, None], 3, axis=2)
@@ -54,16 +63,29 @@ def append_navdp_frame(frame):
         if navdp_fps_writer is None:
             navdp_fps_writer = make_navdp_writer()
         navdp_fps_writer.append_data(frame)
+    return True
 
 atexit.register(close_navdp_writer)
+
+@app.route("/health", methods=['GET'])
+def health():
+    return jsonify({
+        "ok": True,
+        "model_loaded": navdp_navigator is not None,
+        "batch_size": None if navdp_navigator is None else int(navdp_navigator.batch_size),
+        "run_id": args.run_id,
+        "device": None if navdp_navigator is None else str(navdp_navigator.device),
+    })
 
 @app.route("/navigator_reset",methods=['POST'])
 def navdp_reset():
     global navdp_navigator,navdp_fps_writer
     with navdp_state_lock:
-        intrinsic = np.array(request.get_json().get('intrinsic'))
-        threshold = np.array(request.get_json().get('stop_threshold'))
-        batchsize = np.array(request.get_json().get('batch_size'))
+        payload = request.get_json()
+        intrinsic = np.array(payload.get('intrinsic'))
+        threshold = np.array(payload.get('stop_threshold'))
+        batchsize = np.array(payload.get('batch_size'))
+        seed = int(payload.get('seed', args.seed))
         if navdp_navigator is None:
             navdp_navigator = NavDP_Agent(intrinsic,
                                     image_size=224,
@@ -74,16 +96,14 @@ def navdp_reset():
                                     token_dim=384,
                                     navi_model=args.checkpoint,
                                     device='cuda:0')
-            navdp_navigator.reset(batchsize,threshold)
+            navdp_navigator.reset(batchsize,threshold,seed=seed)
         else:
-            navdp_navigator.reset(batchsize,threshold)
+            navdp_navigator.reset(batchsize,threshold,seed=seed)
 
-        if navdp_fps_writer is None:
-            navdp_fps_writer = make_navdp_writer()
-        else:
+        if args.save_video:
             close_navdp_writer()
             navdp_fps_writer = make_navdp_writer()
-        return jsonify({"algo":"navdp"})
+        return jsonify({"algo":"navdp", "run_id":payload.get("run_id", args.run_id), "seed":seed})
 
 @app.route("/navigator_close",methods=['POST'])
 def navdp_close():

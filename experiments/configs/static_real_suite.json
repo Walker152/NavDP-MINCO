@@ -1,0 +1,10 @@
+{
+  "suite_id": "navdp_minco_static_real",
+  "output_root": "../../results",
+  "manifest": "mock_full_scenarios.json",
+  "runs": [
+    {"experiment_id": "EXP-ALL_data_collection", "variant": "raw", "warm_start_mode": "cold"},
+    {"experiment_id": "EXP-ALL_data_collection", "variant": "minco-cold", "warm_start_mode": "cold"},
+    {"experiment_id": "EXP-ALL_data_collection", "variant": "minco-hot", "warm_start_mode": "gated"}
+  ]
+}

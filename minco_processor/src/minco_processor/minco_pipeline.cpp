@@ -465,6 +465,20 @@ void MincoPipeline::resetHistory()
   }
 }
 
+bool MincoPipeline::commitHistory(const Result & proposal, double applied_time)
+{
+  if (!proposal.success || proposal.samples.size() < 2U || !std::isfinite(applied_time)) {
+    return false;
+  }
+  last_traj_ = proposal.trajectory;
+  last_yaw_traj_ = proposal.yaw_trajectory;
+  last_traj_.start_WT = applied_time;
+  last_yaw_traj_.start_WT = applied_time;
+  has_last_traj_ = true;
+  has_last_yaw_traj_ = !proposal.yaw_trajectory.empty();
+  return true;
+}
+
 MincoPipeline::Result MincoPipeline::optimize(const Request & request)
 {
   using Clock = std::chrono::steady_clock;
@@ -509,8 +523,13 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   }
 
   stage_start = Clock::now();
-  result.planning_state = PlanningState::kColdStart;
-  prepareColdStart(request.current, result.start_state);
+  result.planning_state = determinePlanningState(request.current, result.sparse_waypoints, request.now);
+  const double history_sample_t = has_last_traj_ ? request.now - last_traj_.start_WT : 0.0;
+  if (result.planning_state == PlanningState::kHotStart) {
+    prepareHotStart(request.current, history_sample_t, result.start_state);
+  } else {
+    prepareColdStart(request.current, result.start_state);
+  }
   optimizer_->setInitPsAndTs(super_utils::vec_Vec3f{}, super_utils::VecDf{});
 
   if (safety_checker_) {
@@ -562,14 +581,38 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   const int N = static_cast<int>(result.sparse_waypoints.size()) - 1;
   result.local_vmaxs.resize(N);
   result.initial_times.resize(N);
+  super_utils::vec_Vec3f shifted_waypoints;
+  super_utils::VecDf shifted_durations;
+  if (result.planning_state == PlanningState::kHotStart && N > 0) {
+    const double remaining = last_traj_.getTotalDuration() - history_sample_t;
+    if (std::isfinite(remaining) && remaining > 0.02) {
+      shifted_waypoints.reserve(static_cast<size_t>(N + 1));
+      shifted_durations.resize(N);
+      const double segment_dt = remaining / static_cast<double>(N);
+      for (int i = 0; i <= N; ++i) {
+        const double sample_t = std::min(
+          last_traj_.getTotalDuration(), history_sample_t + segment_dt * static_cast<double>(i));
+        shifted_waypoints.emplace_back(last_traj_.getPos(sample_t));
+        if (i < N) {
+          shifted_durations(i) = segment_dt;
+        }
+      }
+      result.shifted_seed_valid = shifted_waypoints.size() >= 2U && shifted_durations.size() == N;
+    }
+  }
+  if (result.shifted_seed_valid) {
+    result.copied_waypoints = std::min(
+      std::max(0, N - 1), std::max(0, static_cast<int>(shifted_waypoints.size()) - 2));
+    result.copied_durations = std::min(N, static_cast<int>(shifted_durations.size()));
+  }
   stage_start = Clock::now();
   allocatePathTime(result.sparse_waypoints,
     result.start_state,
     local_end_is_goal,
-    PlanningState::kColdStart,
-    false,
-    super_utils::vec_Vec3f{},
-    super_utils::VecDf{},
+    result.planning_state,
+    result.shifted_seed_valid,
+    shifted_waypoints,
+    shifted_durations,
     result.initial_points,
     result.initial_times,
     result.local_vmaxs);
@@ -718,7 +761,22 @@ MincoPipeline::PlanningState MincoPipeline::determinePlanningState(
     return PlanningState::kColdStart;
   }
   if ((current.velocity - pred_vel).norm() > 1.0) {
-    return PlanningState::kHotStart;
+    return PlanningState::kColdStart;
+  }
+  if (map_) {
+    const double remaining = last_traj_.getTotalDuration() - t_dur;
+    const double step = std::max(0.02, config_.validation_sample_dt);
+    const int sample_count = std::max(1, static_cast<int>(std::ceil(remaining / step)));
+    for (int i = 0; i <= sample_count; ++i) {
+      const double sample_t = std::min(
+        last_traj_.getTotalDuration(), t_dur + remaining * static_cast<double>(i) / sample_count);
+      Eigen::Vector3d sample_pos = last_traj_.getPos(sample_t);
+      sample_pos.z() = 0.0;
+      const auto query = map_->query(sample_pos);
+      if (!query.ok || query.distance <= config_.optimizer.safe_dist) {
+        return PlanningState::kColdStart;
+      }
+    }
   }
   if (sparse_path.size() >= 2U && pred_vel.norm() > 0.1) {
     const Eigen::Vector3d path_dir = (sparse_path[1] - sparse_path[0]).normalized();

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <map>
 #include <vector>
 
 #include "minco_processor/minco_pipeline.hpp"
@@ -102,8 +103,37 @@ public:
     }
     const auto t1 = std::chrono::steady_clock::now();
     const double duration = std::chrono::duration<double>(t1 - t0).count();
+    last_result_ = result;
     return toDict(result, duration);
   }
+
+  py::dict optimizePreview(
+    const Eigen::MatrixXd & guide_path, const Eigen::Vector3d & position,
+    const Eigen::Vector3d & velocity, const Eigen::Vector3d & acceleration,
+    double yaw, double yaw_rate, py::object terminal_goal)
+  {
+    py::dict out = optimize(guide_path, position, velocity, acceleration, yaw, yaw_rate, terminal_goal);
+    const int proposal_id = next_proposal_id_++;
+    proposals_[proposal_id] = last_result_;
+    out["proposal_id"] = proposal_id;
+    return out;
+  }
+
+  bool commitHistory(int proposal_id, double applied_time)
+  {
+    const auto it = proposals_.find(proposal_id);
+    if (it == proposals_.end()) {
+      return false;
+    }
+    const bool committed = pipeline_.commitHistory(it->second, applied_time);
+    if (committed) {
+      proposals_.clear();
+    }
+    return committed;
+  }
+
+  void discardProposal(int proposal_id) { proposals_.erase(proposal_id); }
+  void resetHistory() { proposals_.clear(); pipeline_.resetHistory(); }
 
 private:
   py::dict toDict(const minco_processor::MincoPipeline::Result & result, double duration) const
@@ -163,6 +193,19 @@ private:
     out["local_end_is_goal"] = result.local_end_is_goal;
     out["planning_state"] = result.planning_state == minco_processor::MincoPipeline::PlanningState::kColdStart ?
       "COLD_START" : "HOT_START";
+    out["hot_start_accepted"] = result.planning_state == minco_processor::MincoPipeline::PlanningState::kHotStart;
+    out["hot_reject_reason"] = result.planning_state == minco_processor::MincoPipeline::PlanningState::kHotStart ?
+      "HOT_ACCEPTED" : "COLD_GATE_REJECTED";
+    out["history_plan_uid"] = py::none();
+    out["history_age_s"] = std::numeric_limits<double>::quiet_NaN();
+    out["position_error"] = std::numeric_limits<double>::quiet_NaN();
+    out["velocity_error"] = std::numeric_limits<double>::quiet_NaN();
+    out["direction_dot"] = std::numeric_limits<double>::quiet_NaN();
+    out["remaining_duration"] = std::numeric_limits<double>::quiet_NaN();
+    out["history_min_clearance"] = std::numeric_limits<double>::quiet_NaN();
+    out["shifted_seed_valid"] = result.shifted_seed_valid;
+    out["copied_waypoints"] = result.copied_waypoints;
+    out["copied_durations"] = result.copied_durations;
     out["optimizer_iteration_count"] = result.optimizer_iteration_count;
 
     Eigen::MatrixXd sparse_waypoints(static_cast<int>(result.sparse_waypoints.size()), 3);
@@ -175,6 +218,9 @@ private:
 
   minco_processor::MincoPipeline pipeline_;
   std::shared_ptr<minco_processor::StaticSimEsdfMap2D> map_;
+  minco_processor::MincoPipeline::Result last_result_;
+  std::map<int, minco_processor::MincoPipeline::Result> proposals_;
+  int next_proposal_id_{1};
 };
 
 }  // namespace
@@ -205,5 +251,13 @@ PYBIND11_MODULE(_minco_processor, m)
       py::arg("acceleration"),
       py::arg("yaw"),
       py::arg("yaw_rate"),
-      py::arg("terminal_goal") = py::none());
+      py::arg("terminal_goal") = py::none())
+    .def("optimize_preview", &MincoProcessorPy::optimizePreview,
+      py::arg("guide_path"), py::arg("position"), py::arg("velocity"),
+      py::arg("acceleration"), py::arg("yaw"), py::arg("yaw_rate"),
+      py::arg("terminal_goal") = py::none())
+    .def("commit_history", &MincoProcessorPy::commitHistory,
+      py::arg("proposal_id"), py::arg("applied_time"))
+    .def("discard_proposal", &MincoProcessorPy::discardProposal, py::arg("proposal_id"))
+    .def("reset_history", &MincoProcessorPy::resetHistory);
 }

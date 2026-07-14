@@ -23,6 +23,7 @@ class NavDPMincoAdapter:
         penalty_weight_attractor=20.0,
         time_weight=0.01,
         time_barrier_weight=100.0,
+        warm_start_mode="gated",
         enable=True,
     ):
         self.esdf = esdf
@@ -47,6 +48,9 @@ class NavDPMincoAdapter:
         if not np.isfinite(self.time_weight) or self.time_weight < 0.0:
             raise ValueError("MINCO time weight must be finite and non-negative")
         self.enabled = bool(enable)
+        if warm_start_mode not in {"cold", "gated"}:
+            raise ValueError("warm_start_mode must be cold or gated")
+        self.warm_start_mode = warm_start_mode
         self.processor = None
         if self.enabled:
             import minco_processor
@@ -82,6 +86,8 @@ class NavDPMincoAdapter:
         raw_top1_world,
         terminal_goals_world=None,
     ):
+        if self.warm_start_mode == "cold" and hasattr(self.processor, "reset_history"):
+            self.processor.reset_history()
         candidates_world = np.asarray(candidates_world, dtype=object)
         critic_values = np.asarray(critic_values)
         raw_top1_world = np.asarray(raw_top1_world, dtype=object)
@@ -121,7 +127,8 @@ class NavDPMincoAdapter:
                     continue
                 candidate_call_start = time.perf_counter()
                 try:
-                    result = self.processor.optimize(
+                    optimize_method = self.processor.optimize_preview if hasattr(self.processor, "optimize_preview") else self.processor.optimize
+                    result = optimize_method(
                         guide_path=candidate,
                         position=position,
                         velocity=velocity,
@@ -164,6 +171,8 @@ class NavDPMincoAdapter:
                     "failure_reason": str(result.get("failure_reason", "")),
                 })
                 if not result.get("success", False):
+                    if result.get("proposal_id") is not None and hasattr(self.processor, "discard_proposal"):
+                        self.processor.discard_proposal(int(result["proposal_id"]))
                     failures.append(f"idx={selected_idx}: {result.get('failure_reason', 'FAILED')}")
                     continue
                 waypoints = np.asarray(result.get("waypoints", []), dtype=np.float64)
@@ -174,6 +183,8 @@ class NavDPMincoAdapter:
                     continue
                 py_min_esdf = self._query_min_esdf(waypoints)
                 if not np.isfinite(py_min_esdf) or py_min_esdf <= self.safe_dist:
+                    if result.get("proposal_id") is not None and hasattr(self.processor, "discard_proposal"):
+                        self.processor.discard_proposal(int(result["proposal_id"]))
                     unsafe_reason = (
                         f"PY_ESDF_UNSAFE py_min={py_min_esdf:.3f} safe={self.safe_dist:.3f}"
                     )
@@ -258,6 +269,7 @@ class NavDPMincoAdapter:
                     "planning_state": str(best.get("planning_state", "")),
                     "local_end_is_goal": bool(best.get("local_end_is_goal", False)),
                     "optimizer_iteration_count": int(best.get("optimizer_iteration_count", 0)),
+                    "proposal_id": best.get("proposal_id"),
                 }
                 print(
                     "[NavDP-Minco] "
@@ -278,6 +290,23 @@ class NavDPMincoAdapter:
                 result = self._fallback_result(env_idx, raw_top1_world[env_idx], reason, elapsed_ms, candidate_timings)
             results.append(result)
         return results
+
+    def commit_selected(self, result, applied_time):
+        proposal_id = result.get("proposal_id") if isinstance(result, dict) else None
+        if proposal_id is None or not result.get("success", False):
+            return False
+        if not hasattr(self.processor, "commit_history"):
+            return self.warm_start_mode == "cold"
+        return bool(self.processor.commit_history(int(proposal_id), float(applied_time)))
+
+    def discard_proposal(self, result):
+        proposal_id = result.get("proposal_id") if isinstance(result, dict) else None
+        if proposal_id is not None and hasattr(self.processor, "discard_proposal"):
+            self.processor.discard_proposal(int(proposal_id))
+
+    def reset_history(self):
+        if self.processor is not None and hasattr(self.processor, "reset_history"):
+            self.processor.reset_history()
 
     def _fallback_result(self, env_idx, raw_top1_world, reason, elapsed_ms, candidate_timings=None):
         waypoints = np.asarray(raw_top1_world, dtype=np.float64)

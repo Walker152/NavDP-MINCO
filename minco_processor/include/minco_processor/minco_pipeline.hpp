@@ -98,6 +98,9 @@ public:
     bool local_end_is_goal{false};
     int mandatory_corner_count{0};
     int optimizer_iteration_count{0};
+    bool shifted_seed_valid{false};
+    int copied_waypoints{0};
+    int copied_durations{0};
   };
 
   MincoPipeline();
@@ -106,6 +109,7 @@ public:
   void setConfig(const Config & config);
   void setMap(std::shared_ptr<EsdfMapInterface> map);
   void resetHistory();
+  bool commitHistory(const Result & proposal, double applied_time);
 
   Result optimize(const Request & request);
 
