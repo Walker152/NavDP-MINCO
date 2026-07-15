@@ -13,6 +13,7 @@ minco_processor/build/
 assets/scenes/Materials/*
 assets/scenes/SkyTexture/*
 assets/scenes/embodiedscan/*
+assets/scenes/*
 *.db
 *.db-shm
 *.db-wal
