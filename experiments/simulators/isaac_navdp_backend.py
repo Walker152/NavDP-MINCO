@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import hashlib
+import os
 import numpy as np
 
 from experiments.simulators.process_supervisor import ProcessSupervisor
@@ -13,9 +14,14 @@ class IsaacNavDPBackend:
     """Command adapter with a fail-closed real-simulation gate and no heavy imports."""
     name = "isaac"
 
-    def __init__(self, repo_root: Path, supervisor_factory=ProcessSupervisor):
+    def __init__(self, repo_root: Path, supervisor_factory=ProcessSupervisor, isaaclab_dir=None, navdp_port=None):
         self.repo_root = Path(repo_root).resolve()
         self.supervisor_factory = supervisor_factory
+        default_isaaclab_dir = self.repo_root.parent / "IsaacLab"
+        self.isaaclab_dir = Path(
+            isaaclab_dir or os.environ.get("ISAACLAB_DIR", default_isaaclab_dir)
+        ).resolve()
+        self.navdp_port = int(navdp_port or os.environ.get("NAVDP_PORT", "8889"))
 
     def validate_static_configuration(self, run, scene=None, episodes=None):
         errors = []
@@ -67,14 +73,16 @@ class IsaacNavDPBackend:
         episode_uids = [episode.episode_uid for episode in episodes]
         navdp_seeds = [episode.navdp_seed for episode in episodes]
         command = [
-            "conda", "run", "-n", "isaaclab", "python", str(self.repo_root / "eval_pointgoal_wheeled.py"), "--experiment-config", str(Path(run_dir) / "run_config.json"),
+            "conda", "run", "--no-capture-output", "-n", "isaaclab",
+            "bash", str(self.isaaclab_dir / "isaaclab.sh"), "-p", str(self.repo_root / "eval_pointgoal_wheeled.py"),
+            "--experiment-config", str(Path(run_dir) / "run_config.json"),
             "--experiment-run-dir", str(run_dir), "--experiment-variant", run.variant, "--scenario-manifest", str(manifest_path),
             "--scene-path", str(scene.scene_path), "--scene-id", scene.scene_id,
             "--episode-uids", *list(episode_uids), "--headless", "--save-video" if save_video else "--no-save-video", "--save-debug-visuals", "--eval-monitor", "--save-planning-trace" if save_trace else "--no-save-planning-trace",
             "--warm-start-mode", run.warm_start_mode, "--seed", str(run.seed), "--navdp-seed", str(navdp_seeds[0]),
             "--navdp-seeds", *[str(value) for value in navdp_seeds], "--num_envs", "1", "--num_episodes", str(len(episodes)),
             "--speed", str(controller.get("desired_v_mps", controller.get("desired_v"))), "--mpc_max_yaw_rate", str(controller.get("w_max_radps", controller.get("w_max"))),
-            "--use_robot_base_frame", "0",
+            "--use_robot_base_frame", "0", "--port", str(self.navdp_port),
         ]
         command.extend(["--raw-controller", "original-navdp-mpc" if run.variant == "raw" else "disabled"])
         minco = effective["minco"]; esdf = effective["esdf"]; video = effective["video"]
@@ -97,9 +105,11 @@ class IsaacNavDPBackend:
         command.append("--no-enable_minco" if run.variant == "raw" else "--enable_minco")
         return command
 
-    def build_server_command(self, run_dir, run_id, seed, port=8888):
+    def build_server_command(self, run_dir, run_id, seed, port=None):
+        port = self.navdp_port if port is None else int(port)
         return [
-            "conda", "run", "-n", "navdp", "python", str(self.repo_root / "baselines/navdp/navdp_server.py"),
+            "conda", "run", "--no-capture-output", "-n", "navdp", "python", "-u",
+            str(self.repo_root / "baselines/navdp/navdp_server.py"),
             "--port", str(port), "--checkpoint", str(self.repo_root / "baselines/navdp/checkpoints/navdp_checkpoint.ckpt"),
             "--output-dir", str(run_dir), "--run-id", str(run_id), "--seed", str(seed), "--no-save-video",
         ]
@@ -107,6 +117,12 @@ class IsaacNavDPBackend:
     def run(self, run, episodes, writer, allow_real_simulation=False, command=None, progress_callback=None):
         if not allow_real_simulation: raise PermissionError("real simulation requires --allow-real-simulation")
         if command is None: raise ValueError("an explicit validated command is required")
+        launcher = self.isaaclab_dir / "isaaclab.sh"
+        if not launcher.is_file():
+            raise FileNotFoundError(f"IsaacLab launcher not found: {launcher}")
         run_dir = Path(command[command.index("--experiment-run-dir") + 1])
         server_command = self.build_server_command(run_dir, run.run_id, run.seed)
-        return self.supervisor_factory().run_pair(server_command, command, run_dir, self.repo_root, progress_callback=progress_callback)
+        return self.supervisor_factory().run_pair(
+            server_command, command, run_dir, self.repo_root,
+            port=self.navdp_port, progress_callback=progress_callback,
+        )

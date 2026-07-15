@@ -54,7 +54,7 @@ class ProcessSupervisor:
         except (OSError, csv.Error):
             return 0
 
-    def run_pair(self, server_command, eval_command, run_dir, cwd, port=8888, timeout_s=1800.0, progress_callback=None):
+    def run_pair(self, server_command, eval_command, run_dir, cwd, port=8889, timeout_s=1800.0, progress_callback=None):
         resource_monitor = ResourceMonitor(run_dir, lambda: self._processes)
         error = None
         try:

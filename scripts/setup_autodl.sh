@@ -146,6 +146,9 @@ preflight() {
   require_command nvidia-smi
   require_command timeout
   require_command tee
+  require_command ldconfig
+  ldconfig -p 2>/dev/null | grep -q 'libGLU\.so\.1' || \
+    die "required system library libGLU.so.1 not found; install it with: apt-get update && apt-get install -y libglu1-mesa"
   validate_env_name "$NAVDP_ENV_NAME"
   validate_env_name "$ISAACLAB_ENV_NAME"
   [[ "$NAVDP_ENV_NAME" != "$ISAACLAB_ENV_NAME" ]] || die "NavDP and IsaacLab environment names must differ"
@@ -241,7 +244,7 @@ install_benchmark_requirements() {
   compatible_requirements="$(mktemp)"
   # The root freeze came from an IsaacLab 2.x environment. Preserve the
   # simulator stack already installed for v1.2.0 while keeping benchmark pins.
-  awk 'tolower($0) !~ /^(isaaclab|rsl-rl-lib|triton|warp-lang|packaging|s3transfer)([<=>!~ ]|$)/' \
+  awk 'tolower($0) !~ /^(isaaclab|rsl-rl-lib|triton|warp-lang|packaging)([<=>!~ ]|$)/' \
     "$REPO_ROOT/requirements.txt" >"$compatible_requirements"
   if ! pip_install "$ISAACLAB_ENV_NAME" -r "$compatible_requirements"; then
     rm -f "$compatible_requirements"
@@ -253,7 +256,11 @@ install_benchmark_requirements() {
   pip_install "$ISAACLAB_ENV_NAME" torch==2.4.0 triton==3.0.0
 
   CURRENT_STAGE="restore packaging dependency consistency"
-  pip_install "$ISAACLAB_ENV_NAME" 'packaging>=24.0' 's3transfer>=0.19.0,<0.20.0'
+  pip_install "$ISAACLAB_ENV_NAME" \
+    'packaging>=24.0' \
+    boto3==1.26.76 \
+    botocore==1.29.76 \
+    s3transfer==0.6.1
 
   CURRENT_STAGE="check IsaacLab dependency consistency"
   conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" python -m pip check
@@ -331,7 +338,7 @@ export_snapshots
 CURRENT_STAGE="complete"
 log "Setup complete"
 printf '\nRun the NavDP server:\n'
-printf '  conda run -n %q python %q --port 8888 --checkpoint /path/to/navdp_checkpoint.ckpt\n' \
+printf '  conda run -n %q python %q --port 8889 --checkpoint /path/to/navdp_checkpoint.ckpt\n' \
   "$NAVDP_ENV_NAME" "$REPO_ROOT/baselines/navdp/navdp_server.py"
 printf '\nRun the IsaacLab smoke test again:\n'
 printf '  conda run -n %q bash %q -p %q --headless\n' \
