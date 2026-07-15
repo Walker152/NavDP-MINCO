@@ -13,12 +13,32 @@ minco_processor/build/
 assets/scenes/Materials/*
 assets/scenes/SkyTexture/*
 assets/scenes/embodiedscan/*
-docs/*
 *.db
 *.db-shm
 *.db-wal
 *.zip
-*/docs/
+# Keep documentation and tests local-only. README files remain versioned.
+*.md
+!README.md
+!README*.md
+**/docs/**
+!**/docs/**/
+!**/docs/**/README*
+**/tests/**
+!**/tests/**/
+!**/tests/**/README*
+test_*.py
+*_test.py
+test_*.c
+test_*.cc
+test_*.cpp
+test_*.h
+test_*.hpp
+*_test.c
+*_test.cc
+*_test.cpp
+*_test.h
+*_test.hpp
 
 # Generated experiment runs and reports. Keep experiments/ source and configs tracked.
 /results/
