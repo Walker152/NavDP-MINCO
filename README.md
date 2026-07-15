@@ -239,6 +239,9 @@ The AutoDL setup installs IsaacLab with `isaaclab.sh -i none`. This installs the
 core and task extensions required by the NavDP benchmark while skipping optional
 reinforcement-learning frameworks. In particular, it avoids the obsolete
 `rsl-rl` Git dependency in IsaacLab `v1.2.0`; NavDP evaluation does not use it.
+The setup also excludes IsaacLab 2.x simulator-stack pins found in the root
+environment freeze (`isaaclab`, `rsl-rl-lib`, `triton`, and `warp-lang`), restores
+the v1.2.0-compatible `torch==2.4.0`/`triton==3.0.0` pair, and runs `pip check`.
 
 ```bash
 # create the environment

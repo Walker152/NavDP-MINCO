@@ -239,15 +239,21 @@ install_benchmark_requirements() {
   log "Installing NavDP benchmark requirements (keeping IsaacLab v1.2.0)"
   local compatible_requirements
   compatible_requirements="$(mktemp)"
-  # The repository freeze contains isaaclab==2.0.2, but README and this setup
-  # intentionally use the v1.2.0 source checkout. Keep every other root pin.
-  awk 'tolower($0) !~ /^isaaclab([<=>!~ ]|$)/' \
+  # The root freeze came from an IsaacLab 2.x environment. Preserve the
+  # simulator stack already installed for v1.2.0 while keeping benchmark pins.
+  awk 'tolower($0) !~ /^(isaaclab|rsl-rl-lib|triton|warp-lang)([<=>!~ ]|$)/' \
     "$REPO_ROOT/requirements.txt" >"$compatible_requirements"
   if ! pip_install "$ISAACLAB_ENV_NAME" -r "$compatible_requirements"; then
     rm -f "$compatible_requirements"
     die "benchmark requirements installation failed"
   fi
   rm -f "$compatible_requirements"
+
+  CURRENT_STAGE="restore IsaacLab v1.2.0 PyTorch stack"
+  pip_install "$ISAACLAB_ENV_NAME" torch==2.4.0 triton==3.0.0
+
+  CURRENT_STAGE="check IsaacLab dependency consistency"
+  conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" python -m pip check
 }
 
 verify_installation() {

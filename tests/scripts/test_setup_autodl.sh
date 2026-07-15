@@ -55,6 +55,10 @@ if [[ "${1:-}" == "env" && "${2:-}" == "list" && "${3:-}" == "--json" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "run" ]]; then
+  if [[ "$*" == *"pip install -r /tmp/"* && -n "${FAKE_CAPTURED_REQUIREMENTS:-}" ]]; then
+    requirements_path="${@: -1}"
+    cp "$requirements_path" "$FAKE_CAPTURED_REQUIREMENTS"
+  fi
   if [[ "$*" == *"isaaclab.sh -i"* && "$*" != *"isaaclab.sh -i none"* && "${FAKE_RSL_RL_TLS_FAILURE:-0}" == 1 ]]; then
     printf "Running command git clone https://github.com/leggedrobotics/rsl_rl.git\n" >&2
     printf "fatal: unable to access rsl_rl.git: GnuTLS recv error (-110)\n" >&2
@@ -195,6 +199,7 @@ full_dir="$TEST_TMP/full"
 mkdir -p "$full_dir"
 run_script "$full_dir" \
   ISAACLAB_DIR="$full_dir/IsaacLab" \
+  FAKE_CAPTURED_REQUIREMENTS="$full_dir/benchmark-requirements" \
   bash "$SCRIPT" >"$full_dir/out" 2>&1
 assert_contains "$full_dir/calls" "env create -n navdp"
 assert_contains "$full_dir/calls" "env create -n isaaclab"
@@ -208,6 +213,12 @@ assert_contains "$full_dir/calls" "isaacsim-extscache-physics==4.2.0.2"
 assert_contains "$full_dir/calls" "checkout --detach v1.2.0"
 assert_contains "$full_dir/calls" "baselines/navdp/requirements.txt"
 assert_contains "$full_dir/out" "Installing NavDP benchmark requirements"
+assert_not_contains "$full_dir/benchmark-requirements" "isaaclab=="
+assert_not_contains "$full_dir/benchmark-requirements" "rsl-rl-lib=="
+assert_not_contains "$full_dir/benchmark-requirements" "triton=="
+assert_not_contains "$full_dir/benchmark-requirements" "warp-lang=="
+assert_contains "$full_dir/calls" "python -m pip install torch==2.4.0 triton==3.0.0"
+assert_contains "$full_dir/calls" "python -m pip check"
 assert_contains "$full_dir/calls" "pip freeze"
 assert_contains "$full_dir/calls" "timeout"
 assert_contains "$full_dir/calls" "bash $full_dir/IsaacLab/isaaclab.sh -p"
