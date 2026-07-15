@@ -34,6 +34,9 @@ make_fake_tools() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'conda %s\n' "$*" >>"$FAKE_CALLS"
+printf 'conda-envs-path %s\n' "${CONDA_ENVS_PATH:-unset}" >>"$FAKE_CALLS"
+printf 'conda-pkgs-dirs %s\n' "${CONDA_PKGS_DIRS:-unset}" >>"$FAKE_CALLS"
+printf 'pip-cache-dir %s\n' "${PIP_CACHE_DIR:-unset}" >>"$FAKE_CALLS"
 if [[ "${1:-}" == "env" && "${2:-}" == "list" && "${3:-}" == "--json" ]]; then
   printf '{"envs":["/fake/base"'
   if [[ ",${FAKE_EXISTING_ENVS:-}," == *,navdp,* ]]; then printf ',"/fake/envs/navdp"'; fi
@@ -48,6 +51,18 @@ if [[ "${1:-}" == "run" ]]; then
   exit 0
 fi
 exit 0
+EOF
+
+  cat >"$bin_dir/df" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'df %s\n' "$*" >>"$FAKE_CALLS"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+if [[ "${@: -1}" == "$FAKE_DATA_DISK"* ]]; then
+  printf '/dev/data 104857600 128 104857472 1%% /data\n'
+else
+  printf '/dev/root 31457280 29457280 2000000 94%% /\n'
+fi
 EOF
 
   cat >"$bin_dir/git" <<'EOF'
@@ -83,13 +98,13 @@ printf 'timeout %s\n' "$*" >>"$FAKE_CALLS"
 exit 0
 EOF
 
-  chmod +x "$bin_dir/conda" "$bin_dir/git" "$bin_dir/nvidia-smi" "$bin_dir/timeout"
+  chmod +x "$bin_dir/conda" "$bin_dir/git" "$bin_dir/nvidia-smi" "$bin_dir/timeout" "$bin_dir/df"
 }
 
 run_script() {
   local case_dir="$1"
   shift
-  mkdir -p "$case_dir/bin" "$case_dir/home"
+  mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/data"
   : >"$case_dir/calls"
   make_fake_tools "$case_dir/bin"
   env \
@@ -98,6 +113,8 @@ run_script() {
     FAKE_CALLS="$case_dir/calls" \
     AUTODL_MIN_FREE_GB=0 \
     AUTODL_EXPORT_DIR="$case_dir/export" \
+    AUTODL_WORK_DIR="$case_dir/data" \
+    FAKE_DATA_DISK="$case_dir/data" \
     "$@"
 }
 
@@ -120,8 +137,17 @@ check_dir="$TEST_TMP/check"
 mkdir -p "$check_dir"
 run_script "$check_dir" bash "$SCRIPT" --check-only >"$check_dir/out" 2>&1
 assert_contains "$check_dir/out" "Preflight checks passed"
+assert_contains "$check_dir/calls" "df -Pk $check_dir/data"
 assert_not_contains "$check_dir/calls" "env create"
 assert_not_contains "$check_dir/calls" "pip install"
+
+autodl_disk_dir="$TEST_TMP/autodl-disk"
+mkdir -p "$autodl_disk_dir"
+run_script "$autodl_disk_dir" \
+  AUTODL_MIN_FREE_GB=35 \
+  bash "$SCRIPT" --check-only >"$autodl_disk_dir/out" 2>&1
+assert_contains "$autodl_disk_dir/out" "Preflight checks passed"
+assert_contains "$autodl_disk_dir/calls" "df -Pk $autodl_disk_dir/data"
 
 missing_dir="$TEST_TMP/missing"
 mkdir -p "$missing_dir/bin" "$missing_dir/home"
@@ -141,6 +167,9 @@ run_script "$full_dir" \
   bash "$SCRIPT" >"$full_dir/out" 2>&1
 assert_contains "$full_dir/calls" "env create -n navdp"
 assert_contains "$full_dir/calls" "env create -n isaaclab"
+assert_contains "$full_dir/calls" "conda-envs-path $full_dir/data/conda/envs"
+assert_contains "$full_dir/calls" "conda-pkgs-dirs $full_dir/data/conda/pkgs"
+assert_contains "$full_dir/calls" "pip-cache-dir $full_dir/data/pip-cache"
 assert_contains "$full_dir/calls" "isaacsim==4.2.0.2"
 assert_contains "$full_dir/calls" "isaacsim-extscache-physics==4.2.0.2"
 assert_contains "$full_dir/calls" "checkout --detach v1.2.0"

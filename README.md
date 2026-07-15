@@ -196,6 +196,12 @@ the NavDP model and benchmark requirements, performs headless smoke checks, and
 exports the installed packages to `requirements/autodl/`. It does not download
 Scene-N1 assets, model checkpoints, or GPU drivers.
 
+On AutoDL, `/root/autodl-tmp/navdp` is selected automatically when the data disk
+is available. Conda environments and package caches, pip downloads, IsaacLab,
+and common model caches are placed there instead of filling the 30 GB system
+disk. Override the location with `AUTODL_WORK_DIR` if your data disk is mounted
+elsewhere.
+
 Useful modes and overrides:
 
 ```bash
@@ -208,7 +214,7 @@ bash scripts/setup_autodl.sh --skip-verify
 # Customize names and the external IsaacLab checkout location
 NAVDP_ENV_NAME=navdp \
 ISAACLAB_ENV_NAME=isaaclab \
-ISAACLAB_DIR=/root/autodl-tmp/IsaacLab \
+AUTODL_WORK_DIR=/root/autodl-tmp/navdp \
 bash scripts/setup_autodl.sh
 ```
 

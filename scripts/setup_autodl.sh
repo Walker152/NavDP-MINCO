@@ -6,10 +6,23 @@ readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 NAVDP_ENV_NAME="${NAVDP_ENV_NAME:-navdp}"
 ISAACLAB_ENV_NAME="${ISAACLAB_ENV_NAME:-isaaclab}"
-ISAACLAB_DIR="${ISAACLAB_DIR:-${AUTODL_ROOT:-$HOME}/IsaacLab}"
+if [[ -z "${AUTODL_WORK_DIR:-}" ]]; then
+  if [[ -d /root/autodl-tmp && -w /root/autodl-tmp ]]; then
+    AUTODL_WORK_DIR=/root/autodl-tmp/navdp
+  else
+    AUTODL_WORK_DIR="$HOME/.navdp-autodl"
+  fi
+fi
+ISAACLAB_DIR="${ISAACLAB_DIR:-$AUTODL_WORK_DIR/IsaacLab}"
 AUTODL_EXPORT_DIR="${AUTODL_EXPORT_DIR:-$REPO_ROOT/requirements/autodl}"
 AUTODL_MIN_FREE_GB="${AUTODL_MIN_FREE_GB:-35}"
 ISAACSIM_VERIFY_TIMEOUT="${ISAACSIM_VERIFY_TIMEOUT:-180}"
+export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-$AUTODL_WORK_DIR/conda/envs}"
+export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-$AUTODL_WORK_DIR/conda/pkgs}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$AUTODL_WORK_DIR/pip-cache}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$AUTODL_WORK_DIR/cache}"
+export HF_HOME="${HF_HOME:-$AUTODL_WORK_DIR/huggingface}"
+export TORCH_HOME="${TORCH_HOME:-$AUTODL_WORK_DIR/torch}"
 CHECK_ONLY=0
 SKIP_VERIFY=0
 CURRENT_STAGE="startup"
@@ -28,7 +41,11 @@ Options:
 Environment variables:
   NAVDP_ENV_NAME          NavDP environment name (default: navdp)
   ISAACLAB_ENV_NAME       IsaacLab environment name (default: isaaclab)
-  ISAACLAB_DIR            IsaacLab checkout path (default: AUTODL_ROOT/IsaacLab or HOME/IsaacLab)
+  AUTODL_WORK_DIR         Large-file root (default: /root/autodl-tmp/navdp when available)
+  ISAACLAB_DIR            IsaacLab checkout path (default: AUTODL_WORK_DIR/IsaacLab)
+  CONDA_ENVS_PATH         Conda environments directory (default: AUTODL_WORK_DIR/conda/envs)
+  CONDA_PKGS_DIRS         Conda package cache (default: AUTODL_WORK_DIR/conda/pkgs)
+  PIP_CACHE_DIR           pip download cache (default: AUTODL_WORK_DIR/pip-cache)
   PIP_INDEX_URL           Optional primary pip mirror
   AUTODL_MIN_FREE_GB      Required free disk space in GiB (default: 35)
   ISAACSIM_VERIFY_TIMEOUT Headless verification timeout in seconds (default: 180)
@@ -108,14 +125,20 @@ preflight() {
     [[ -f "$required" ]] || die "required repository file not found: $required"
   done
 
-  local free_kb required_kb
-  free_kb="$(df -Pk "$REPO_ROOT" | awk 'NR==2 {print $4}')"
+  local disk_probe free_kb required_kb
+  disk_probe="$AUTODL_WORK_DIR"
+  while [[ ! -e "$disk_probe" && "$disk_probe" != / ]]; do
+    disk_probe="$(dirname "$disk_probe")"
+  done
+  free_kb="$(df -Pk "$disk_probe" | awk 'NR==2 {print $4}')"
   required_kb=$((AUTODL_MIN_FREE_GB * 1024 * 1024))
   (( free_kb >= required_kb )) || die "insufficient disk space: need at least ${AUTODL_MIN_FREE_GB} GiB free"
 
   log "Repository: $REPO_ROOT"
   log "Conda: $(command -v conda)"
   log "GPU: $(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader | head -n 1)"
+  log "Large-file work directory: $AUTODL_WORK_DIR"
+  log "Conda environments: $CONDA_ENVS_PATH"
   log "IsaacLab directory: $ISAACLAB_DIR"
   log "Preflight checks passed"
 }
@@ -202,6 +225,10 @@ preflight
 if ((CHECK_ONLY)); then
   exit 0
 fi
+
+CURRENT_STAGE="create AutoDL data directories"
+mkdir -p "$AUTODL_WORK_DIR" "$CONDA_ENVS_PATH" "$CONDA_PKGS_DIRS" \
+  "$PIP_CACHE_DIR" "$XDG_CACHE_HOME" "$HF_HOME" "$TORCH_HOME"
 
 create_or_reuse_env "$NAVDP_ENV_NAME" "$REPO_ROOT/configs/environments/navdp-autodl.yml"
 create_or_reuse_env "$ISAACLAB_ENV_NAME" "$REPO_ROOT/configs/environments/isaaclab-autodl.yml"
