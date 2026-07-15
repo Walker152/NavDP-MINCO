@@ -241,7 +241,7 @@ install_benchmark_requirements() {
   compatible_requirements="$(mktemp)"
   # The root freeze came from an IsaacLab 2.x environment. Preserve the
   # simulator stack already installed for v1.2.0 while keeping benchmark pins.
-  awk 'tolower($0) !~ /^(isaaclab|rsl-rl-lib|triton|warp-lang)([<=>!~ ]|$)/' \
+  awk 'tolower($0) !~ /^(isaaclab|rsl-rl-lib|triton|warp-lang|packaging|s3transfer)([<=>!~ ]|$)/' \
     "$REPO_ROOT/requirements.txt" >"$compatible_requirements"
   if ! pip_install "$ISAACLAB_ENV_NAME" -r "$compatible_requirements"; then
     rm -f "$compatible_requirements"
@@ -251,6 +251,9 @@ install_benchmark_requirements() {
 
   CURRENT_STAGE="restore IsaacLab v1.2.0 PyTorch stack"
   pip_install "$ISAACLAB_ENV_NAME" torch==2.4.0 triton==3.0.0
+
+  CURRENT_STAGE="restore packaging dependency consistency"
+  pip_install "$ISAACLAB_ENV_NAME" 'packaging>=24.0' 's3transfer>=0.19.0,<0.20.0'
 
   CURRENT_STAGE="check IsaacLab dependency consistency"
   conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" python -m pip check

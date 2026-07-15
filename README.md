@@ -242,6 +242,8 @@ reinforcement-learning frameworks. In particular, it avoids the obsolete
 The setup also excludes IsaacLab 2.x simulator-stack pins found in the root
 environment freeze (`isaaclab`, `rsl-rl-lib`, `triton`, and `warp-lang`), restores
 the v1.2.0-compatible `torch==2.4.0`/`triton==3.0.0` pair, and runs `pip check`.
+It also replaces stale `packaging` and `s3transfer` pins from that freeze with
+ranges compatible with the installed wheel and boto3 packages.
 
 ```bash
 # create the environment
