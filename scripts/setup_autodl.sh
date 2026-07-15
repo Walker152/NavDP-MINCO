@@ -96,7 +96,7 @@ create_or_reuse_env() {
 pip_install() {
   local env_name="$1"
   shift
-  local args=(run -n "$env_name" python -m pip install)
+  local args=(run --no-capture-output -n "$env_name" python -m pip install)
   if [[ -n "${PIP_INDEX_URL:-}" ]]; then
     args+=(--index-url "$PIP_INDEX_URL")
   fi
@@ -110,6 +110,7 @@ preflight() {
   require_command git
   require_command nvidia-smi
   require_command timeout
+  require_command tee
   validate_env_name "$NAVDP_ENV_NAME"
   validate_env_name "$ISAACLAB_ENV_NAME"
   [[ "$NAVDP_ENV_NAME" != "$ISAACLAB_ENV_NAME" ]] || die "NavDP and IsaacLab environment names must differ"
@@ -162,15 +163,19 @@ install_isaaclab_checkout() {
   CURRENT_STAGE="install IsaacLab v1.2.0"
   local install_log
   install_log="$(mktemp)"
-  if ! conda run -n "$ISAACLAB_ENV_NAME" bash "$ISAACLAB_DIR/isaaclab.sh" -i >"$install_log" 2>&1; then
+  local install_status
+  set +e
+  conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" \
+    bash "$ISAACLAB_DIR/isaaclab.sh" -i 2>&1 | tee "$install_log"
+  install_status=${PIPESTATUS[0]}
+  set -e
+  if ((install_status != 0)); then
     if ! grep -Eqi 'rsl[-_ ]?rl.*(unavailable|not found|no matching distribution)' "$install_log"; then
-      sed -n '1,240p' "$install_log" >&2
       rm -f "$install_log"
       die "IsaacLab installer failed"
     fi
     log "Ignoring the README-documented unavailable rsl-rl dependency"
   fi
-  sed -n '1,240p' "$install_log"
   rm -f "$install_log"
 }
 
@@ -192,13 +197,13 @@ install_benchmark_requirements() {
 
 verify_installation() {
   CURRENT_STAGE="verify NavDP environment"
-  conda run -n "$NAVDP_ENV_NAME" python -c 'import diffusers, flask, torch; print("NavDP imports OK; torch", torch.__version__)'
+  conda run --no-capture-output -n "$NAVDP_ENV_NAME" python -c 'import diffusers, flask, torch; print("NavDP imports OK; torch", torch.__version__)'
 
   CURRENT_STAGE="verify IsaacLab Python packages"
-  conda run -n "$ISAACLAB_ENV_NAME" python -c 'import isaacsim; print("Isaac Sim import OK")'
+  conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" python -c 'import isaacsim; print("Isaac Sim import OK")'
 
   CURRENT_STAGE="verify Isaac Sim headless startup"
-  timeout "${ISAACSIM_VERIFY_TIMEOUT}s" conda run -n "$ISAACLAB_ENV_NAME" \
+  timeout "${ISAACSIM_VERIFY_TIMEOUT}s" conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" \
     "$ISAACLAB_DIR/isaaclab.sh" -p \
     "$ISAACLAB_DIR/source/standalone/tutorials/00_sim/create_empty.py" --headless
 }

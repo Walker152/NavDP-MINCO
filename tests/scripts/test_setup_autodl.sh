@@ -167,6 +167,8 @@ run_script "$full_dir" \
   bash "$SCRIPT" >"$full_dir/out" 2>&1
 assert_contains "$full_dir/calls" "env create -n navdp"
 assert_contains "$full_dir/calls" "env create -n isaaclab"
+assert_contains "$full_dir/calls" "conda run --no-capture-output -n navdp python -m pip install"
+assert_contains "$full_dir/calls" "conda run --no-capture-output -n isaaclab python -m pip install"
 assert_contains "$full_dir/calls" "conda-envs-path $full_dir/data/conda/envs"
 assert_contains "$full_dir/calls" "conda-pkgs-dirs $full_dir/data/conda/pkgs"
 assert_contains "$full_dir/calls" "pip-cache-dir $full_dir/data/pip-cache"
