@@ -181,6 +181,42 @@ assets/scenes/
 
 ### 🔧 Installation of Benchmark ##
 Our framework is based on IsaacSim 4.2.0 and IsaacLab 1.2.0, you can follow the instructions to configure the conda environment.
+
+#### AutoDL one-command setup
+
+On an AutoDL Linux GPU instance with Conda and the NVIDIA driver already available,
+the repository can create the isolated `navdp` and `isaaclab` environments automatically:
+
+```bash
+bash scripts/setup_autodl.sh
+```
+
+The script installs Isaac Sim `4.2.0.2`, checks out IsaacLab `v1.2.0`, installs
+the NavDP model and benchmark requirements, performs headless smoke checks, and
+exports the installed packages to `requirements/autodl/`. It does not download
+Scene-N1 assets, model checkpoints, or GPU drivers.
+
+Useful modes and overrides:
+
+```bash
+# Inspect the host without changing it
+bash scripts/setup_autodl.sh --check-only
+
+# Install on a machine where runtime verification will be performed later
+bash scripts/setup_autodl.sh --skip-verify
+
+# Customize names and the external IsaacLab checkout location
+NAVDP_ENV_NAME=navdp \
+ISAACLAB_ENV_NAME=isaaclab \
+ISAACLAB_DIR=/root/autodl-tmp/IsaacLab \
+bash scripts/setup_autodl.sh
+```
+
+Run `bash scripts/setup_autodl.sh --help` for all supported variables. The root
+dependency freeze contains an `isaaclab==2.0.2` entry from a newer environment;
+the AutoDL setup deliberately excludes only that conflicting entry so the
+README-required IsaacLab `v1.2.0` checkout remains active.
+
 ```bash
 # create the environment
 conda create -n isaaclab python=3.10
