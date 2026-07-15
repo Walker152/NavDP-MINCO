@@ -215,13 +215,16 @@ install_isaaclab_checkout() {
   local install_log
   install_log="$(mktemp)"
   local install_status
-  set +e
-  conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" \
-    bash "$ISAACLAB_DIR/isaaclab.sh" -i 2>&1 | tee "$install_log"
-  install_status=${PIPESTATUS[0]}
-  set -e
+  if conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" \
+    bash "$ISAACLAB_DIR/isaaclab.sh" -i 2>&1 | tee "$install_log"; then
+    install_status=0
+  else
+    install_status=${PIPESTATUS[0]}
+  fi
   if ((install_status != 0)); then
-    if ! grep -Eqi 'rsl[-_ ]?rl.*(unavailable|not found|no matching distribution)' "$install_log"; then
+    if ! grep -Eqi \
+      "(rsl[-_ ]?rl.*(unavailable|not found|no matching distribution)|failed to build ['\"]?rsl[-_ ]?rl)" \
+      "$install_log"; then
       rm -f "$install_log"
       die "IsaacLab installer failed"
     fi
