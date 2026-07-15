@@ -104,9 +104,9 @@ class IsaacNavDPBackend:
             "--output-dir", str(run_dir), "--run-id", str(run_id), "--seed", str(seed), "--no-save-video",
         ]
 
-    def run(self, run, episodes, writer, allow_real_simulation=False, command=None):
+    def run(self, run, episodes, writer, allow_real_simulation=False, command=None, progress_callback=None):
         if not allow_real_simulation: raise PermissionError("real simulation requires --allow-real-simulation")
         if command is None: raise ValueError("an explicit validated command is required")
         run_dir = Path(command[command.index("--experiment-run-dir") + 1])
         server_command = self.build_server_command(run_dir, run.run_id, run.seed)
-        return self.supervisor_factory().run_pair(server_command, command, run_dir, self.repo_root)
+        return self.supervisor_factory().run_pair(server_command, command, run_dir, self.repo_root, progress_callback=progress_callback)

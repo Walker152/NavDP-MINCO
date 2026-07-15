@@ -1,6 +1,6 @@
 # NavDP–MINCO 全量实验运行与参数说明
 
-本文对应 `configs/experiments/full_suite.json`。默认实验为两个真实场景、三种方法、每组 10 个 episode，共 60 个 episode；所有 run 串行执行，同一时刻只有一个 Isaac 仿真。
+本文对应 `configs/experiments/full_suite.json`。默认实验精确锁定 `cluttered_easy_0` 和 `cluttered_hard_0` 两个真实场景、三种方法、每组 10 个 episode，共 60 个 episode；所有 run 串行执行，同一时刻只有一个 Isaac 仿真。
 
 ## 一键运行
 
@@ -34,9 +34,30 @@ bash scripts/run_all_experiments.sh configs/experiments/full_suite.json \
   --backend isaac --allow-real-simulation --resume --retry-failed
 ```
 
+## 终端进度显示
+
+真实运行期间，主控每 0.5 秒检查当前 run 已落盘的 `episode_metrics.csv`。只有 episode 完成数发生变化时才输出新行，例如：
+
+```text
+[Progress] run 3/6 START | MINCO-COLD | cluttered_easy_0 | 10 episodes
+[Progress] 20/60 episodes | 33.3% | run 3/6 | MINCO-COLD | cluttered_easy_0 | episode 0/10
+[Progress] 23/60 episodes | 38.3% | run 3/6 | MINCO-COLD | cluttered_easy_0 | episode 3/10
+[Progress] run 3/6 COMPLETE | MINCO-COLD | cluttered_easy_0
+```
+
+百分比以全 suite 的 60 个 episode 为分母。`--resume` 跳过已经完成且校验通过的 run 时，会显示 `SKIP_COMPLETE` 并把对应 episode 计入全局进度；失败会显示 `FAILED`，且不会虚报为 100%。
+
 ## 默认实验规模与顺序
 
 每个场景使用原始 `pointgoal_start_goal_pairs.npy` 的第 0–9 行。RAW、MINCO-COLD、MINCO-HOT 共享 episode UID、起终点和 NavDP seed。
+
+每条 run 配置均包含：
+
+```json
+"scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]
+```
+
+因此即使 manifest 以后加入 easy_1～9 或 hard_1～9，本 suite 也不会运行它们。ESDF 使用场景内缓存 `esdf_2d_easy0_hard0_full60_v1.npz` 且 `force_rebuild=false`：COLD 在两个场景分别首次构建一次，HOT 复用对应缓存。
 
 ```text
 RAW-SPARSE × 10 → RAW-DENSE × 10
@@ -119,18 +140,18 @@ RAW 必须保持原 NavDP 基线：`N=15`、`T=0.1`、`ref_gap=3`、`Q=[10,10,0]
 
 以下情景应复制 `full_suite.json` 为新配置，并使用不同 `suite_id`。
 
-### 只跑 SPARSE 或 DENSE
+### 只跑一个固定场景
 
-在每条 `runs` 中增加：
+在每条 `runs` 中使用精确 ID：
 
 ```json
-"scene_labels": ["SPARSE"]
+"scene_ids": ["cluttered_easy_0"]
 ```
 
 或：
 
 ```json
-"scene_labels": ["DENSE"]
+"scene_ids": ["cluttered_hard_0"]
 ```
 
 运行：

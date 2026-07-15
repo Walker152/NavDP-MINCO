@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import csv
 import os
 from pathlib import Path
 import signal
@@ -43,7 +44,17 @@ class ProcessSupervisor:
             time.sleep(0.25)
         raise TimeoutError(f"NavDP health check timed out: {last_error!r}")
 
-    def run_pair(self, server_command, eval_command, run_dir, cwd, port=8888, timeout_s=1800.0):
+    @staticmethod
+    def _completed_episode_count(run_dir):
+        path = Path(run_dir) / "episode_metrics.csv"
+        if not path.exists(): return 0
+        try:
+            with path.open(newline="", encoding="utf-8") as stream:
+                return len({row.get("episode_uid") for row in csv.DictReader(stream) if row.get("episode_uid")})
+        except (OSError, csv.Error):
+            return 0
+
+    def run_pair(self, server_command, eval_command, run_dir, cwd, port=8888, timeout_s=1800.0, progress_callback=None):
         resource_monitor = ResourceMonitor(run_dir, lambda: self._processes)
         error = None
         try:
@@ -51,7 +62,14 @@ class ProcessSupervisor:
             resource_monitor.start()
             self._wait_health(f"http://127.0.0.1:{port}/health")
             evaluation = self._launch("isaac_eval", eval_command, Path(run_dir) / "logs", cwd)
-            return_code = evaluation.wait(timeout=timeout_s)
+            deadline = time.monotonic() + float(timeout_s)
+            while True:
+                if progress_callback is not None: progress_callback(self._completed_episode_count(run_dir))
+                return_code = evaluation.poll()
+                if return_code is not None: break
+                if time.monotonic() >= deadline: raise subprocess.TimeoutExpired(eval_command, timeout_s)
+                time.sleep(0.5)
+            if progress_callback is not None: progress_callback(self._completed_episode_count(run_dir))
             if return_code != 0:
                 raise RuntimeError(f"Isaac eval exited with code {return_code}")
             return return_code

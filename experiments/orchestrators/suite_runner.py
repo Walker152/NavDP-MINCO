@@ -19,6 +19,7 @@ from experiments.recorders.run_manifest import write_run_manifest
 from experiments.core.effective_parameters import effective_parameters
 from experiments.simulators.mock_backend import MockBackend
 from experiments.simulators.isaac_navdp_backend import IsaacNavDPBackend
+from experiments.orchestrators.progress import SuiteProgressReporter
 
 
 def _run_config(run, scene, episodes, backend_name, data_source, manifest_id, video_required=None, trace_required=None, parameter_overrides=None):
@@ -71,19 +72,24 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
     if backend_name == "isaac" and not allow_real_simulation: raise PermissionError("isaac backend requires --dry-run or --allow-real-simulation")
     completed = skipped = failed = 0
     scenes = {scene.scene_id: scene for scene in manifest.scenes}
-    for run in expand_runs(config, manifest):
+    expanded_runs = list(expand_runs(config, manifest))
+    episode_counts = [len([episode for episode in scenes[run.scene_id].episodes if episode.seed == run.seed]) for run in expanded_runs]
+    progress = SuiteProgressReporter(sum(episode_counts))
+    for run_index, (run, expected_episode_count) in enumerate(zip(expanded_runs, episode_counts), start=1):
         run_dir = layout.run_dir(run); status_path = run_dir / "run_status.json"
+        episodes = [episode for episode in scenes[run.scene_id].episodes if episode.seed == run.seed]
+        progress.start_run(run_index, len(expanded_runs), run.variant, run.scene_id, expected_episode_count)
         if resume and status_path.exists() and json.loads(status_path.read_text()).get("status") == "COMPLETE" and validate_run(run_dir, write_report=False)["valid"]:
-            skipped += 1; continue
+            progress.skip_completed_run(); skipped += 1; continue
         lifecycle = RunLifecycle(run_dir)
         if resume and lifecycle.status == "FAILED" and not retry_failed:
+            progress.fail_run("previous FAILED run skipped; pass --retry-failed")
             skipped += 1; continue
         if resume and lifecycle.status == "RUNNING":
             lifecycle.transition("INTERRUPTED", reason="orphaned run detected during resume")
         if lifecycle.status in {"FAILED", "COMPLETE"}: # explicit rerun or --retry-failed gets a fresh record
             lifecycle.status = "CREATED"; lifecycle._write(restarted=True)
         try:
-            episodes = [episode for episode in scenes[run.scene_id].episodes if episode.seed == run.seed]
             if lifecycle.status in {"CREATED", "INTERRUPTED"}:
                 atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required, parameter_overrides))
                 lifecycle.transition("RUNNING"); writer = AsyncRecordWriter(run_dir, SCHEMAS)
@@ -93,7 +99,7 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
                         command = backend.build_command(run, run_dir, config.manifest_path, scenes[run.scene_id], episodes, save_video=video_required, save_trace=trace_required, effective=run_configuration["effective_parameters"])
                         server_command = backend.build_server_command(run_dir, run.run_id, run.seed)
                         write_run_manifest(run_dir / "run_manifest.json", backend.repo_root, json.loads((run_dir / "run_config.json").read_text()), command, server_command)
-                        backend.run(run, episodes, writer, allow_real_simulation=allow_real_simulation, command=command)
+                        backend.run(run, episodes, writer, allow_real_simulation=allow_real_simulation, command=command, progress_callback=progress.update_run)
                     else:
                         backend.run(run, episodes, writer)
                 finally:
@@ -106,8 +112,10 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
                 lifecycle.transition("ANALYZING")
             if lifecycle.status == "ANALYZING":
                 analyze_run(run_dir); lifecycle.transition("COMPLETE", validation="PASS")
+            progress.finish_run()
             completed += 1
         except BaseException as error:
+            progress.fail_run(error)
             failed += 1
             if lifecycle.status not in {"FAILED", "COMPLETE"}: lifecycle.status = "FAILED"; lifecycle._write(error=repr(error))
             raise

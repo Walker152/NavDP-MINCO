@@ -40,8 +40,12 @@ def load_suite(path: Path | str) -> SuiteConfig:
 def expand_runs(config: SuiteConfig, manifest: Manifest):
     for template in config.runs:
         labels = set(template.get("scene_labels", []))
+        scene_ids = set(template.get("scene_ids", []))
+        unknown_scene_ids = scene_ids - {scene.scene_id for scene in manifest.scenes}
+        if unknown_scene_ids: raise ValueError(f"unknown scene_ids: {sorted(unknown_scene_ids)}")
         for scene in manifest.scenes:
             if labels and scene.scene_label not in labels: continue
+            if scene_ids and scene.scene_id not in scene_ids: continue
             seeds = sorted({episode.seed for episode in scene.episodes})
             for seed in seeds:
                 payload = {"experiment": template["experiment_id"], "variant": template["variant"], "scene": scene.scene_id, "seed": seed}
