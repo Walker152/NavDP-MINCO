@@ -235,6 +235,11 @@ This mode requires `IsaacLab/isaaclab.sh` and `IsaacLab/source/` but deliberatel
 ignores a missing or damaged `.git` directory. The caller is responsible for
 ensuring the uploaded source is version `v1.2.0`.
 
+The AutoDL setup installs IsaacLab with `isaaclab.sh -i none`. This installs the
+core and task extensions required by the NavDP benchmark while skipping optional
+reinforcement-learning frameworks. In particular, it avoids the obsolete
+`rsl-rl` Git dependency in IsaacLab `v1.2.0`; NavDP evaluation does not use it.
+
 ```bash
 # create the environment
 conda create -n isaaclab python=3.10

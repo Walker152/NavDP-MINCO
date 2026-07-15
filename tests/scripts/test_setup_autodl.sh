@@ -55,7 +55,7 @@ if [[ "${1:-}" == "env" && "${2:-}" == "list" && "${3:-}" == "--json" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "run" ]]; then
-  if [[ "$*" == *"isaaclab.sh -i"* && "${FAKE_RSL_RL_TLS_FAILURE:-0}" == 1 ]]; then
+  if [[ "$*" == *"isaaclab.sh -i"* && "$*" != *"isaaclab.sh -i none"* && "${FAKE_RSL_RL_TLS_FAILURE:-0}" == 1 ]]; then
     printf "Running command git clone https://github.com/leggedrobotics/rsl_rl.git\n" >&2
     printf "fatal: unable to access rsl_rl.git: GnuTLS recv error (-110)\n" >&2
     printf "ERROR: Failed to build 'rsl-rl' when git clone failed\n" >&2
@@ -259,7 +259,7 @@ fi
 assert_contains "$local_source_dir/out" "Using manually provided IsaacLab source"
 assert_not_contains "$local_source_dir/calls" "git -C $local_source_dir/IsaacLab"
 assert_not_contains "$local_source_dir/calls" "git clone"
-assert_contains "$local_source_dir/calls" "bash $local_source_dir/IsaacLab/isaaclab.sh -i"
+assert_contains "$local_source_dir/calls" "bash $local_source_dir/IsaacLab/isaaclab.sh -i none"
 
 rsl_tls_dir="$TEST_TMP/rsl-tls"
 mkdir -p "$rsl_tls_dir/IsaacLab/source"
@@ -275,7 +275,8 @@ if ! run_script "$rsl_tls_dir" \
   sed -n '1,240p' "$rsl_tls_dir/out" >&2
   fail "rsl-rl-only TLS clone failure should follow the README exception"
 fi
-assert_contains "$rsl_tls_dir/out" "Ignoring the README-documented unavailable rsl-rl dependency"
+assert_contains "$rsl_tls_dir/calls" "bash $rsl_tls_dir/IsaacLab/isaaclab.sh -i none"
+assert_not_contains "$rsl_tls_dir/out" "leggedrobotics/rsl_rl.git"
 assert_contains "$rsl_tls_dir/out" "Setup complete"
 
 custom_dir="$TEST_TMP/custom"

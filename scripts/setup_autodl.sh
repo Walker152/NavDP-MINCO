@@ -212,11 +212,12 @@ install_isaaclab_checkout() {
   fi
 
   CURRENT_STAGE="install IsaacLab v1.2.0"
+  log "Installing IsaacLab core and task extensions without optional RL frameworks"
   local install_log
   install_log="$(mktemp)"
   local install_status
   if conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" \
-    bash "$ISAACLAB_DIR/isaaclab.sh" -i 2>&1 | tee "$install_log"; then
+    bash "$ISAACLAB_DIR/isaaclab.sh" -i none 2>&1 | tee "$install_log"; then
     install_status=0
   else
     install_status=${PIPESTATUS[0]}
