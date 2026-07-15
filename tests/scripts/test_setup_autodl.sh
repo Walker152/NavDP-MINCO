@@ -204,6 +204,7 @@ assert_contains "$full_dir/calls" "baselines/navdp/requirements.txt"
 assert_contains "$full_dir/out" "Installing NavDP benchmark requirements"
 assert_contains "$full_dir/calls" "pip freeze"
 assert_contains "$full_dir/calls" "timeout"
+assert_contains "$full_dir/calls" "bash $full_dir/IsaacLab/isaaclab.sh -p"
 assert_contains "$full_dir/out" "Setup complete"
 
 retry_dir="$TEST_TMP/retry"
@@ -234,6 +235,25 @@ assert_contains "$incomplete_dir/out" "Preserving incomplete IsaacLab checkout"
 compgen -G "$incomplete_dir/IsaacLab.incomplete.*" >/dev/null || \
   fail "incomplete checkout archive was not created"
 [[ -x "$incomplete_dir/IsaacLab/isaaclab.sh" ]] || fail "incomplete checkout was not replaced"
+
+local_source_dir="$TEST_TMP/local-source"
+mkdir -p "$local_source_dir/IsaacLab/.git/objects/pack" "$local_source_dir/IsaacLab/source"
+cat >"$local_source_dir/IsaacLab/isaaclab.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+# Deliberately leave isaaclab.sh non-executable: it is invoked through bash.
+if ! run_script "$local_source_dir" \
+  ISAACLAB_DIR="$local_source_dir/IsaacLab" \
+  ISAACLAB_USE_LOCAL_SOURCE=1 \
+  bash "$SCRIPT" --skip-verify >"$local_source_dir/out" 2>&1; then
+  sed -n '1,240p' "$local_source_dir/out" >&2
+  fail "manual IsaacLab source mode should ignore corrupt Git metadata"
+fi
+assert_contains "$local_source_dir/out" "Using manually provided IsaacLab source"
+assert_not_contains "$local_source_dir/calls" "git -C $local_source_dir/IsaacLab"
+assert_not_contains "$local_source_dir/calls" "git clone"
+assert_contains "$local_source_dir/calls" "bash $local_source_dir/IsaacLab/isaaclab.sh -i"
 
 custom_dir="$TEST_TMP/custom"
 mkdir -p "$custom_dir"

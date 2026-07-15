@@ -223,6 +223,18 @@ dependency freeze contains an `isaaclab==2.0.2` entry from a newer environment;
 the AutoDL setup deliberately excludes only that conflicting entry so the
 README-required IsaacLab `v1.2.0` checkout remains active.
 
+If GitHub access is unavailable, upload an extracted IsaacLab `v1.2.0` source
+tree to `/root/autodl-tmp/navdp/IsaacLab` and explicitly trust it without using
+its Git metadata:
+
+```bash
+ISAACLAB_USE_LOCAL_SOURCE=1 bash scripts/setup_autodl.sh
+```
+
+This mode requires `IsaacLab/isaaclab.sh` and `IsaacLab/source/` but deliberately
+ignores a missing or damaged `.git` directory. The caller is responsible for
+ensuring the uploaded source is version `v1.2.0`.
+
 ```bash
 # create the environment
 conda create -n isaaclab python=3.10

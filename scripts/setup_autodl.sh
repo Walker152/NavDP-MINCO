@@ -14,6 +14,7 @@ if [[ -z "${AUTODL_WORK_DIR:-}" ]]; then
   fi
 fi
 ISAACLAB_DIR="${ISAACLAB_DIR:-$AUTODL_WORK_DIR/IsaacLab}"
+ISAACLAB_USE_LOCAL_SOURCE="${ISAACLAB_USE_LOCAL_SOURCE:-0}"
 AUTODL_EXPORT_DIR="${AUTODL_EXPORT_DIR:-$REPO_ROOT/requirements/autodl}"
 AUTODL_MIN_FREE_GB="${AUTODL_MIN_FREE_GB:-35}"
 ISAACSIM_VERIFY_TIMEOUT="${ISAACSIM_VERIFY_TIMEOUT:-180}"
@@ -43,6 +44,8 @@ Environment variables:
   ISAACLAB_ENV_NAME       IsaacLab environment name (default: isaaclab)
   AUTODL_WORK_DIR         Large-file root (default: /root/autodl-tmp/navdp when available)
   ISAACLAB_DIR            IsaacLab checkout path (default: AUTODL_WORK_DIR/IsaacLab)
+  ISAACLAB_USE_LOCAL_SOURCE
+                          Set to 1 to trust a manually uploaded v1.2.0 source tree
   CONDA_ENVS_PATH         Conda environments directory (default: AUTODL_WORK_DIR/conda/envs)
   CONDA_PKGS_DIRS         Conda package cache (default: AUTODL_WORK_DIR/conda/pkgs)
   PIP_CACHE_DIR           pip download cache (default: AUTODL_WORK_DIR/pip-cache)
@@ -137,7 +140,9 @@ preflight() {
   CURRENT_STAGE="preflight"
   [[ "$(uname -s)" == "Linux" ]] || die "this setup supports Linux hosts only"
   require_command conda
-  require_command git
+  if [[ "$ISAACLAB_USE_LOCAL_SOURCE" == 0 ]]; then
+    require_command git
+  fi
   require_command nvidia-smi
   require_command timeout
   require_command tee
@@ -146,6 +151,7 @@ preflight() {
   [[ "$NAVDP_ENV_NAME" != "$ISAACLAB_ENV_NAME" ]] || die "NavDP and IsaacLab environment names must differ"
   [[ "$AUTODL_MIN_FREE_GB" =~ ^[0-9]+$ ]] || die "AUTODL_MIN_FREE_GB must be a non-negative integer"
   [[ "$ISAACSIM_VERIFY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "ISAACSIM_VERIFY_TIMEOUT must be a positive integer"
+  [[ "$ISAACLAB_USE_LOCAL_SOURCE" =~ ^[01]$ ]] || die "ISAACLAB_USE_LOCAL_SOURCE must be 0 or 1"
 
   local required
   for required in \
@@ -176,25 +182,34 @@ preflight() {
 
 install_isaaclab_checkout() {
   CURRENT_STAGE="prepare IsaacLab v1.2.0 checkout"
-  if [[ -d "$ISAACLAB_DIR/.git" && ! -x "$ISAACLAB_DIR/isaaclab.sh" ]]; then
-    local incomplete_dir
-    incomplete_dir="${ISAACLAB_DIR}.incomplete.$(date +%Y%m%d%H%M%S)"
-    log "Preserving incomplete IsaacLab checkout at: $incomplete_dir"
-    mv "$ISAACLAB_DIR" "$incomplete_dir"
-  fi
-  if [[ -e "$ISAACLAB_DIR" ]]; then
-    [[ -d "$ISAACLAB_DIR/.git" ]] || die "ISAACLAB_DIR exists but is not a Git checkout: $ISAACLAB_DIR"
-    [[ -x "$ISAACLAB_DIR/isaaclab.sh" ]] || die "existing IsaacLab checkout has no executable isaaclab.sh: $ISAACLAB_DIR"
-    if [[ -n "$(git -C "$ISAACLAB_DIR" status --porcelain)" ]]; then
-      die "IsaacLab checkout has local changes; clean or move it before selecting v1.2.0"
-    fi
-    log "Reusing IsaacLab checkout: $ISAACLAB_DIR"
-    retry_git git -C "$ISAACLAB_DIR" fetch --depth 1 origin tag v1.2.0 --quiet
+  if [[ "$ISAACLAB_USE_LOCAL_SOURCE" == 1 ]]; then
+    [[ -f "$ISAACLAB_DIR/isaaclab.sh" ]] || \
+      die "manual IsaacLab source has no isaaclab.sh: $ISAACLAB_DIR"
+    [[ -d "$ISAACLAB_DIR/source" ]] || \
+      die "manual IsaacLab source has no source directory: $ISAACLAB_DIR"
+    log "Using manually provided IsaacLab source: $ISAACLAB_DIR"
+    log "Skipping Git validation; you are responsible for providing IsaacLab v1.2.0"
   else
-    mkdir -p "$(dirname "$ISAACLAB_DIR")"
-    retry_git clone_isaaclab_once
+    if [[ -d "$ISAACLAB_DIR/.git" && ! -x "$ISAACLAB_DIR/isaaclab.sh" ]]; then
+      local incomplete_dir
+      incomplete_dir="${ISAACLAB_DIR}.incomplete.$(date +%Y%m%d%H%M%S)"
+      log "Preserving incomplete IsaacLab checkout at: $incomplete_dir"
+      mv "$ISAACLAB_DIR" "$incomplete_dir"
+    fi
+    if [[ -e "$ISAACLAB_DIR" ]]; then
+      [[ -d "$ISAACLAB_DIR/.git" ]] || die "ISAACLAB_DIR exists but is not a Git checkout: $ISAACLAB_DIR"
+      [[ -x "$ISAACLAB_DIR/isaaclab.sh" ]] || die "existing IsaacLab checkout has no executable isaaclab.sh: $ISAACLAB_DIR"
+      if [[ -n "$(git -C "$ISAACLAB_DIR" status --porcelain)" ]]; then
+        die "IsaacLab checkout has local changes; clean or move it before selecting v1.2.0"
+      fi
+      log "Reusing IsaacLab checkout: $ISAACLAB_DIR"
+      retry_git git -C "$ISAACLAB_DIR" fetch --depth 1 origin tag v1.2.0 --quiet
+    else
+      mkdir -p "$(dirname "$ISAACLAB_DIR")"
+      retry_git clone_isaaclab_once
+    fi
+    git -C "$ISAACLAB_DIR" checkout --detach v1.2.0
   fi
-  git -C "$ISAACLAB_DIR" checkout --detach v1.2.0
 
   CURRENT_STAGE="install IsaacLab v1.2.0"
   local install_log
@@ -240,7 +255,7 @@ verify_installation() {
 
   CURRENT_STAGE="verify Isaac Sim headless startup"
   timeout "${ISAACSIM_VERIFY_TIMEOUT}s" conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" \
-    "$ISAACLAB_DIR/isaaclab.sh" -p \
+    bash "$ISAACLAB_DIR/isaaclab.sh" -p \
     "$ISAACLAB_DIR/source/standalone/tutorials/00_sim/create_empty.py" --headless
 }
 
@@ -306,6 +321,6 @@ printf '\nRun the NavDP server:\n'
 printf '  conda run -n %q python %q --port 8888 --checkpoint /path/to/navdp_checkpoint.ckpt\n' \
   "$NAVDP_ENV_NAME" "$REPO_ROOT/baselines/navdp/navdp_server.py"
 printf '\nRun the IsaacLab smoke test again:\n'
-printf '  conda run -n %q %q -p %q --headless\n' \
+printf '  conda run -n %q bash %q -p %q --headless\n' \
   "$ISAACLAB_ENV_NAME" "$ISAACLAB_DIR/isaaclab.sh" \
   "$ISAACLAB_DIR/source/standalone/tutorials/00_sim/create_empty.py"
