@@ -19,6 +19,7 @@ class SuiteConfig:
     analysis: dict | None = None
     retry: dict | None = None
     resume: bool = False
+    parameters: dict | None = None
 
 
 def load_suite(path: Path | str) -> SuiteConfig:
@@ -33,7 +34,7 @@ def load_suite(path: Path | str) -> SuiteConfig:
     if not manifest_value: raise ValueError("scenario_manifest or manifest is required")
     manifest = Path(manifest_value); manifest = manifest if manifest.is_absolute() else (path.parent / manifest).resolve()
     root = Path(data.get("output_root", "results")); root = root if root.is_absolute() else (path.parent / root).resolve()
-    return SuiteConfig(data["suite_id"], root, manifest, tuple(data["runs"]), backend, data.get("video", {}), data.get("monitor", {}), data.get("analysis", {}), data.get("retry", {}), bool(data.get("resume", False)))
+    return SuiteConfig(data["suite_id"], root, manifest, tuple(data["runs"]), backend, data.get("video", {}), data.get("monitor", {}), data.get("analysis", {}), data.get("retry", {}), bool(data.get("resume", False)), data.get("parameters", {}))
 
 
 def expand_runs(config: SuiteConfig, manifest: Manifest):

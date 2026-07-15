@@ -1,5 +1,7 @@
 # NavDP–MINCO 实验工具链
 
+全量运行、条件筛选和参数调整说明见 [README_PARAMETERS.md](README_PARAMETERS.md)。
+
 本目录实现 `docs/experiments/01～12` 的实验架构，默认输出到仓库根目录 `results/`。同时提供 deterministic mock 后端和 fail-closed 的真实 Isaac/NavDP 编排；本地验收不会启动 Isaac Sim、NavDP 服务、CUDA、MPC 求解或 MINCO 优化。
 
 ## 目录

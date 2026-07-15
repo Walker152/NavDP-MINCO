@@ -44,3 +44,6 @@ test_*.hpp
 # Generated experiment runs and reports. Keep experiments/ source and configs tracked.
 /results/
 /experiment_outputs/
+
+# Editor-generated indexes and workspace state.
+.vscode/

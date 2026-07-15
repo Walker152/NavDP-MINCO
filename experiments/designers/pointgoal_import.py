@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,7 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def import_pointgoal_scene(repo_root, definition, source_indices=(0, 1)):
+def import_pointgoal_scene(repo_root, definition, source_indices=tuple(range(10))):
     repo_root = Path(repo_root).resolve(); relative = Path(definition["scene_path"]); scene_dir = repo_root / relative
     usd_files = sorted(scene_dir.glob("*.usd"))
     if len(usd_files) != 1: raise ValueError(f"expected exactly one USD in {scene_dir}")
@@ -28,8 +29,13 @@ def import_pointgoal_scene(repo_root, definition, source_indices=(0, 1)):
     for episode_index, source_index in enumerate(source_indices):
         if not 0 <= source_index < len(rows): raise IndexError(source_index)
         sx, sy, gx, gy, yaw = (float(value) for value in rows[source_index])
+        scenario_id = (
+            definition["scenario_ids"][episode_index]
+            if episode_index < len(definition["scenario_ids"])
+            else f"REAL-{definition['scene_label']}-{episode_index:02d}"
+        )
         episodes.append({
-            "scenario_id":definition["scenario_ids"][episode_index], "episode_index":episode_index,
+            "scenario_id":scenario_id, "episode_index":episode_index,
             "source_episode_index":source_index, "seed":0,
             "navdp_seed":definition["navdp_seed_base"] + episode_index,
             "start_pose":[sx, sy, yaw], "goal_pose":[gx, gy, 0.0],
@@ -43,6 +49,18 @@ def import_pointgoal_scene(repo_root, definition, source_indices=(0, 1)):
 
 def build_default_real_manifest(repo_root):
     return {
-        "manifest_version":1, "manifest_id":"navdp_minco_real_pointgoal_v1", "seed":0,
+        "manifest_version":1, "manifest_id":"navdp_minco_real_pointgoal_v2_10ep", "seed":0,
         "scenes":[import_pointgoal_scene(repo_root, definition) for definition in DEFAULT_SCENES],
     }
+
+
+def write_default_real_manifest(repo_root, output_path):
+    output_path = Path(output_path)
+    output_path.write_text(
+        json.dumps(build_default_real_manifest(repo_root), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+if __name__ == "__main__":
+    write_default_real_manifest(Path(__file__).resolve().parents[2], Path(__file__).resolve().parents[1] / "configs" / "real_pointgoal_scenarios.json")

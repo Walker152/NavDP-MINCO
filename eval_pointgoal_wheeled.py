@@ -61,6 +61,8 @@ parser.add_argument("--headless", default=True, action=argparse.BooleanOptionalA
 parser.add_argument("--save-video", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--save-debug-visuals", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--video-fps", type=int, default=10)
+parser.add_argument("--video-crf", type=int, default=23)
+parser.add_argument("--video-scale", type=float, default=1.0)
 parser.add_argument("--eval-monitor", default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument("--save-planning-trace", default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument("--warm-start-mode", choices=("cold", "gated"), default="gated")
@@ -90,6 +92,7 @@ import imageio
 import os
 import csv
 import json
+from pathlib import Path
 import torch
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
@@ -163,7 +166,7 @@ if args_cli.save_planning_trace:
 if args_cli.save_video and args_cli.experiment_run_dir:
     from experiments.recorders.video_recorder import EpisodeVideoRecorder
     episode_video_recorder = EpisodeVideoRecorder(
-        os.path.join(args_cli.experiment_run_dir, "videos"), fps=args_cli.video_fps
+        os.path.join(args_cli.experiment_run_dir, "videos"), fps=args_cli.video_fps, crf=args_cli.video_crf, scale=args_cli.video_scale
     )
     initial_video_uid = args_cli.episode_uids[0] if args_cli.episode_uids else f"scene_{args_cli.scene_index}_episode_0"
     episode_video_recorder.start_episode(initial_video_uid)
@@ -723,6 +726,23 @@ if args_cli.enable_minco:
         scene_scale=args_cli.scene_scale,
         env_prim_path="/World/Scene/terrain",
     )
+    if args_cli.experiment_run_dir:
+        from experiments.recorders.run_recorder import atomic_json
+        esdf_origin = np.asarray(esdf["origin"], dtype=np.float64)
+        esdf_shape = np.asarray(esdf["distance"]).shape
+        esdf_resolution = float(esdf["resolution"])
+        esdf_max = esdf_origin + np.array([esdf_shape[1], esdf_shape[0]], dtype=np.float64) * esdf_resolution
+        atomic_json(Path(args_cli.experiment_run_dir) / "esdf_runtime.json", {
+            "resolution_m":esdf_resolution, "origin_xy_m":esdf_origin.tolist(),
+            "grid_shape_rows_cols":[int(esdf_shape[0]), int(esdf_shape[1])],
+            "bounds_xy_m":{"min":esdf_origin.tolist(), "max":esdf_max.tolist()},
+            "ground_z_m":float(esdf["ground_z"]), "scene_scale":float(esdf["scene_scale"]),
+            "padding_m":float(esdf["padding"]),
+            "obstacle_height_bounds_m":[float(esdf["obstacle_min_height"]), float(esdf["obstacle_max_height"])],
+            "fill_footprint":bool(esdf["fill_footprint"]),
+            "footprint_inflate_cells":int(esdf["footprint_inflate_cells"]),
+            "timing":dict(esdf.get("timing", {})),
+        })
     esdf_timing = esdf.get("timing", {}) if isinstance(esdf, dict) else {}
     print(f"[Timing][ESDF] {esdf_timing}")
     camera_pos_debug = env.unwrapped.scene.sensors['camera_sensor'].data.pos_w.cpu().numpy()

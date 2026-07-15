@@ -1,6 +1,6 @@
 {
   "manifest_version": 1,
-  "manifest_id": "navdp_minco_real_pointgoal_v1",
+  "manifest_id": "navdp_minco_real_pointgoal_v2_10ep",
   "seed": 0,
   "scenes": [
     {
@@ -9,8 +9,186 @@
       "scene_path": "assets/scenes/cluttered_easy/easy_0",
       "asset_hash": "8086e4a490ec4088edbbce7f8c19762a52b9428fd7774b8665a1581a189d45fe",
       "episodes": [
-        {"scenario_id":"REAL-REGULAR","episode_index":0,"source_episode_index":0,"seed":0,"navdp_seed":1000,"start_pose":[-11.235087927599256,-3.3672327735158483,0.7974644696184038],"goal_pose":[2.357366033429122,10.557265271577501,0.0],"selection_reason":"deterministic source row 0"},
-        {"scenario_id":"REAL-YAW","episode_index":1,"source_episode_index":1,"seed":0,"navdp_seed":1001,"start_pose":[10.37960159769439,-0.20208941513567738,2.869500380048229],"goal_pose":[-10.022339658475978,5.490296521420158,0.0],"selection_reason":"deterministic source row 1"}
+        {
+          "scenario_id": "REAL-REGULAR",
+          "episode_index": 0,
+          "source_episode_index": 0,
+          "seed": 0,
+          "navdp_seed": 1000,
+          "start_pose": [
+            -11.235087927599256,
+            -3.3672327735158483,
+            0.7974644696184038
+          ],
+          "goal_pose": [
+            2.357366033429122,
+            10.557265271577501,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 0"
+        },
+        {
+          "scenario_id": "REAL-YAW",
+          "episode_index": 1,
+          "source_episode_index": 1,
+          "seed": 0,
+          "navdp_seed": 1001,
+          "start_pose": [
+            10.37960159769439,
+            -0.20208941513567738,
+            2.869500380048229
+          ],
+          "goal_pose": [
+            -10.022339658475978,
+            5.490296521420158,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 1"
+        },
+        {
+          "scenario_id": "REAL-SPARSE-02",
+          "episode_index": 2,
+          "source_episode_index": 2,
+          "seed": 0,
+          "navdp_seed": 1002,
+          "start_pose": [
+            12.34227987186507,
+            0.8828933154010976,
+            2.9285742957064462
+          ],
+          "goal_pose": [
+            -14.381959196681102,
+            6.66334532568217,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 2"
+        },
+        {
+          "scenario_id": "REAL-SPARSE-03",
+          "episode_index": 3,
+          "source_episode_index": 3,
+          "seed": 0,
+          "navdp_seed": 1003,
+          "start_pose": [
+            7.007549160494272,
+            13.890170953614676,
+            -2.513392200709234
+          ],
+          "goal_pose": [
+            -11.278993291427492,
+            0.6075189072509736,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 3"
+        },
+        {
+          "scenario_id": "REAL-SPARSE-04",
+          "episode_index": 4,
+          "source_episode_index": 4,
+          "seed": 0,
+          "navdp_seed": 1004,
+          "start_pose": [
+            2.869940535817497,
+            -9.280127419622916,
+            2.084715639452153
+          ],
+          "goal_pose": [
+            -3.8938954204390432,
+            2.7015351550639557,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 4"
+        },
+        {
+          "scenario_id": "REAL-SPARSE-05",
+          "episode_index": 5,
+          "source_episode_index": 5,
+          "seed": 0,
+          "navdp_seed": 1005,
+          "start_pose": [
+            -10.730740692305737,
+            1.7058410981804846,
+            -0.8326942332112507
+          ],
+          "goal_pose": [
+            -2.654669147306286,
+            -7.172716211036037,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 5"
+        },
+        {
+          "scenario_id": "REAL-SPARSE-06",
+          "episode_index": 6,
+          "source_episode_index": 6,
+          "seed": 0,
+          "navdp_seed": 1006,
+          "start_pose": [
+            0.41835490716441287,
+            -4.420696141363633,
+            0.2217355601336584
+          ],
+          "goal_pose": [
+            13.774160458414752,
+            -1.409730231178834,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 6"
+        },
+        {
+          "scenario_id": "REAL-SPARSE-07",
+          "episode_index": 7,
+          "source_episode_index": 7,
+          "seed": 0,
+          "navdp_seed": 1007,
+          "start_pose": [
+            8.085258248276629,
+            -9.578846504715166,
+            2.369616962634119
+          ],
+          "goal_pose": [
+            -1.4969150622942735,
+            -0.25051417931753206,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 7"
+        },
+        {
+          "scenario_id": "REAL-SPARSE-08",
+          "episode_index": 8,
+          "source_episode_index": 8,
+          "seed": 0,
+          "navdp_seed": 1008,
+          "start_pose": [
+            9.45318885445051,
+            -11.006935158841918,
+            2.2014114388507964
+          ],
+          "goal_pose": [
+            -4.743764741412596,
+            8.439421064595845,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 8"
+        },
+        {
+          "scenario_id": "REAL-SPARSE-09",
+          "episode_index": 9,
+          "source_episode_index": 9,
+          "seed": 0,
+          "navdp_seed": 1009,
+          "start_pose": [
+            9.181683324458017,
+            -0.18634867379089987,
+            -2.5891997011942194
+          ],
+          "goal_pose": [
+            -13.075453871368298,
+            -13.905704030895752,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 9"
+        }
       ]
     },
     {
@@ -19,8 +197,186 @@
       "scene_path": "assets/scenes/cluttered_hard/hard_0",
       "asset_hash": "7125024056f83009e74f1b5c959d3cefdc7190157ec67b9d43818c613fced9f0",
       "episodes": [
-        {"scenario_id":"REAL-DENSE","episode_index":0,"source_episode_index":0,"seed":0,"navdp_seed":2000,"start_pose":[0.7687818222894276,-13.28799905741516,1.3098913249363044],"goal_pose":[3.9241860620188618,-1.4695993932357831,0.0],"selection_reason":"deterministic source row 0"},
-        {"scenario_id":"REAL-LONG","episode_index":1,"source_episode_index":1,"seed":0,"navdp_seed":2001,"start_pose":[-13.528358175951698,-4.383067119469857,1.2391807788578006],"goal_pose":[-7.941507833587547,11.84216681573461,0.0],"selection_reason":"deterministic source row 1"}
+        {
+          "scenario_id": "REAL-DENSE",
+          "episode_index": 0,
+          "source_episode_index": 0,
+          "seed": 0,
+          "navdp_seed": 2000,
+          "start_pose": [
+            0.7687818222894276,
+            -13.28799905741516,
+            1.3098913249363044
+          ],
+          "goal_pose": [
+            3.9241860620188618,
+            -1.4695993932357831,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 0"
+        },
+        {
+          "scenario_id": "REAL-LONG",
+          "episode_index": 1,
+          "source_episode_index": 1,
+          "seed": 0,
+          "navdp_seed": 2001,
+          "start_pose": [
+            -13.528358175951698,
+            -4.383067119469857,
+            1.2391807788578006
+          ],
+          "goal_pose": [
+            -7.941507833587547,
+            11.84216681573461,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 1"
+        },
+        {
+          "scenario_id": "REAL-DENSE-02",
+          "episode_index": 2,
+          "source_episode_index": 2,
+          "seed": 0,
+          "navdp_seed": 2002,
+          "start_pose": [
+            7.00613065369912,
+            -3.3078945125734576,
+            1.8763088799879535
+          ],
+          "goal_pose": [
+            2.7844166835937947,
+            10.077940555593635,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 2"
+        },
+        {
+          "scenario_id": "REAL-DENSE-03",
+          "episode_index": 3,
+          "source_episode_index": 3,
+          "seed": 0,
+          "navdp_seed": 2003,
+          "start_pose": [
+            -4.293547297370941,
+            4.480221795182056,
+            0.5498089344920584
+          ],
+          "goal_pose": [
+            6.359953797041502,
+            11.009138520722187,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 3"
+        },
+        {
+          "scenario_id": "REAL-DENSE-04",
+          "episode_index": 4,
+          "source_episode_index": 4,
+          "seed": 0,
+          "navdp_seed": 2004,
+          "start_pose": [
+            13.496054716020696,
+            -7.210400263025974,
+            2.421069511277837
+          ],
+          "goal_pose": [
+            -8.968210643679587,
+            12.513087541971455,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 4"
+        },
+        {
+          "scenario_id": "REAL-DENSE-05",
+          "episode_index": 5,
+          "source_episode_index": 5,
+          "seed": 0,
+          "navdp_seed": 2005,
+          "start_pose": [
+            -10.238220525583742,
+            -1.2819135060152451,
+            -0.6700448940537126
+          ],
+          "goal_pose": [
+            4.40534165735635,
+            -12.884406858909694,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 5"
+        },
+        {
+          "scenario_id": "REAL-DENSE-06",
+          "episode_index": 6,
+          "source_episode_index": 6,
+          "seed": 0,
+          "navdp_seed": 2006,
+          "start_pose": [
+            11.46854432465463,
+            -1.9446700514598452,
+            3.1243015063704527
+          ],
+          "goal_pose": [
+            -5.970319107886365,
+            -1.643102041263648,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 6"
+        },
+        {
+          "scenario_id": "REAL-DENSE-07",
+          "episode_index": 7,
+          "source_episode_index": 7,
+          "seed": 0,
+          "navdp_seed": 2007,
+          "start_pose": [
+            -3.722327371298488,
+            14.569800570269802,
+            -2.5390012576452725
+          ],
+          "goal_pose": [
+            -14.90068675888168,
+            6.87967221294116,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 7"
+        },
+        {
+          "scenario_id": "REAL-DENSE-08",
+          "episode_index": 8,
+          "source_episode_index": 8,
+          "seed": 0,
+          "navdp_seed": 2008,
+          "start_pose": [
+            10.562320017356669,
+            11.220514553828156,
+            -1.58585711409078
+          ],
+          "goal_pose": [
+            10.185819769444821,
+            -13.776304884530196,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 8"
+        },
+        {
+          "scenario_id": "REAL-DENSE-09",
+          "episode_index": 9,
+          "source_episode_index": 9,
+          "seed": 0,
+          "navdp_seed": 2009,
+          "start_pose": [
+            -5.665281309454065,
+            7.467516734472705,
+            -0.40181512951742165
+          ],
+          "goal_pose": [
+            8.283168891753508,
+            1.540339640383883,
+            0.0
+          ],
+          "selection_reason": "deterministic source row 9"
+        }
       ]
     }
   ]

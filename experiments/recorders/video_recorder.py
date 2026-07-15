@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import numpy as np
 import imageio.v2 as imageio
+import cv2
 
 
 class EpisodeVideoRecorder:
@@ -22,6 +23,9 @@ class EpisodeVideoRecorder:
         frame = np.asarray(frame, dtype=np.uint8)
         if frame.ndim == 2: frame = np.repeat(frame[:,:,None], 3, axis=2)
         if frame.ndim != 3 or frame.shape[2] != 3: raise ValueError(f"invalid frame shape: {frame.shape}")
+        if self.scale != 1.0:
+            if not np.isfinite(self.scale) or self.scale <= 0.0: raise ValueError("video scale must be finite and positive")
+            frame = cv2.resize(frame, None, fx=float(self.scale), fy=float(self.scale), interpolation=cv2.INTER_AREA)
         if self.shape is None: self.shape = tuple(frame.shape)
         if tuple(frame.shape) != self.shape: raise ValueError(f"frame shape changed: {frame.shape} != {self.shape}")
         self.writer.append_data(np.ascontiguousarray(frame)); self.frame_count += 1
@@ -32,7 +36,7 @@ class EpisodeVideoRecorder:
         if self.frame_count == 0:
             path.unlink(missing_ok=True); result = None
         else: result = path
-        metadata = {"episode_uid":self.uid, "fps":self.fps, "frame_count":self.frame_count, "shape":list(self.shape) if self.shape else None, "codec":"libx264", "pixel_format":"yuv420p", "complete":self.frame_count > 0}
+        metadata = {"episode_uid":self.uid, "fps":self.fps, "crf":self.crf, "scale":self.scale, "frame_count":self.frame_count, "shape":list(self.shape) if self.shape else None, "codec":"libx264", "pixel_format":"yuv420p", "macro_block_size":16, "complete":self.frame_count > 0}
         (self.output_dir / f"{self.uid}.video_complete.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         return result
 

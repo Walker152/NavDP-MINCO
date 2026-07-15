@@ -8,6 +8,41 @@
   "analysis": {"enabled": true, "paired": true},
   "retry": {"failed": false},
   "resume": true,
+  "parameters": {
+    "minco": {
+      "top_k": 2,
+      "safe_distance_m": 0.4,
+      "sample_dt_s": 0.05,
+      "max_velocity_mps": 1.0,
+      "max_acceleration_mps2": 1.0,
+      "max_iterations": 64,
+      "penalty_weight_pos": 10000.0,
+      "penalty_weight_vel": 1000.0,
+      "penalty_weight_acc": 1000.0,
+      "penalty_weight_attractor": 20.0,
+      "time_weight": 0.1,
+      "time_barrier_weight": 10.0
+    },
+    "esdf": {
+      "resolution_m": 0.05,
+      "padding_m": 1.0,
+      "cache_name": "esdf_2d.npz",
+      "force_rebuild": false,
+      "obstacle_min_height_m": 0.08,
+      "obstacle_max_height_m": 1.5,
+      "fill_footprint": true,
+      "footprint_inflate_cells": 1
+    },
+    "minco_mpc": {
+      "desired_v_mps": 0.5,
+      "w_max_radps": 0.5,
+      "max_acceleration_mps2": 1.0,
+      "max_yaw_acceleration_radps2": 1.0,
+      "max_wheel_speed_radps": null
+    },
+    "video": {"fps": 10, "crf": 23, "scale": 1.0},
+    "scene": {"scale": 1.0}
+  },
   "runs": [
     {"experiment_id": "EXP-ALL_data_collection", "variant": "raw", "warm_start_mode": "cold"},
     {"experiment_id": "EXP-ALL_data_collection", "variant": "minco-cold", "warm_start_mode": "cold"},

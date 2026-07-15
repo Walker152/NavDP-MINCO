@@ -57,6 +57,32 @@ def validate_run(run_dir: Path | str, write_report=True):
     expected_uids = list(config.get("episode_uids", []))
     actual_uids = [row.get("episode_uid") for row in table_rows.get("episode_metrics", [])]
     if expected_uids and sorted(actual_uids) != sorted(expected_uids): errors.append("episode completion set does not match run_config")
+    if config.get("data_source") == "REAL":
+        if len(expected_uids) != 10 or len(set(expected_uids)) != 10:
+            errors.append("REAL run requires exactly 10 distinct episode_uids")
+        manifest_path = run_dir / "run_manifest.json"
+        if not manifest_path.exists(): errors.append("missing run_manifest.json")
+        else:
+            try:
+                manifest_payload = json.loads(manifest_path.read_text())
+                if not manifest_payload.get("effective_parameters"): errors.append("run_manifest missing effective_parameters")
+                if not manifest_payload.get("commands", {}).get("evaluation"): errors.append("run_manifest missing evaluation command")
+                if "sha256" not in manifest_payload.get("checkpoint", {}): errors.append("run_manifest missing checkpoint hash")
+                host = manifest_payload.get("host", {})
+                if not all(key in host for key in ("cpu", "memory_total_bytes", "gpu")): errors.append("run_manifest missing host inventory")
+            except Exception as error: errors.append(f"unreadable run_manifest.json: {error}")
+        samples_path = run_dir / "resource_samples.csv"
+        if not samples_path.exists(): errors.append("missing resource_samples.csv")
+        summary_path = run_dir / "resource_summary.json"
+        if not summary_path.exists(): errors.append("missing resource_summary.json")
+        else:
+            try:
+                summary = json.loads(summary_path.read_text())
+                required = ("started_at_utc", "ended_at_utc", "duration_s", "peak_owned_rss_bytes", "peak_gpu_memory_mib")
+                if not all(key in summary for key in required): errors.append("incomplete resource_summary.json")
+            except Exception as error: errors.append(f"unreadable resource_summary.json: {error}")
+        if config.get("variant") != "raw" and not (run_dir / "esdf_runtime.json").exists():
+            errors.append("missing esdf_runtime.json")
     if config.get("trace_required") and not list((run_dir / "traces").glob("*.npz")): errors.append("missing required planning traces")
     if config.get("video_required"):
         for uid in expected_uids:

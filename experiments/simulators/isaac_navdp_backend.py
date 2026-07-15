@@ -6,6 +6,7 @@ import hashlib
 import numpy as np
 
 from experiments.simulators.process_supervisor import ProcessSupervisor
+from experiments.core.effective_parameters import EFFECTIVE_PARAMETERS
 
 
 class IsaacNavDPBackend:
@@ -58,9 +59,11 @@ class IsaacNavDPBackend:
                             errors.append(f"episode source row mismatch: {episode.episode_uid}")
         return errors
 
-    def build_command(self, run, run_dir, manifest_path, scene, episodes, save_video=True, save_trace=True):
+    def build_command(self, run, run_dir, manifest_path, scene, episodes, save_video=True, save_trace=True, effective=None):
         errors = self.validate_static_configuration(run, scene, episodes)
         if errors: raise ValueError("; ".join(errors))
+        effective = effective or EFFECTIVE_PARAMETERS
+        controller = effective["raw_mpc"] if run.variant == "raw" else effective["minco_mpc"]
         episode_uids = [episode.episode_uid for episode in episodes]
         navdp_seeds = [episode.navdp_seed for episode in episodes]
         command = [
@@ -70,10 +73,27 @@ class IsaacNavDPBackend:
             "--episode-uids", *list(episode_uids), "--headless", "--save-video" if save_video else "--no-save-video", "--save-debug-visuals", "--eval-monitor", "--save-planning-trace" if save_trace else "--no-save-planning-trace",
             "--warm-start-mode", run.warm_start_mode, "--seed", str(run.seed), "--navdp-seed", str(navdp_seeds[0]),
             "--navdp-seeds", *[str(value) for value in navdp_seeds], "--num_envs", "1", "--num_episodes", str(len(episodes)),
-            "--speed", "0.5", "--mpc_max_yaw_rate", "0.5",
+            "--speed", str(controller.get("desired_v_mps", controller.get("desired_v"))), "--mpc_max_yaw_rate", str(controller.get("w_max_radps", controller.get("w_max"))),
             "--use_robot_base_frame", "0",
         ]
         command.extend(["--raw-controller", "original-navdp-mpc" if run.variant == "raw" else "disabled"])
+        minco = effective["minco"]; esdf = effective["esdf"]; video = effective["video"]
+        command.extend([
+            "--minco_top_k", str(minco["top_k"]), "--minco_safe_dist", str(minco["safe_distance_m"]),
+            "--minco_sample_dt", str(minco["sample_dt_s"]), "--minco_max_vel", str(minco["max_velocity_mps"]),
+            "--minco_max_acc", str(minco["max_acceleration_mps2"]), "--minco_max_iterations", str(minco["max_iterations"]),
+            "--minco_penalty_weight_pos", str(minco["penalty_weight_pos"]), "--minco_penalty_weight_vel", str(minco["penalty_weight_vel"]),
+            "--minco_penalty_weight_acc", str(minco["penalty_weight_acc"]), "--minco_penalty_weight_attractor", str(minco["penalty_weight_attractor"]),
+            "--minco_time_weight", str(minco["time_weight"]), "--minco_time_barrier_weight", str(minco["time_barrier_weight"]),
+            "--esdf_resolution", str(esdf["resolution_m"]), "--esdf_padding", str(esdf["padding_m"]),
+            "--esdf_cache_name", str(esdf["cache_name"]), "--esdf_obstacle_min_height", str(esdf["obstacle_min_height_m"]),
+            "--esdf_obstacle_max_height", str(esdf["obstacle_max_height_m"]), "--esdf_fill_footprint", str(int(esdf["fill_footprint"])),
+            "--esdf_footprint_inflate_cells", str(esdf["footprint_inflate_cells"]),
+            "--mpc_max_yaw_acc", str(effective["minco_mpc"]["max_yaw_acceleration_radps2"]),
+            "--mpc_max_wheel_speed", str(effective["minco_mpc"]["max_wheel_speed_radps"] or 0.0), "--scene_scale", str(effective["scene"]["scale"]),
+            "--video-fps", str(video["fps"]), "--video-crf", str(video["crf"]), "--video-scale", str(video["scale"]),
+        ])
+        if esdf["force_rebuild"]: command.append("--esdf_force_rebuild")
         command.append("--no-enable_minco" if run.variant == "raw" else "--enable_minco")
         return command
 

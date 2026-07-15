@@ -15,20 +15,25 @@ from experiments.designers.manifest import load_manifest
 from experiments.designers.suite import expand_runs, load_suite
 from experiments.recorders.async_writer import AsyncRecordWriter
 from experiments.recorders.run_recorder import RunLifecycle, atomic_json
+from experiments.recorders.run_manifest import write_run_manifest
+from experiments.core.effective_parameters import effective_parameters
 from experiments.simulators.mock_backend import MockBackend
 from experiments.simulators.isaac_navdp_backend import IsaacNavDPBackend
 
 
-def _run_config(run, scene, episodes, backend_name, data_source, manifest_id, video_required=None, trace_required=None):
+def _run_config(run, scene, episodes, backend_name, data_source, manifest_id, video_required=None, trace_required=None, parameter_overrides=None):
+    parameters = effective_parameters(video_required if video_required is not None else backend_name == "isaac", parameter_overrides)
+    controller_parameters = parameters["raw_mpc"] if run.variant == "raw" else parameters["minco_mpc"]
     return {
         **asdict(run), "backend":backend_name, "data_source":data_source, "manifest_id":manifest_id,
         "scene_path":scene.scene_path, "asset_hash":scene.asset_hash,
         "episode_uids":[episode.episode_uid for episode in episodes],
         "episodes":[episode.as_dict() for episode in episodes],
-        "speed_mps":0.5, "max_yaw_rate_radps":0.5, "safe_dist":0.4,
+        "speed_mps":controller_parameters.get("desired_v_mps", controller_parameters.get("desired_v")), "max_yaw_rate_radps":controller_parameters.get("w_max_radps", controller_parameters.get("w_max")), "safe_dist":parameters["minco"]["safe_distance_m"],
         "timeout_s":1800.0, "video_required":backend_name == "isaac" if video_required is None else bool(video_required),
         "trace_required":backend_name == "isaac" if trace_required is None else bool(trace_required),
         "raw_controller":"original-navdp-mpc" if backend_name == "isaac" and run.variant == "raw" else "disabled",
+        "effective_parameters":parameters,
     }
 
 
@@ -40,6 +45,10 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
     trace_required = backend_name == "isaac" and bool((config.monitor or {}).get("planning_trace", True))
     suite_dir = layout.suite_dir(config.suite_id); suite_dir.mkdir(parents=True, exist_ok=True)
     data_source = "SIMULATED" if backend_name == "mock" else ("DRY_RUN" if dry_run else "REAL")
+    parameter_overrides = {section:dict(values) for section, values in (config.parameters or {}).items()}
+    video_overrides = parameter_overrides.setdefault("video", {})
+    for key in ("fps", "crf", "scale"):
+        if key in (config.video or {}): video_overrides[key] = config.video[key]
     atomic_json(suite_dir / "suite_config.json", {"suite_id": config.suite_id, "manifest": str(config.manifest_path), "backend": backend.name, "data_source": data_source})
     atomic_json(suite_dir / "scenario_manifest.json", json.loads(config.manifest_path.read_text(encoding="utf-8")))
     atomic_json(suite_dir / "suite_status.json", {"status":"DRY_RUN" if dry_run else "RUNNING", "backend":backend.name, "data_source":data_source})
@@ -50,9 +59,11 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
             episodes = [episode for episode in scenes[run.scene_id].episodes if episode.seed == run.seed]
             if backend_name == "isaac":
                 run_dir = layout.run_dir(run)
-                atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required))
-                commands.append(backend.build_command(run, run_dir, config.manifest_path, scenes[run.scene_id], episodes, save_video=video_required, save_trace=trace_required))
+                atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required, parameter_overrides))
+                run_configuration = json.loads((run_dir / "run_config.json").read_text())
+                commands.append(backend.build_command(run, run_dir, config.manifest_path, scenes[run.scene_id], episodes, save_video=video_required, save_trace=trace_required, effective=run_configuration["effective_parameters"]))
                 server_commands.append(backend.build_server_command(run_dir, run.run_id, run.seed))
+                write_run_manifest(run_dir / "run_manifest.json", backend.repo_root, json.loads((run_dir / "run_config.json").read_text()), commands[-1], server_commands[-1], probe_external=False)
         atomic_json(suite_dir / "dry_run_plan.json", {"backend":backend_name, "run_count":len(list(expand_runs(config, manifest))), "commands":commands, "server_commands":server_commands, "started_processes":0})
         return SuiteResult(0, 0, 0)
     if analysis_only:
@@ -74,11 +85,14 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
         try:
             episodes = [episode for episode in scenes[run.scene_id].episodes if episode.seed == run.seed]
             if lifecycle.status in {"CREATED", "INTERRUPTED"}:
-                atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required))
+                atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required, parameter_overrides))
                 lifecycle.transition("RUNNING"); writer = AsyncRecordWriter(run_dir, SCHEMAS)
                 try:
                     if backend_name == "isaac":
-                        command = backend.build_command(run, run_dir, config.manifest_path, scenes[run.scene_id], episodes, save_video=video_required, save_trace=trace_required)
+                        run_configuration = json.loads((run_dir / "run_config.json").read_text())
+                        command = backend.build_command(run, run_dir, config.manifest_path, scenes[run.scene_id], episodes, save_video=video_required, save_trace=trace_required, effective=run_configuration["effective_parameters"])
+                        server_command = backend.build_server_command(run_dir, run.run_id, run.seed)
+                        write_run_manifest(run_dir / "run_manifest.json", backend.repo_root, json.loads((run_dir / "run_config.json").read_text()), command, server_command)
                         backend.run(run, episodes, writer, allow_real_simulation=allow_real_simulation, command=command)
                     else:
                         backend.run(run, episodes, writer)

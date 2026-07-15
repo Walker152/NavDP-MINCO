@@ -8,6 +8,8 @@ import subprocess
 import time
 from urllib.request import urlopen
 
+from experiments.recorders.resource_monitor import ResourceMonitor
+
 
 class ProcessSupervisor:
     """Own exactly the process groups launched for one real experiment run."""
@@ -42,16 +44,23 @@ class ProcessSupervisor:
         raise TimeoutError(f"NavDP health check timed out: {last_error!r}")
 
     def run_pair(self, server_command, eval_command, run_dir, cwd, port=8888, timeout_s=1800.0):
+        resource_monitor = ResourceMonitor(run_dir, lambda: self._processes)
+        error = None
         try:
             self._launch("navdp_server", server_command, Path(run_dir) / "logs", cwd)
+            resource_monitor.start()
             self._wait_health(f"http://127.0.0.1:{port}/health")
             evaluation = self._launch("isaac_eval", eval_command, Path(run_dir) / "logs", cwd)
             return_code = evaluation.wait(timeout=timeout_s)
             if return_code != 0:
                 raise RuntimeError(f"Isaac eval exited with code {return_code}")
             return return_code
+        except BaseException as caught:
+            error = caught
+            raise
         finally:
             self.close()
+            resource_monitor.stop(status="failed" if error is not None else "finished", error=error)
 
     def _signal(self, process, sig):
         if process.poll() is None:
