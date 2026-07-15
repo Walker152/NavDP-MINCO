@@ -5,6 +5,7 @@ import unittest
 
 import imageio.v2 as imageio
 import numpy as np
+import math
 
 from experiments.integration.eval_hooks import ExperimentHookBridge
 from experiments.recorders.video_recorder import EpisodeVideoRecorder
@@ -23,11 +24,15 @@ class EvalHookVideoTests(unittest.TestCase):
         bridge.record_planning_cycle("c2", published=False, stale=False, fallback_mode="HOLD_LAST")
         bridge.record_planning_cycle("c3", published=False, stale=False, fallback_mode="STOP")
         bridge.record_plan("p-bad", published=False, stale=True)
-        bridge.record_plan("p-ok", published=True, stale=False)
+        bridge.record_plan("p-ok", published=True, stale=False, planning_state="HOT_START", hot_start_accepted=True, hot_reject_reason="", optimizer_iteration_count=7)
         bridge.record_control_step(0, "p-ok", .2, .0)
         bridge.end_episode(success=True)
         self.assertEqual([table for table, _ in sink.rows].count("planning_cycles"), 3)
         self.assertEqual([row["plan_uid"] for table, row in sink.rows if table == "plan_metrics"], ["p-ok"])
+        plan_row = next(row for table, row in sink.rows if table == "plan_metrics")
+        self.assertEqual(plan_row["planning_state"], "HOT_START")
+        self.assertTrue(plan_row["hot_start_accepted"])
+        self.assertEqual(plan_row["optimizer_iteration_count"], 7)
         bridge.reset(generation=2)
         self.assertIsNone(bridge.episode_uid)
 
@@ -47,3 +52,39 @@ class EvalHookVideoTests(unittest.TestCase):
             self.assertIn(flag, source)
         self.assertIn("AppLauncher(headless=args_cli.headless, enable_cameras=True)", source)
         self.assertIn("num_envs must be 1", source)
+
+    def test_eval_integrates_uid_video_trace_candidates_and_stale_cycles(self):
+        source = Path("eval_pointgoal_wheeled.py").read_text()
+        for token in (
+            "EpisodeVideoRecorder(", "episode_video_recorder.start_episode(",
+            "episode_video_recorder.write(", "episode_video_recorder.end_episode(",
+            "PlanningTraceWriter(", "trace_writer.write(",
+            "experiment_hook.record_candidates(", "failure_reason=\"STALE_RESULT\"",
+            "failure_reason=\"PLANNING_EXCEPTION\"",
+        ):
+            self.assertIn(token, source)
+
+    def test_candidate_and_timing_hooks_emit_unified_schema_rows(self):
+        sink = Sink(); bridge = ExperimentHookBridge(sink, {"suite_id":"s", "experiment_id":"e", "run_id":"r", "variant":"raw", "scene_label":"SPARSE", "scene_id":"x", "seed":0})
+        bridge.start_episode("ep", 0)
+        bridge.record_candidates("p", [0.8, 0.2], selected_index=0)
+        bridge.record_timing("planning", 12.5, plan_uid="p", status="OK")
+        candidate_rows = [row for table, row in sink.rows if table == "candidate_metrics"]
+        timing_rows = [row for table, row in sink.rows if table == "timing_samples"]
+        self.assertEqual(len(candidate_rows), 2)
+        self.assertTrue(candidate_rows[0]["selected"])
+        self.assertEqual(timing_rows[0]["duration_ms"], 12.5)
+
+    def test_episode_summary_aggregates_cycles_tracking_and_navigation(self):
+        sink = Sink(); bridge = ExperimentHookBridge(sink, {"suite_id":"s", "experiment_id":"e", "run_id":"r", "variant":"minco-hot", "scene_label":"DENSE", "scene_id":"x", "seed":0})
+        bridge.start_episode("ep", 0)
+        bridge.record_planning_cycle("c1", published=True, stale=False, fallback_mode="NONE", optimizer_success=True, python_validation_success=True)
+        bridge.record_planning_cycle("c2", published=False, stale=False, fallback_mode="HOLD_LAST", optimizer_success=False, python_validation_success=False)
+        bridge.record_control_step(0, "p", 0.5, 0.1, time_aligned_position_error_m=0.3, mpc_success=True)
+        bridge.end_episode(success=True, actual_path_length_m=5.0, repository_spl=0.8, episode_duration_s=12.0)
+        row = next(row for table, row in sink.rows if table == "episode_metrics")
+        self.assertEqual(row["planning_count"], 2)
+        self.assertEqual(row["hold_count"], 1)
+        self.assertEqual(row["minco_ok_count"], 1)
+        self.assertAlmostEqual(row["tracking_error_rmse_m"], 0.3)
+        self.assertEqual(row["repository_spl"], 0.8)

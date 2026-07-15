@@ -1,9 +1,11 @@
-# 阶段二完成复检
+# 阶段二复检（已被 2026-07-15 重新审计更新）
+
+旧版曾错误声称 RAW 不运行原 MPC 也满足要求。当前有效结论与证据以 `REAUDIT_06_12_MATRIX.md` 和 `FINAL_AUDIT.md` 为准。
 
 ## 09 RAW 与真实主体适配复检
 
 - `navdp_raw/` 被当作只读来源；`provenance.json` 与 `PROVENANCE.md` 固定四个源 hash、原 MPC 参数、Q/R、定速和适配边界。
-- RAW adapter 仅复制 Top-1 坐标变换、reference selection 和 success/SPL/distance 公式；不导入/运行 CasADi 求解器，不使用 MINCO MPC。
+- RAW adapter 已包含原 CasADi MPC 的可执行最小复刻，并在 eval 控制循环由 factory 明确选择；静态测试不构造或求解它。
 - `IsaacNavDPBackend` 无 Isaac/torch 顶层 import；`run()` 无显式 allow 时 fail closed。
 - eval 已增加 15 项实验 CLI、`num_envs=1` 门、动态 headless、视频/可视化独立分支和 monitor hook。
 - hook 顺序覆盖 episode start、planning cycle、有效 plan、control、episode done、reset/finally；stale/HOLD/STOP 不写新 plan。
@@ -15,7 +17,7 @@
 
 ## 10 一键编排复检
 
-- `static_real_suite.json` 产生 DENSE/SPARSE × RAW/COLD/HOT 共 6 条稳定命令。
+- `static_real_suite.json` 使用真实 USD/hash 与原 pointgoal NPY 行，产生 DENSE/SPARSE × RAW/COLD/HOT 共 6 条 eval 命令和 6 条 NavDP server 命令。
 - RAW 含 `--no-enable_minco`，COLD 为 `--enable_minco --warm-start-mode cold`，HOT 为 `--enable_minco --warm-start-mode gated`。
 - 三组共享 manifest、episode UID、seed、NavDP seed 和 headless/video/monitor 参数。
 - `--backend isaac --dry-run` 输出 `started_processes=0`；未带 dry-run 或 allow 时拒绝。
@@ -34,7 +36,7 @@
 ## 阶段二验收结果
 
 ```text
-unittest: 45 tests, PASS
+unittest: 71 tests, PASS
 compileall: PASS
 C++ build: PASS
 mock resume: PASS

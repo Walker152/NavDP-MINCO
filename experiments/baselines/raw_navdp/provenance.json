@@ -1,7 +1,7 @@
 {
   "source_repo": "NavDP repository read-only baseline",
   "source_root": "navdp_raw",
-  "copied_at": "2026-07-14",
+  "copied_at": "2026-07-15",
   "sources": [
     {"source_relative_path":"navdp_raw/eval_pointgoal_wheeled.py", "source_sha256":"1239daeb5aa1d16194efe0cdabedfe30cb53a18fd0ab1425b6e282e3dcb78f39"},
     {"source_relative_path":"navdp_raw/utils_tasks/tracking_utils.py", "source_sha256":"003e606926c03df83a93890cb555f66e1743cd3a836b23eca6dc470f9f51159a"},
@@ -9,5 +9,5 @@
     {"source_relative_path":"navdp_raw/utils_tasks/visualization_utils.py", "source_sha256":"641740ba146958a37c5e496f0b6afadf54dad3e06add44c87a09c56574299516"}
   ],
   "defaults": {"N":15, "desired_v":0.5, "v_max":0.5, "w_max":0.5, "ref_gap":3, "T":0.1, "dense_ratio":50, "Q":[10,10,0], "R":[0.02,0.15]},
-  "adaptation_notes": "Pure NumPy reference, coordinate and metric adapters. No optimizer formula, weight, speed or selection rule is changed. CasADi solve is intentionally not invoked in static tests."
+  "adaptation_notes": "The RAW arm uses experiments/baselines/raw_navdp/original_mpc.py, a minimal adapter of tracking_utils.py::MPC_Controller. Dynamics, objective, Q/R, bounds, interpolation ratio, warm-start, reference selection and IPOPT settings are unchanged. Only lazy CasADi import, input validation and the unified update/reference observation interface are added. Static tests never construct or solve CasADi."
 }

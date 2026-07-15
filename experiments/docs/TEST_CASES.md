@@ -18,5 +18,10 @@
 | TC-14 | Pairing | safe_dist 不一致 | 在统计前拒绝 |
 | TC-15 | E2E | mock suite | 生成六张 CSV、trace、校验和报告 |
 | TC-16 | Resume | 再次运行 COMPLETE suite | 重新校验后跳过所有 run |
+| TC-47～48 | RAW | factory 分流及原 reference 数值等价 | RAW 不接收 MINCO 时域样本，输出与只读来源一致 |
+| TC-49～50 | Scene | manifest 重建与 episode 注入 | USD/hash 与原 NPY 精确行一致，选中 NPY 可复现 |
+| TC-51～52 | Process | 双 conda 环境与清理 | server/eval 独立，健康检查，禁用全局 pkill |
+| TC-53～55 | Validation | 主键、RAW 语义、必需产物 | 污染数据、缺视频/trace 必须失败 |
+| TC-56～57 | Resume/Record | 中间状态恢复与 plan 诊断 | 不重跑仿真，热启动/优化字段写入统一 schema |
 
-真实仿真、视频、NavDP server、C++ Preview/Commit 和 MPC 只能在资源允许且明确授权的环境中另做测试，本地测试套件不包含这些入口。
+本地测试包含合成视频、服务命令、C++ 接口/编译和 MPC 静态等价，但不启动真实仿真、NavDP server、C++ 优化或 MPC 求解；这些运行时行为只能在资源允许且明确授权时验证。

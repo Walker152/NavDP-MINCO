@@ -27,3 +27,21 @@ class DesignerTests(unittest.TestCase):
     ]}))
     with self.assertRaisesRegex(ValueError, "gated"):
         load_suite(path)
+
+
+ def test_suite_accepts_documented_orchestration_fields_and_manifest_alias(self):
+    tmp_path = __import__('pathlib').Path(tempfile.mkdtemp())
+    manifest = tmp_path / "manifest.json"; manifest.write_text("{}")
+    path = tmp_path / "suite.json"
+    path.write_text(json.dumps({
+        "suite_id":"real", "output_root":"results", "backend":"isaac",
+        "scenario_manifest":"manifest.json", "video":{"enabled":True},
+        "monitor":{"enabled":True}, "analysis":{"enabled":True},
+        "retry":{"failed":False}, "resume":True,
+        "runs":[{"experiment_id":"EXP","variant":"raw","warm_start_mode":"cold"}],
+    }))
+    config = load_suite(path)
+    self.assertEqual(config.backend, "isaac")
+    self.assertEqual(config.manifest_path, manifest.resolve())
+    self.assertTrue(config.video["enabled"] and config.monitor["enabled"] and config.analysis["enabled"])
+    self.assertTrue(config.resume)

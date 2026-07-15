@@ -7,13 +7,14 @@ import time
 
 REQUEST_TIMEOUT_S = 5.0
 
-def navigator_reset(intrinsic=None,stop_threshold=-0.5,batch_size=1,port=8888,env_id=None):
+def navigator_reset(intrinsic=None,stop_threshold=-0.5,batch_size=1,port=8888,env_id=None,seed=None):
     print("http://localhost:%d/navigator_reset"%port)
     if env_id is None:
         url = "http://localhost:%d/navigator_reset"%port
         response = requests.post(url,json={'intrinsic':intrinsic.tolist(),
                                            'stop_threshold':stop_threshold,
-                                           'batch_size':batch_size},
+                                           'batch_size':batch_size,
+                                           'seed':seed},
                                  timeout=REQUEST_TIMEOUT_S)
     else:
         url = "http://localhost:%d/navigator_reset_env"%port
@@ -129,5 +130,4 @@ def imagegoal_step(image_goals,rgb_images,depth_images,port=8888):
     all_trajectory = json.loads(response.text)['all_trajectory']
     all_value = json.loads(response.text)['all_values']
     return np.array(trajectory),np.array(all_trajectory),np.array(all_value)
-
 

@@ -1,6 +1,6 @@
 # 测试记录
 
-测试日期：2026-07-14（Asia/Shanghai）  
+测试日期：2026-07-15（Asia/Shanghai）
 工作目录：`/home/alioth/NavDP`  
 原则：未启动 Isaac Sim / Isaac Lab / NavDP server，未进行 CUDA 推理。
 
@@ -16,7 +16,7 @@
 
 ```text
 命令: conda run -n navdp python -m unittest discover -s experiments/tests -v
-结果: Ran 15 tests in 0.023s — OK
+结果: Ran 71 tests in 40.308s — OK
 ```
 
 mock 端到端首次运行：
@@ -41,12 +41,14 @@ resume 再运行：
 
 实际生成的 SPARSE RAW vs HOT 配对示例：共同 episode 1 个，三个示例 delta 均为 0；这是 deterministic mock 的预期，仅证明配对链路可运行。
 
+重新审计补充：C++ `minco_processor`、compile test 目标和 Python 扩展完成编译但未执行；真实配置 dry-run 生成 6 个 eval 与 6 个 server 命令且 `started_processes=0`；RAW provenance 校验返回 `[]`，`navdp_raw/` 无 diff。
+
 ## 未执行
 
 - `conda activate isaaclab` 及任何真实仿真；
 - headless 摄像机和 MP4 完整性；
 - NavDP 模型服务与推理；
-- C++ MINCO 热启动 Preview/Commit；
+- C++ MINCO 热启动 Preview/Commit 的运行时行为（仅编译与静态生命周期测试）；
 - MPC 闭环与性能基准。
 
 这些项目明确保留到真实后端接入后，在受控 GPU 机器上执行。

@@ -127,13 +127,14 @@ public:
     }
     const bool committed = pipeline_.commitHistory(it->second, applied_time);
     if (committed) {
+      committed_history_uid_ = "proposal_" + std::to_string(proposal_id);
       proposals_.clear();
     }
     return committed;
   }
 
   void discardProposal(int proposal_id) { proposals_.erase(proposal_id); }
-  void resetHistory() { proposals_.clear(); pipeline_.resetHistory(); }
+  void resetHistory() { proposals_.clear(); committed_history_uid_.clear(); pipeline_.resetHistory(); }
 
 private:
   py::dict toDict(const minco_processor::MincoPipeline::Result & result, double duration) const
@@ -194,15 +195,14 @@ private:
     out["planning_state"] = result.planning_state == minco_processor::MincoPipeline::PlanningState::kColdStart ?
       "COLD_START" : "HOT_START";
     out["hot_start_accepted"] = result.planning_state == minco_processor::MincoPipeline::PlanningState::kHotStart;
-    out["hot_reject_reason"] = result.planning_state == minco_processor::MincoPipeline::PlanningState::kHotStart ?
-      "HOT_ACCEPTED" : "COLD_GATE_REJECTED";
-    out["history_plan_uid"] = py::none();
-    out["history_age_s"] = std::numeric_limits<double>::quiet_NaN();
-    out["position_error"] = std::numeric_limits<double>::quiet_NaN();
-    out["velocity_error"] = std::numeric_limits<double>::quiet_NaN();
-    out["direction_dot"] = std::numeric_limits<double>::quiet_NaN();
-    out["remaining_duration"] = std::numeric_limits<double>::quiet_NaN();
-    out["history_min_clearance"] = std::numeric_limits<double>::quiet_NaN();
+    out["hot_reject_reason"] = result.hot_reject_reason;
+    out["history_plan_uid"] = committed_history_uid_.empty() ? py::none() : py::cast(committed_history_uid_);
+    out["history_age_s"] = result.history_age_s;
+    out["position_error"] = result.position_error;
+    out["velocity_error"] = result.velocity_error;
+    out["direction_dot"] = result.direction_dot;
+    out["remaining_duration"] = result.remaining_duration;
+    out["history_min_clearance"] = result.history_min_clearance;
     out["shifted_seed_valid"] = result.shifted_seed_valid;
     out["copied_waypoints"] = result.copied_waypoints;
     out["copied_durations"] = result.copied_durations;
@@ -221,6 +221,7 @@ private:
   minco_processor::MincoPipeline::Result last_result_;
   std::map<int, minco_processor::MincoPipeline::Result> proposals_;
   int next_proposal_id_{1};
+  std::string committed_history_uid_;
 };
 
 }  // namespace

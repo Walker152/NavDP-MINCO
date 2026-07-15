@@ -270,6 +270,18 @@ class NavDPMincoAdapter:
                     "local_end_is_goal": bool(best.get("local_end_is_goal", False)),
                     "optimizer_iteration_count": int(best.get("optimizer_iteration_count", 0)),
                     "proposal_id": best.get("proposal_id"),
+                    "hot_start_accepted": bool(best.get("hot_start_accepted", False)),
+                    "hot_reject_reason": str(best.get("hot_reject_reason", "")),
+                    "history_plan_uid": best.get("history_plan_uid"),
+                    "history_age_s": float(best.get("history_age_s", np.nan)),
+                    "position_error": float(best.get("position_error", np.nan)),
+                    "velocity_error": float(best.get("velocity_error", np.nan)),
+                    "direction_dot": float(best.get("direction_dot", np.nan)),
+                    "remaining_duration": float(best.get("remaining_duration", np.nan)),
+                    "history_min_clearance": float(best.get("history_min_clearance", np.nan)),
+                    "shifted_seed_valid": bool(best.get("shifted_seed_valid", False)),
+                    "copied_waypoints": int(best.get("copied_waypoints", 0)),
+                    "copied_durations": int(best.get("copied_durations", 0)),
                 }
                 print(
                     "[NavDP-Minco] "

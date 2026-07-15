@@ -18,13 +18,17 @@ def _sha256(path):
 
 def generate_artifact_manifest(suite_dir):
     suite_dir = Path(suite_dir); rows = []
+    config_path = suite_dir / "suite_config.json"
+    suite_source = json.loads(config_path.read_text()).get("data_source", "UNKNOWN") if config_path.exists() else "UNKNOWN"
     excluded = {"artifact_manifest.json", "artifact_manifest.csv"}
     for path in sorted(item for item in suite_dir.rglob("*") if item.is_file() and item.name not in excluded and ".tmp" not in item.name):
         relative = path.relative_to(suite_dir); parts = relative.parts
         experiment = parts[1] if len(parts) > 1 and parts[0] == "experiments" else (parts[1] if len(parts) > 1 and parts[0] == "reports" and parts[1].startswith("EXP-") else "")
         scene = parts[2] if len(parts) > 2 and parts[0] == "experiments" else ""; variant = parts[3] if len(parts) > 3 and parts[0] == "experiments" else ""
         suffix = path.suffix.lower(); kind = {".csv":"table", ".npz":"trace", ".png":"plot", ".svg":"plot", ".md":"report", ".mp4":"video", ".json":"metadata"}.get(suffix, "file")
-        rows.append({"artifact_type":kind, "experiment":experiment, "scene":scene, "variant":variant, "episode_uid":"", "plan_uid":"", "path":str(relative), "sha256":_sha256(path), "size":path.stat().st_size, "data_source":"SIMULATED", "description":path.name})
+        episode_uid = path.stem if suffix == ".mp4" and parts and "videos" in parts else ""
+        plan_uid = path.stem.removeprefix("planning_trace_") if suffix == ".npz" and path.stem.startswith("planning_trace_") else ""
+        rows.append({"artifact_type":kind, "experiment":experiment, "scene":scene, "variant":variant, "episode_uid":episode_uid, "plan_uid":plan_uid, "path":str(relative), "sha256":_sha256(path), "size":path.stat().st_size, "data_source":suite_source, "description":path.name})
     reports = suite_dir / "reports"; reports.mkdir(parents=True, exist_ok=True)
     (reports / "artifact_manifest.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
     with (reports / "artifact_manifest.csv").open("w", newline="", encoding="utf-8") as stream:

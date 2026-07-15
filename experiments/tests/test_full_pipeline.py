@@ -50,6 +50,11 @@ class FullPipelineTests(unittest.TestCase):
         self.assertTrue((suite / "reports" / "failure_case_report.md").exists())
         self.assertEqual(validate_artifact_manifest(suite), [])
         self.assertIn("SIMULATED", (suite / "reports" / "suite_report.md").read_text())
+        with (suite / "reports" / "core_tables" / "table_control_navigation.csv").open() as stream:
+            control_rows = list(csv.DictReader(stream))
+        self.assertIn("success_rate", {row["metric"] for row in control_rows})
+        self.assertTrue(list((suite / "reports" / "paired").glob("*/*/paired_comparison.csv")))
+        self.assertNotIn("mock_pair", (suite / "reports" / "EXP-06_navigation" / "paired_metrics.csv").read_text())
         for run_dir in suite.glob("experiments/*/*/*/*/*"):
             if run_dir.is_dir(): self.assertTrue((run_dir / "validation" / "validation_report.json").exists())
 

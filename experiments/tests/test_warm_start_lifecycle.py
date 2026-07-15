@@ -32,3 +32,7 @@ class WarmStartLifecycleTests(unittest.TestCase):
             self.assertIn(name, source)
         cpp = Path("minco_processor/src/minco_processor/minco_pipeline.cpp").read_text()
         self.assertNotIn("if ((current.velocity - pred_vel).norm() > 1.0) {\n    return PlanningState::kHotStart;", cpp)
+        self.assertNotIn('out["history_age_s"] = std::numeric_limits<double>::quiet_NaN()', source)
+        self.assertNotIn('out["position_error"] = std::numeric_limits<double>::quiet_NaN()', source)
+        self.assertIn('out["history_age_s"] = result.history_age_s', source)
+        self.assertIn("committed_history_uid_", source)

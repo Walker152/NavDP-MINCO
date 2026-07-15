@@ -6,6 +6,8 @@ parser.add_argument(
     "--scene_dir", type=str, default="/home/alioth/NavDP/assets/scenes/cluttered_easy")
 parser.add_argument(
     "--scene_index", type=int, default=0)
+parser.add_argument("--scene-path", type=str, default=None)
+parser.add_argument("--scene-id", type=str, default=None)
 parser.add_argument(
     "--scene_scale", type=float, default=1.0)
 parser.add_argument(
@@ -64,9 +66,19 @@ parser.add_argument("--save-planning-trace", default=False, action=argparse.Bool
 parser.add_argument("--warm-start-mode", choices=("cold", "gated"), default="gated")
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--navdp-seed", type=int, default=0)
+parser.add_argument("--navdp-seeds", nargs="*", type=int, default=None)
+parser.add_argument("--raw-controller", choices=("original-navdp-mpc", "disabled"), default="disabled")
 args_cli = parser.parse_args()
 if args_cli.num_envs != 1:
     parser.error("num_envs must be 1 for experiment isolation")
+if args_cli.experiment_variant == "raw" and args_cli.raw_controller != "original-navdp-mpc":
+    parser.error("raw experiment requires --raw-controller original-navdp-mpc")
+if args_cli.experiment_variant != "raw" and args_cli.raw_controller != "disabled":
+    parser.error("MINCO experiments must disable the RAW controller")
+if args_cli.navdp_seeds is None:
+    args_cli.navdp_seeds = [args_cli.navdp_seed for _ in range(args_cli.num_episodes)]
+if len(args_cli.navdp_seeds) != args_cli.num_episodes:
+    parser.error("--navdp-seeds count must equal --num_episodes")
 app_launcher = AppLauncher(headless=args_cli.headless, enable_cameras=True)
 simulation_app = app_launcher.app
 
@@ -77,6 +89,7 @@ import numpy as np
 import imageio
 import os
 import csv
+import json
 import torch
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
@@ -104,6 +117,9 @@ from configs.tasks import *
 from utils_tasks.client_utils import navigator_close,navigator_reset,pointgoal_step
 from utils_tasks.visualization_utils import VisualizationManager
 from utils_tasks.tracking_utils import MPC_Controller
+from experiments.baselines.raw_navdp.controller_factory import create_tracking_controller, update_tracking_reference
+from experiments.baselines.raw_navdp.trajectory_adapter import camera_top1_to_world
+from experiments.integration.episode_selection import materialize_episode_init
 from utils_tasks.esdf_query_utils import query_esdf_polyline
 from utils_tasks.timing_utils import (
     StageTimer,
@@ -117,6 +133,8 @@ from utils_tasks.episode_diagnostics import EpisodeStartupDiagnostics, infer_ter
 
 experiment_writer = None
 experiment_hook = None
+trace_writer = None
+episode_video_recorder = None
 if args_cli.eval_monitor:
     if not args_cli.experiment_run_dir:
         raise ValueError("--experiment-run-dir is required when --eval-monitor is enabled")
@@ -124,14 +142,31 @@ if args_cli.eval_monitor:
     from experiments.integration.eval_hooks import ExperimentHookBridge
     from experiments.recorders.async_writer import AsyncRecordWriter
     experiment_writer = AsyncRecordWriter(args_cli.experiment_run_dir, EXPERIMENT_SCHEMAS)
-    experiment_hook = ExperimentHookBridge(experiment_writer, {
+    monitor_identity = {
         "suite_id": "real_suite", "experiment_id": "EXP-ALL_data_collection",
         "run_id": os.path.basename(args_cli.experiment_run_dir.rstrip("/")),
-        "variant": args_cli.experiment_variant, "scene_label": "UNKNOWN",
-        "scene_id": str(args_cli.scene_index), "seed": args_cli.seed,
-    })
+        "variant": args_cli.experiment_variant, "scene_label": "UNSPECIFIED",
+        "scene_id": args_cli.scene_id or str(args_cli.scene_index), "seed": args_cli.seed,
+    }
+    if args_cli.experiment_config and os.path.exists(args_cli.experiment_config):
+        with open(args_cli.experiment_config, encoding="utf-8") as config_stream:
+            run_identity = json.load(config_stream)
+        monitor_identity.update({key: run_identity[key] for key in monitor_identity if key in run_identity})
+    experiment_hook = ExperimentHookBridge(experiment_writer, monitor_identity)
     initial_uid = args_cli.episode_uids[0] if args_cli.episode_uids else f"scene_{args_cli.scene_index}_episode_0"
     experiment_hook.start_episode(initial_uid, generation=0)
+if args_cli.save_planning_trace:
+    if not args_cli.experiment_run_dir:
+        raise ValueError("--experiment-run-dir is required when --save-planning-trace is enabled")
+    from experiments.recorders.trace_writer import PlanningTraceWriter
+    trace_writer = PlanningTraceWriter(os.path.join(args_cli.experiment_run_dir, "traces"))
+if args_cli.save_video and args_cli.experiment_run_dir:
+    from experiments.recorders.video_recorder import EpisodeVideoRecorder
+    episode_video_recorder = EpisodeVideoRecorder(
+        os.path.join(args_cli.experiment_run_dir, "videos"), fps=args_cli.video_fps
+    )
+    initial_video_uid = args_cli.episode_uids[0] if args_cli.episode_uids else f"scene_{args_cli.scene_index}_episode_0"
+    episode_video_recorder.start_episode(initial_video_uid)
 
 planning_input = PlanningInput() 
 planning_output = PlanningOutput()
@@ -162,6 +197,8 @@ mpc_max_wheel_speed = (
 )
 
 def transform_navdp_local_point(point_xy, env_idx, camera_pos, camera_rot, robot_pos_w=None):
+    if not use_robot_base_frame:
+        return np.array([*camera_top1_to_world([point_xy], camera_pos[env_idx], camera_rot[env_idx])[0], 0.0])
     point_local = np.array([point_xy[0], point_xy[1], 0.0], dtype=np.float64)
     point_world = camera_pos[env_idx] + camera_rot[env_idx] @ point_local
     if use_robot_base_frame and robot_pos_w is not None:
@@ -227,6 +264,11 @@ def discard_stale_planning_result(captured_generation):
             f"[Planning] discard stale result captured_generation={captured_generation.tolist()} "
             f"current_generation={current_generation.tolist()}"
         )
+        if experiment_hook is not None and experiment_hook.episode_uid is not None:
+            experiment_hook.record_planning_cycle(
+                f"{experiment_hook.episode_uid}_stale_{time.monotonic_ns()}",
+                published=False, stale=True, fallback_mode="NONE", failure_reason="STALE_RESULT",
+            )
         mark_planning_idle()
     return stale
 
@@ -535,9 +577,65 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     fallback_mode = "HOLD_LAST" if status == "MINCO_HOLD_LAST" else "STOP" if status == "MINCO_STOP" else "NONE"
                     published = fallback_mode == "NONE" and batch_optimal_points_world[idx] is not None
                     cycle_uid = f"{experiment_hook.episode_uid}_g{int(input_episode_generation[idx])}_c{planning_iter}"
-                    experiment_hook.record_planning_cycle(cycle_uid, published=published, stale=False, fallback_mode=fallback_mode, planning_total_ms=planning_total_ms, candidate_count=len(batch_all_points_world[idx]), attempted_candidate_count=len(batch_all_points_world[idx]) if used_minco else 0)
+                    cycle_info = batch_minco_info[idx] if isinstance(batch_minco_info[idx], dict) else {}
+                    experiment_hook.record_planning_cycle(
+                        cycle_uid, published=published, stale=False, fallback_mode=fallback_mode,
+                        failure_reason=cycle_info.get("failure_reason", ""), planning_total_ms=planning_total_ms,
+                        candidate_count=len(batch_all_points_world[idx]),
+                        attempted_candidate_count=len(batch_all_points_world[idx]) if used_minco else 0,
+                        selected_candidate_index=cycle_info.get("selected_index", 0 if not used_minco else ""),
+                        optimizer_success=cycle_info.get("success", "") if used_minco else "",
+                        cpp_validation_success=cycle_info.get("cpp_validation_success", cycle_info.get("success", "")) if used_minco else "",
+                        python_validation_success=cycle_info.get("python_validation_success", cycle_info.get("success", "")) if used_minco else "",
+                        navdp_ms=planning_timing.get("navdp_step_ms", ""),
+                        minco_ms=cycle_info.get("adapter_total_ms", 0.0 if not used_minco else ""),
+                        validation_ms=cycle_info.get("python_validation_ms", ""),
+                        planning_state=cycle_info.get("planning_state", ""),
+                        hot_start_accepted=cycle_info.get("hot_start_accepted", False),
+                    )
                     if published:
-                        experiment_hook.record_plan(f"{cycle_uid}_plan", published=True, stale=False, plan_status=status)
+                        plan_uid = f"{cycle_uid}_plan"
+                        experiment_hook.record_plan(
+                            plan_uid, published=True, stale=False, plan_status=status,
+                            planning_state=cycle_info.get("planning_state", ""),
+                            hot_start_accepted=cycle_info.get("hot_start_accepted", False),
+                            hot_reject_reason=cycle_info.get("hot_reject_reason", ""),
+                            optimizer_success=cycle_info.get("success", "") if used_minco else "",
+                            python_validation_success=cycle_info.get("python_validation_success", cycle_info.get("success", "")) if used_minco else "",
+                            failure_reason=cycle_info.get("failure_reason", ""),
+                            optimizer_iteration_count=cycle_info.get("optimizer_iteration_count", ""),
+                            planning_total_ms=planning_total_ms,
+                            raw_min_clearance_m=cycle_info.get("raw_min_clearance_m", ""),
+                            raw_unsafe_ratio=cycle_info.get("raw_unsafe_ratio", ""),
+                            raw_esdf_oob_ratio=cycle_info.get("raw_esdf_oob_ratio", ""),
+                            raw_path_length_m=cycle_info.get("raw_path_length_m", ""),
+                            minco_min_clearance_m=cycle_info.get("minco_min_clearance_m", ""),
+                            minco_unsafe_ratio=cycle_info.get("minco_unsafe_ratio", ""),
+                            minco_path_length_m=cycle_info.get("minco_path_length_m", ""),
+                        )
+                        info = batch_minco_info[idx] if isinstance(batch_minco_info[idx], dict) else {}
+                        selected_index = int(info.get("selected_index", 0 if not used_minco else -1))
+                        experiment_hook.record_candidates(plan_uid, all_values_camera[idx], selected_index=selected_index)
+                        experiment_hook.record_timing("planning_total_ms", planning_total_ms, plan_uid=plan_uid)
+                        if trace_writer is not None:
+                            robot_state = np.concatenate((
+                                np.asarray(robot_pos_w[idx, :2], dtype=np.float64),
+                                np.asarray([robot_yaw_w[idx]], dtype=np.float64),
+                                np.asarray(robot_lin_vel_w[idx, :2], dtype=np.float64),
+                                np.asarray([robot_ang_vel_w[idx]], dtype=np.float64),
+                            ))
+                            trace_writer.write(cycle_uid, {
+                                "raw_path_xy": np.asarray(batch_raw_top1_world[idx], dtype=np.float64),
+                                "topk_candidates_xy": np.asarray(batch_all_points_world[idx], dtype=np.float64)[:, :, :2],
+                                "critic_values": np.asarray(all_values_camera[idx], dtype=np.float64),
+                                "selected_candidate_xy": np.asarray(
+                                    batch_selected_candidate_world[idx] if batch_selected_candidate_world[idx] is not None else batch_optimal_points_world[idx],
+                                    dtype=np.float64,
+                                )[:, :2],
+                                "minco_samples": None if batch_minco_samples[idx] is None else np.asarray(batch_minco_samples[idx], dtype=np.float64),
+                                "robot_state": robot_state,
+                                "goal": np.asarray(terminal_goals_world[idx], dtype=np.float64),
+                            })
 
             planning_iter += 1
             if planning_iter % max(1, args_cli.timing_log_interval) == 0:
@@ -548,14 +646,32 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                 
         except Exception as e:
             print(f"Planning error: {e}")
+            if experiment_hook is not None and experiment_hook.episode_uid is not None:
+                experiment_hook.record_planning_cycle(
+                    f"{experiment_hook.episode_uid}_exception_{time.monotonic_ns()}",
+                    published=False, stale=False, fallback_mode="STOP", failure_reason="PLANNING_EXCEPTION",
+                )
             with output_lock:
                 planning_output.is_planning = False
                 planning_output.planning_error = str(e)
         # Small sleep to prevent CPU overload
         time.sleep(0.1)
 
-scene_path = os.path.join(args_cli.scene_dir,os.listdir(args_cli.scene_dir)[args_cli.scene_index]) + "/"
+if args_cli.scene_path:
+    scene_path = os.path.abspath(args_cli.scene_path) + "/"
+else:
+    scene_entries = sorted(entry for entry in os.listdir(args_cli.scene_dir) if os.path.isdir(os.path.join(args_cli.scene_dir, entry)))
+    scene_path = os.path.join(args_cli.scene_dir, scene_entries[args_cli.scene_index]) + "/"
 usd_path,init_path = find_usd_path(scene_path,task='pointgoal')
+selected_episode_init_path = None
+if args_cli.scenario_manifest and args_cli.episode_uids:
+    if not args_cli.scene_id:
+        raise ValueError("--scene-id is required with scenario manifest episode selection")
+    if not args_cli.experiment_run_dir:
+        raise ValueError("--experiment-run-dir is required for deterministic episode selection")
+    selected_episode_init_path = os.path.join(args_cli.experiment_run_dir, "inputs", "selected_pointgoal_start_goal_pairs.npy")
+    materialize_episode_init(args_cli.scenario_manifest, args_cli.scene_id, args_cli.episode_uids, selected_episode_init_path)
+    init_path = selected_episode_init_path
 scene_config = PointNavSceneCfg()
 scene_config.num_envs = args_cli.num_envs
 scene_config.env_spacing = 0.0
@@ -645,7 +761,7 @@ if wheel_constraint_enabled:
     controller_kwargs["max_wheel_speed"] = mpc_max_wheel_speed
 controller = DifferentialController(**controller_kwargs)
 with navdp_http_lock:
-    algo = navigator_reset(camera_intrinsic.cpu().numpy(),batch_size=scene_config.num_envs,stop_threshold=args_cli.stop_threshold,port=args_cli.port)
+    algo = navigator_reset(camera_intrinsic.cpu().numpy(),batch_size=scene_config.num_envs,stop_threshold=args_cli.stop_threshold,port=args_cli.port,seed=args_cli.navdp_seeds[0])
 for env_idx in range(args_cli.num_envs):
     episode_diagnostics.begin_generation(env_idx, episode_generation[env_idx])
 
@@ -655,7 +771,7 @@ save_dir = "./pointgoal_%s_%s/%s/"%(algo,args_cli.scene_dir.split("/")[-1],scene
 os.makedirs(save_dir,exist_ok=True)
 
 euclidean = np.sqrt(np.square(infos['observations']['goal_pose'].cpu().numpy()[:,0:2]).sum(axis=-1))
-fps_writer = [imageio.get_writer(save_dir + "fps_%d.mp4"%i, fps=args_cli.video_fps) if args_cli.save_video else None for i in range(scene_config.num_envs)]
+fps_writer = [imageio.get_writer(save_dir + "fps_%d.mp4"%i, fps=args_cli.video_fps) if args_cli.save_video and episode_video_recorder is None else None for i in range(scene_config.num_envs)]
 video_frame_shapes = [None for _ in range(args_cli.num_envs)]
 video_writer_failed = [False for _ in range(args_cli.num_envs)]
 
@@ -838,23 +954,23 @@ try:
                                 try:
                                     if creating_mpc:
                                         control_dt = float(env.unwrapped.step_dt)
-                                        mpc[i] = MPC_Controller(
-                                            path_i,
+                                        mpc[i] = create_tracking_controller(
+                                            args_cli.experiment_variant, path_i,
                                             trajectory_samples=samples_i,
+                                            minco_controller_cls=MPC_Controller,
                                             desired_v=args_cli.speed,
                                             v_max=args_cli.speed,
                                             w_max=args_cli.mpc_max_yaw_rate,
                                             max_acc=args_cli.minco_max_acc,
                                             max_yaw_acc=args_cli.mpc_max_yaw_acc,
                                             T=control_dt,
-                                            allow_geometric_fallback=not args_cli.enable_minco,
                                             wheel_radius=DINGO_WHEEL_RADIUS,
                                             wheel_base=DINGO_WHEEL_BASE,
                                             max_wheel_speed=mpc_max_wheel_speed,
                                         )
                                     else:
-                                        reference_ok = mpc[i].update_reference(
-                                            path_i,
+                                        reference_ok = update_tracking_reference(
+                                            mpc[i], args_cli.experiment_variant, path_i,
                                             trajectory_samples=samples_i,
                                             desired_v=args_cli.speed,
                                         )
@@ -1012,6 +1128,9 @@ try:
                     if fps_writer[i] is not None and not stop_event.is_set():
                         with control_timers[i].section("video_write_ms"):
                             fps_writer[i].append_data(frame)
+                    if episode_video_recorder is not None and not stop_event.is_set():
+                        with control_timers[i].section("video_write_ms"):
+                            episode_video_recorder.write(frame)
                     timing = control_timers[i].snapshot()
                     timing["env_step_ms"] = 0.0
                     control_timing_records.append(timing)
@@ -1031,7 +1150,18 @@ try:
 
             action = torch.as_tensor(np.stack(action_list, axis=0),device="cuda:0")
             if experiment_hook is not None:
-                experiment_hook.record_control_step(frame_idx, str(current_plan_id), float(cmd_v_batch[0]), float(cmd_w_batch[0]), control_state=control_states[0])
+                reference = mpc[0].get_current_reference() if mpc[0] is not None else None
+                reference_x = float(reference[0]) if reference is not None and np.isfinite(reference[0]) else ""
+                reference_y = float(reference[1]) if reference is not None and np.isfinite(reference[1]) else ""
+                tracking_error = float(np.linalg.norm(x0[0, :2] - reference[:2])) if reference is not None and np.all(np.isfinite(reference[:2])) else ""
+                experiment_hook.record_control_step(
+                    frame_idx, str(current_plan_id), float(cmd_v_batch[0]), float(cmd_w_batch[0]),
+                    control_state=control_states[0], robot_x_m=float(x0[0, 0]), robot_y_m=float(x0[0, 1]),
+                    robot_yaw_rad=float(x0[0, 2]), reference_x_m=reference_x, reference_y_m=reference_y,
+                    cross_track_error_m=tracking_error, time_aligned_position_error_m=tracking_error,
+                    mpc_success=control_states[0] == "CONTROL_ACTIVE",
+                    mpc_solve_ms=control_timers[0].records.get("mpc_solve_ms", ""), reference_age_ms="",
+                )
             env_step_timer = StageTimer()
             with env_step_timer.section("env_step_ms"):
                 obs, rewards, dones, infos = env.step(action)
@@ -1046,12 +1176,21 @@ try:
                 if stop_event.is_set():
                     break
                 if dones[i] == True:
+                    termination_reason = infer_termination_reason(infos, i)
+                    success_flag_bool = bool(np.sqrt(np.square(goals[i]).sum()) < 1.0)
+                    executed_length = float(trajectory_length[i])
+                    repository_spl = float(np.clip(euclidean[i] / executed_length, 0, 1)) if success_flag_bool and executed_length > 0 else 0.0
                     if experiment_hook is not None:
-                        experiment_hook.end_episode(success=bool(np.sqrt(np.square(goals[i]).sum()) < 1.0), episode_index=episode_num, done_reason=infer_termination_reason(infos, i))
+                        experiment_hook.end_episode(
+                            success=success_flag_bool, episode_index=episode_num, done_reason=termination_reason,
+                            collision=termination_reason == "COLLISION", timeout=termination_reason == "TIMEOUT",
+                            actual_path_length_m=executed_length, repository_spl=repository_spl,
+                        )
+                    if episode_video_recorder is not None:
+                        episode_video_recorder.end_episode()
                     reset_in_progress.set()
                     finished_generation = int(episode_generation[i])
                     diagnostic = episode_diagnostics.snapshot(i, finished_generation)
-                    termination_reason = infer_termination_reason(infos, i)
                     print(
                         f"[EpisodeDone] env={i} generation={finished_generation} "
                         f"reason={termination_reason} "
@@ -1062,10 +1201,13 @@ try:
                         f"last_minco_status={diagnostic['last_minco_status']}"
                     )
                     episode_generation[i] += 1
-                    if experiment_hook is not None:
-                        next_index = min(episode_num + 1, len(args_cli.episode_uids) - 1) if args_cli.episode_uids else episode_num + 1
+                    if episode_num + 1 < args_cli.num_episodes:
+                        next_index = episode_num + 1
                         next_uid = args_cli.episode_uids[next_index] if args_cli.episode_uids else f"scene_{args_cli.scene_index}_episode_{next_index}"
-                        experiment_hook.reset(episode_generation[i]); experiment_hook.start_episode(next_uid, episode_generation[i])
+                        if experiment_hook is not None:
+                            experiment_hook.reset(episode_generation[i]); experiment_hook.start_episode(next_uid, episode_generation[i])
+                        if episode_video_recorder is not None:
+                            episode_video_recorder.start_episode(next_uid)
                     episode_diagnostics.begin_generation(i, episode_generation[i])
                     print(f"[EpisodeReset] env={i} generation={episode_generation[i]} state=BEGIN")
                     if mpc[i] is not None:
@@ -1081,9 +1223,14 @@ try:
                     if vis_manager[i] is not None:
                         vis_manager[i].reset()
                     invalidate_planning_state_for_reset()
-                    episode_num += 1
                     with navdp_http_lock:
-                        navigator_reset(env_id=i,port=args_cli.port)
+                        if episode_num + 1 < args_cli.num_episodes:
+                            navigator_reset(
+                                camera_intrinsic.cpu().numpy(), batch_size=scene_config.num_envs,
+                                stop_threshold=args_cli.stop_threshold, port=args_cli.port,
+                                seed=args_cli.navdp_seeds[episode_num + 1],
+                            )
+                    episode_num += 1
                     success_flag = (np.sqrt(np.square(goals[i]).sum())<1.0).astype(np.float32)
                     if fps_writer[i] is not None:
                         fps_writer[i].close()
@@ -1093,7 +1240,7 @@ try:
                                                'distance':euclidean[i]})
                     write_metrics(evaluation_metrics,save_dir+"metric.csv")
                     euclidean[i] = np.sqrt(np.square(infos['observations']['goal_pose'].cpu().numpy()[:,0:2]).sum(axis=-1))[i]
-                    if episode_num < args_cli.num_episodes and args_cli.save_video:
+                    if episode_num < args_cli.num_episodes and args_cli.save_video and episode_video_recorder is None:
                         fps_writer[i] = imageio.get_writer(save_dir + "fps_%d.mp4"%episode_num, fps=args_cli.video_fps)
                         video_frame_shapes[i] = None
                         video_writer_failed[i] = False
@@ -1126,6 +1273,11 @@ finally:
                 writer.close()
         except Exception as exc:
             print(f"[Shutdown] video writer close failed: {exc}")
+    if episode_video_recorder is not None:
+        try:
+            episode_video_recorder.close()
+        except Exception as exc:
+            print(f"[Shutdown] episode video recorder close failed: {exc}")
     if experiment_writer is not None:
         try:
             experiment_writer.close()

@@ -1,8 +1,8 @@
 {
-  "suite_id": "navdp_minco_static_real",
+  "suite_id": "navdp_minco_full_real",
   "backend": "isaac",
   "output_root": "../../results",
-  "scenario_manifest": "real_pointgoal_scenarios.json",
+  "scenario_manifest": "../../experiments/configs/real_pointgoal_scenarios.json",
   "video": {"enabled": true, "fps": 10},
   "monitor": {"enabled": true, "planning_trace": true},
   "analysis": {"enabled": true, "paired": true},

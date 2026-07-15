@@ -101,6 +101,13 @@ public:
     bool shifted_seed_valid{false};
     int copied_waypoints{0};
     int copied_durations{0};
+    std::string hot_reject_reason{"NO_HISTORY"};
+    double history_age_s{std::numeric_limits<double>::quiet_NaN()};
+    double position_error{std::numeric_limits<double>::quiet_NaN()};
+    double velocity_error{std::numeric_limits<double>::quiet_NaN()};
+    double direction_dot{std::numeric_limits<double>::quiet_NaN()};
+    double remaining_duration{std::numeric_limits<double>::quiet_NaN()};
+    double history_min_clearance{std::numeric_limits<double>::quiet_NaN()};
   };
 
   MincoPipeline();
@@ -121,7 +128,8 @@ private:
   bool isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d & p2) const;
 
   PlanningState determinePlanningState(
-    const State & current, const std::vector<Eigen::Vector3d> & sparse_path, double now) const;
+    const State & current, const std::vector<Eigen::Vector3d> & sparse_path, double now,
+    Result * diagnostics) const;
   void prepareColdStart(const State & current, Eigen::Matrix3d & start_state) const;
   void prepareHotStart(const State & current, double sample_t, Eigen::Matrix3d & start_state) const;
   void allocatePathTime(const std::vector<Eigen::Vector3d> & sparse_path,

@@ -8,7 +8,8 @@
 - 非 daemon 异步 CSV/NPZ writer、原子 JSON/NPZ 和 run 状态机；
 - mock 后端、端到端编排、逐 run 校验、resume、run/suite 报告；
 - episode 配对分析和关键配置一致性检查；
-- 15 个非仿真测试、测试案例、测试记录和真实生成的最小示例结果。
+- RAW 原始 MPC/几何的真实控制循环分流、真实 pointgoal manifest/episode 注入、双环境进程编排；
+- 71 个非仿真测试、测试案例、测试记录和 deterministic mock 示例结果。
 
 ## 示例交付
 
@@ -16,9 +17,9 @@
 - Run 示例：`results/navdp_minco_mock_smoke/experiments/EXP-01_raw_profile/SPARSE/raw/0/run_e84ab08a14dc/`
 - 配对示例：`results/navdp_minco_mock_smoke/reports/EXP-06_navigation/SPARSE/raw_vs_hot/`
 
-## 有意未改动
+## 运行边界
 
-未修改 eval 脚本、NavDP server、policy、C++ MINCO 和 Isaac 配置。原因是用户禁止本地真实仿真，而这些改造若没有真实 smoke 验证会扩大回归风险。后续按 `REAL_BACKEND_INTEGRATION.md` 通过单一 adapter 接入。
+eval、NavDP seed 接口、C++ 热启动诊断和真实后端已完成必要接入，但没有在本地启动任何真实进程。真实性能结论仍依赖 `REAL_RUN_CHECKLIST.md` 的受控 GPU smoke。
 
 ## Schema 摘要
 

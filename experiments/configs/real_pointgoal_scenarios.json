@@ -1,0 +1,27 @@
+{
+  "manifest_version": 1,
+  "manifest_id": "navdp_minco_real_pointgoal_v1",
+  "seed": 0,
+  "scenes": [
+    {
+      "scene_id": "cluttered_easy_0",
+      "scene_label": "SPARSE",
+      "scene_path": "assets/scenes/cluttered_easy/easy_0",
+      "asset_hash": "8086e4a490ec4088edbbce7f8c19762a52b9428fd7774b8665a1581a189d45fe",
+      "episodes": [
+        {"scenario_id":"REAL-REGULAR","episode_index":0,"source_episode_index":0,"seed":0,"navdp_seed":1000,"start_pose":[-11.235087927599256,-3.3672327735158483,0.7974644696184038],"goal_pose":[2.357366033429122,10.557265271577501,0.0],"selection_reason":"deterministic source row 0"},
+        {"scenario_id":"REAL-YAW","episode_index":1,"source_episode_index":1,"seed":0,"navdp_seed":1001,"start_pose":[10.37960159769439,-0.20208941513567738,2.869500380048229],"goal_pose":[-10.022339658475978,5.490296521420158,0.0],"selection_reason":"deterministic source row 1"}
+      ]
+    },
+    {
+      "scene_id": "cluttered_hard_0",
+      "scene_label": "DENSE",
+      "scene_path": "assets/scenes/cluttered_hard/hard_0",
+      "asset_hash": "7125024056f83009e74f1b5c959d3cefdc7190157ec67b9d43818c613fced9f0",
+      "episodes": [
+        {"scenario_id":"REAL-DENSE","episode_index":0,"source_episode_index":0,"seed":0,"navdp_seed":2000,"start_pose":[0.7687818222894276,-13.28799905741516,1.3098913249363044],"goal_pose":[3.9241860620188618,-1.4695993932357831,0.0],"selection_reason":"deterministic source row 0"},
+        {"scenario_id":"REAL-LONG","episode_index":1,"source_episode_index":1,"seed":0,"navdp_seed":2001,"start_pose":[-13.528358175951698,-4.383067119469857,1.2391807788578006],"goal_pose":[-7.941507833587547,11.84216681573461,0.0],"selection_reason":"deterministic source row 1"}
+      ]
+    }
+  ]
+}

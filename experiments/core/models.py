@@ -22,12 +22,18 @@ class EpisodeSpec:
     goal_pose: tuple[float, ...]
     episode_uid: str = ""
     navdp_seed: int | None = None
+    source_episode_index: int | None = None
+    selection_reason: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "start_pose", tuple(self.start_pose))
         object.__setattr__(self, "goal_pose", tuple(self.goal_pose))
         if not self.episode_uid:
-            payload = {k: v for k, v in asdict(self).items() if k not in {"episode_uid", "navdp_seed"}}
+            payload = {
+                "scene_id":self.scene_id, "scene_label":self.scene_label,
+                "scenario_id":self.scenario_id, "episode_index":self.episode_index,
+                "seed":self.seed, "start_pose":self.start_pose, "goal_pose":self.goal_pose,
+            }
             object.__setattr__(self, "episode_uid", stable_id("ep", payload))
         if self.navdp_seed is None:
             object.__setattr__(self, "navdp_seed", self.seed + 100000)
@@ -42,6 +48,7 @@ class SceneSpec:
     scene_label: str
     scene_path: str
     episodes: tuple[EpisodeSpec, ...]
+    asset_hash: str = ""
 
 
 @dataclass(frozen=True)

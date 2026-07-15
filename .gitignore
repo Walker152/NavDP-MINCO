@@ -18,6 +18,7 @@ docs/*
 *.db-shm
 *.db-wal
 *.zip
+*/docs/
 
 # Generated experiment runs and reports. Keep experiments/ source and configs tracked.
 /results/

@@ -523,7 +523,7 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   }
 
   stage_start = Clock::now();
-  result.planning_state = determinePlanningState(request.current, result.sparse_waypoints, request.now);
+  result.planning_state = determinePlanningState(request.current, result.sparse_waypoints, request.now, &result);
   const double history_sample_t = has_last_traj_ ? request.now - last_traj_.start_WT : 0.0;
   if (result.planning_state == PlanningState::kHotStart) {
     prepareHotStart(request.current, history_sample_t, result.start_state);
@@ -744,46 +744,72 @@ bool MincoPipeline::isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d
 }
 
 MincoPipeline::PlanningState MincoPipeline::determinePlanningState(
-  const State & current, const std::vector<Eigen::Vector3d> & sparse_path, double now) const
+  const State & current, const std::vector<Eigen::Vector3d> & sparse_path, double now,
+  Result * diagnostics) const
 {
-  if (!has_last_traj_) {
+  auto reject = [diagnostics](const std::string & reason) {
+    if (diagnostics) diagnostics->hot_reject_reason = reason;
     return PlanningState::kColdStart;
+  };
+  if (!has_last_traj_) {
+    return reject("NO_HISTORY");
   }
   const double t_dur = now - last_traj_.start_WT;
-  if (t_dur <= 0.0 || t_dur >= last_traj_.getTotalDuration()) {
-    return PlanningState::kColdStart;
+  const double total_duration = last_traj_.getTotalDuration();
+  if (diagnostics) {
+    diagnostics->history_age_s = t_dur;
+    diagnostics->remaining_duration = total_duration - t_dur;
+  }
+  if (t_dur <= 0.0) {
+    return reject("HOT_REJECT_TIME_ORDER");
+  }
+  if (t_dur >= total_duration) {
+    return reject("HOT_REJECT_EXPIRED");
   }
   const Eigen::Vector3d pred_pos = last_traj_.getPos(t_dur);
   const Eigen::Vector3d pred_vel = last_traj_.getVel(t_dur);
   const double tracking_error = (current.position - pred_pos).norm();
+  const double velocity_error = (current.velocity - pred_vel).norm();
+  if (diagnostics) {
+    diagnostics->position_error = tracking_error;
+    diagnostics->velocity_error = velocity_error;
+  }
   const double dynamic_error_threshold = 1.0 + 0.5 * current.velocity.head<2>().norm();
   if (tracking_error > dynamic_error_threshold) {
-    return PlanningState::kColdStart;
+    return reject("HOT_REJECT_POSITION");
   }
-  if ((current.velocity - pred_vel).norm() > 1.0) {
-    return PlanningState::kColdStart;
+  if (velocity_error > 1.0) {
+    return reject("HOT_REJECT_VELOCITY");
   }
   if (map_) {
-    const double remaining = last_traj_.getTotalDuration() - t_dur;
+    const double remaining = total_duration - t_dur;
     const double step = std::max(0.02, config_.validation_sample_dt);
     const int sample_count = std::max(1, static_cast<int>(std::ceil(remaining / step)));
+    double min_clearance = std::numeric_limits<double>::infinity();
     for (int i = 0; i <= sample_count; ++i) {
       const double sample_t = std::min(
-        last_traj_.getTotalDuration(), t_dur + remaining * static_cast<double>(i) / sample_count);
+        total_duration, t_dur + remaining * static_cast<double>(i) / sample_count);
       Eigen::Vector3d sample_pos = last_traj_.getPos(sample_t);
       sample_pos.z() = 0.0;
       const auto query = map_->query(sample_pos);
+      if (query.ok) min_clearance = std::min(min_clearance, query.distance);
       if (!query.ok || query.distance <= config_.optimizer.safe_dist) {
-        return PlanningState::kColdStart;
+        if (diagnostics && std::isfinite(min_clearance)) diagnostics->history_min_clearance = min_clearance;
+        return reject(query.ok ? "HOT_REJECT_HISTORY_UNSAFE" : "HOT_REJECT_HISTORY_OOB");
       }
     }
+    if (diagnostics && std::isfinite(min_clearance)) diagnostics->history_min_clearance = min_clearance;
   }
   if (sparse_path.size() >= 2U && pred_vel.norm() > 0.1) {
-    const Eigen::Vector3d path_dir = (sparse_path[1] - sparse_path[0]).normalized();
-    if (pred_vel.normalized().dot(path_dir) < 0.5) {
-      return PlanningState::kColdStart;
+    const Eigen::Vector3d delta = sparse_path[1] - sparse_path[0];
+    if (delta.norm() <= 1e-9) return reject("HOT_REJECT_PATH_DIRECTION_INVALID");
+    const double direction_dot = pred_vel.normalized().dot(delta.normalized());
+    if (diagnostics) diagnostics->direction_dot = direction_dot;
+    if (direction_dot < 0.5) {
+      return reject("HOT_REJECT_DIRECTION");
     }
   }
+  if (diagnostics) diagnostics->hot_reject_reason = "HOT_ACCEPTED";
   return PlanningState::kHotStart;
 }
 
