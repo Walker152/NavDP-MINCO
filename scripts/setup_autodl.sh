@@ -103,6 +103,36 @@ pip_install() {
   conda "${args[@]}" "$@"
 }
 
+retry_git() {
+  local attempt status
+  for attempt in 1 2 3; do
+    if "$@"; then
+      return 0
+    else
+      status=$?
+    fi
+    if ((attempt == 3)); then
+      return "$status"
+    fi
+    log "Git operation failed (attempt ${attempt}/3); retrying..."
+    sleep $((attempt * 2))
+  done
+}
+
+clone_isaaclab_once() {
+  local clone_tmp status
+  clone_tmp="$(mktemp -d "${ISAACLAB_DIR}.clone.XXXXXX")"
+  if git clone --branch v1.2.0 --depth 1 --single-branch \
+    https://github.com/isaac-sim/IsaacLab.git "$clone_tmp"; then
+    mv "$clone_tmp" "$ISAACLAB_DIR"
+    return 0
+  else
+    status=$?
+    rm -rf "$clone_tmp"
+    return "$status"
+  fi
+}
+
 preflight() {
   CURRENT_STAGE="preflight"
   [[ "$(uname -s)" == "Linux" ]] || die "this setup supports Linux hosts only"
@@ -146,6 +176,12 @@ preflight() {
 
 install_isaaclab_checkout() {
   CURRENT_STAGE="prepare IsaacLab v1.2.0 checkout"
+  if [[ -d "$ISAACLAB_DIR/.git" && ! -x "$ISAACLAB_DIR/isaaclab.sh" ]]; then
+    local incomplete_dir
+    incomplete_dir="${ISAACLAB_DIR}.incomplete.$(date +%Y%m%d%H%M%S)"
+    log "Preserving incomplete IsaacLab checkout at: $incomplete_dir"
+    mv "$ISAACLAB_DIR" "$incomplete_dir"
+  fi
   if [[ -e "$ISAACLAB_DIR" ]]; then
     [[ -d "$ISAACLAB_DIR/.git" ]] || die "ISAACLAB_DIR exists but is not a Git checkout: $ISAACLAB_DIR"
     [[ -x "$ISAACLAB_DIR/isaaclab.sh" ]] || die "existing IsaacLab checkout has no executable isaaclab.sh: $ISAACLAB_DIR"
@@ -153,10 +189,10 @@ install_isaaclab_checkout() {
       die "IsaacLab checkout has local changes; clean or move it before selecting v1.2.0"
     fi
     log "Reusing IsaacLab checkout: $ISAACLAB_DIR"
-    git -C "$ISAACLAB_DIR" fetch --tags --quiet
+    retry_git git -C "$ISAACLAB_DIR" fetch --depth 1 origin tag v1.2.0 --quiet
   else
     mkdir -p "$(dirname "$ISAACLAB_DIR")"
-    git clone https://github.com/isaac-sim/IsaacLab.git "$ISAACLAB_DIR"
+    retry_git clone_isaaclab_once
   fi
   git -C "$ISAACLAB_DIR" checkout --detach v1.2.0
 

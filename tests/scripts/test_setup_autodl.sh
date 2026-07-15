@@ -26,6 +26,16 @@ assert_not_contains() {
   fi
 }
 
+assert_count() {
+  local file="$1"
+  local expected_count="$2"
+  local pattern="$3"
+  local actual_count
+  actual_count="$(grep -F -c -- "$pattern" "$file" || true)"
+  [[ "$actual_count" == "$expected_count" ]] || \
+    fail "expected $expected_count occurrences of '$pattern' in $file, got $actual_count"
+}
+
 make_fake_tools() {
   local bin_dir="$1"
   mkdir -p "$bin_dir"
@@ -70,6 +80,15 @@ EOF
 set -euo pipefail
 printf 'git %s\n' "$*" >>"$FAKE_CALLS"
 if [[ "${1:-}" == "clone" ]]; then
+  count=0
+  if [[ -f "${FAKE_GIT_COUNTER:-}" ]]; then
+    count="$(cat "$FAKE_GIT_COUNTER")"
+  fi
+  if ((count < ${FAKE_GIT_CLONE_FAILURES:-0})); then
+    printf '%s\n' "$((count + 1))" >"$FAKE_GIT_COUNTER"
+    printf 'fatal: early EOF\n' >&2
+    exit 128
+  fi
   target="${@: -1}"
   mkdir -p "$target/.git"
   cat >"$target/isaaclab.sh" <<'SCRIPT'
@@ -82,6 +101,12 @@ if [[ "$*" == *"status --porcelain"* ]]; then
   exit 0
 fi
 exit 0
+EOF
+
+  cat >"$bin_dir/sleep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sleep %s\n' "$*" >>"$FAKE_CALLS"
 EOF
 
   cat >"$bin_dir/nvidia-smi" <<'EOF'
@@ -98,7 +123,7 @@ printf 'timeout %s\n' "$*" >>"$FAKE_CALLS"
 exit 0
 EOF
 
-  chmod +x "$bin_dir/conda" "$bin_dir/git" "$bin_dir/nvidia-smi" "$bin_dir/timeout" "$bin_dir/df"
+  chmod +x "$bin_dir/conda" "$bin_dir/git" "$bin_dir/nvidia-smi" "$bin_dir/timeout" "$bin_dir/df" "$bin_dir/sleep"
 }
 
 run_script() {
@@ -180,6 +205,35 @@ assert_contains "$full_dir/out" "Installing NavDP benchmark requirements"
 assert_contains "$full_dir/calls" "pip freeze"
 assert_contains "$full_dir/calls" "timeout"
 assert_contains "$full_dir/out" "Setup complete"
+
+retry_dir="$TEST_TMP/retry"
+mkdir -p "$retry_dir"
+if ! run_script "$retry_dir" \
+  ISAACLAB_DIR="$retry_dir/IsaacLab" \
+  FAKE_GIT_CLONE_FAILURES=2 \
+  FAKE_GIT_COUNTER="$retry_dir/git-counter" \
+  bash "$SCRIPT" --skip-verify >"$retry_dir/out" 2>&1; then
+  sed -n '1,240p' "$retry_dir/out" >&2
+  fail "clone retry scenario should recover"
+fi
+assert_count "$retry_dir/calls" 3 "git clone"
+assert_contains "$retry_dir/calls" "git clone --branch v1.2.0 --depth 1 --single-branch"
+assert_contains "$retry_dir/out" "Git operation failed (attempt 1/3)"
+assert_contains "$retry_dir/out" "Git operation failed (attempt 2/3)"
+[[ -x "$retry_dir/IsaacLab/isaaclab.sh" ]] || fail "retried clone was not installed atomically"
+
+incomplete_dir="$TEST_TMP/incomplete"
+mkdir -p "$incomplete_dir/IsaacLab/.git"
+if ! run_script "$incomplete_dir" \
+  ISAACLAB_DIR="$incomplete_dir/IsaacLab" \
+  bash "$SCRIPT" --skip-verify >"$incomplete_dir/out" 2>&1; then
+  sed -n '1,240p' "$incomplete_dir/out" >&2
+  fail "incomplete clone should be preserved and replaced"
+fi
+assert_contains "$incomplete_dir/out" "Preserving incomplete IsaacLab checkout"
+compgen -G "$incomplete_dir/IsaacLab.incomplete.*" >/dev/null || \
+  fail "incomplete checkout archive was not created"
+[[ -x "$incomplete_dir/IsaacLab/isaaclab.sh" ]] || fail "incomplete checkout was not replaced"
 
 custom_dir="$TEST_TMP/custom"
 mkdir -p "$custom_dir"
