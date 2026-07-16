@@ -147,8 +147,25 @@ preflight() {
   require_command timeout
   require_command tee
   require_command ldconfig
-  ldconfig -p 2>/dev/null | grep -q 'libGLU\.so\.1' || \
+  local linker_cache
+  linker_cache="$(ldconfig -p 2>/dev/null)"
+  grep -Fq 'libGLU.so.1' <<<"$linker_cache" || \
     die "required system library libGLU.so.1 not found; install it with: apt-get update && apt-get install -y libglu1-mesa"
+  grep -Fq 'libSM.so.6' <<<"$linker_cache" || \
+    die "required system library libSM.so.6 not found; install it with: apt-get update && apt-get install -y libsm6"
+  grep -Fq 'libXt.so.6' <<<"$linker_cache" || \
+    die "required system library libXt.so.6 not found; install it with: apt-get update && apt-get install -y libxt6"
+  command -v vulkaninfo >/dev/null 2>&1 || \
+    die "required command not found: vulkaninfo; install it with: apt-get update && apt-get install -y vulkan-tools"
+  local vulkan_summary
+  if ! vulkan_summary="$(timeout 30 vulkaninfo --summary 2>&1)"; then
+    printf '%s\n' "$vulkan_summary" >&2
+    die "NVIDIA Vulkan validation failed"
+  fi
+  if ! grep -Eiq 'deviceName[[:space:]]*=.*NVIDIA' <<<"$vulkan_summary"; then
+    printf '%s\n' "$vulkan_summary" >&2
+    die "NVIDIA Vulkan device unavailable; recreate the container with NVIDIA_DRIVER_CAPABILITIES including graphics (or all); CPU llvmpipe is not supported"
+  fi
   validate_env_name "$NAVDP_ENV_NAME"
   validate_env_name "$ISAACLAB_ENV_NAME"
   [[ "$NAVDP_ENV_NAME" != "$ISAACLAB_ENV_NAME" ]] || die "NavDP and IsaacLab environment names must differ"

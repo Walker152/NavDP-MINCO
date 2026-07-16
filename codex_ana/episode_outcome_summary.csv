@@ -1,0 +1,4 @@
+variant,episodes,success,collision,timeout,episodes_with_active_zero,nonpositive_path_length,done_reasons
+minco-cold,20,1,0,0,0,13,"[[""UNKNOWN"", 20]]"
+minco-hot,20,2,0,0,0,11,"[[""UNKNOWN"", 20]]"
+raw,20,0,0,0,1,0,"[[""UNKNOWN"", 20]]"

@@ -1,0 +1,13 @@
+dataset,field,rows,finite,finite_rate
+plans,raw_min_clearance_m,1055,0,0.0
+plans,raw_unsafe_ratio,1055,0,0.0
+plans,raw_curvature_tv_1pm,1055,0,0.0
+plans,actual_speed_mean_mps,1055,0,0.0
+plans,actual_acc_rms_mps2,1055,0,0.0
+plans,actual_jerk_rms_mps3,1055,0,0.0
+plans,actual_yaw_rate_rms_radps,1055,0,0.0
+plans,minco_min_clearance_m,1055,0,0.0
+controls,cross_track_error_m,4892,3709,0.7581766148814391
+controls,time_aligned_position_error_m,4892,3709,0.7581766148814391
+controls,mpc_solve_ms,4892,3709,0.7581766148814391
+controls,reference_age_ms,4892,0,0.0

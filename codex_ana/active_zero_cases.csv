@@ -1,0 +1,2 @@
+variant,episode_uid,active_samples,active_zero_samples,first_zero_frame,last_zero_frame,max_cross_track_error_m
+raw,ep_bbd803a033f9358b,40,31,514,544,0.10387875522568815

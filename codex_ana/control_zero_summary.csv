@@ -1,0 +1,4 @@
+variant,samples,zero_cmd_samples,zero_cmd_rate,active_samples,active_zero_both,active_zero_both_rate,active_zero_v,active_zero_v_rate,control_states
+minco-cold,1368,592,0.4327485380116959,776,0,0.0,0,0.0,"[[""CONTROL_ACTIVE"", 776], [""MINCO_STOP"", 278], [""WAITING_PLAN"", 260], [""RESETTING"", 54]]"
+minco-hot,1880,497,0.2643617021276596,1383,0,0.0,92,0.06652205350686913,"[[""CONTROL_ACTIVE"", 1383], [""WAITING_PLAN"", 230], [""MINCO_STOP"", 213], [""RESETTING"", 54]]"
+raw,1644,125,0.07603406326034064,1550,31,0.02,31,0.02,"[[""CONTROL_ACTIVE"", 1550], [""RESETTING"", 54], [""WAITING_PLAN"", 40]]"

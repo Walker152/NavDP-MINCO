@@ -1,0 +1,8 @@
+variant,failure_category,candidate_attempts
+minco-cold,OPTIMIZER_FAILED,4
+minco-cold,PY_ESDF_UNSAFE,10
+minco-cold,VALIDATION_FAILED,94
+minco-hot,OPTIMIZER_FAILED,4
+minco-hot,PY_ESDF_UNSAFE,18
+minco-hot,VALIDATION_FAILED,110
+minco-hot,invalid_candidate,14
