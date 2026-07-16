@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import subprocess
 import hashlib
 import os
@@ -128,8 +129,10 @@ class IsaacNavDPBackend:
         if not launcher.is_file():
             raise FileNotFoundError(f"IsaacLab launcher not found: {launcher}")
         run_dir = Path(command[command.index("--experiment-run-dir") + 1])
+        run_config = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
+        timeout_s = float(run_config["timeout_s"])
         server_command = self.build_server_command(run_dir, run.run_id, run.seed)
         return self.supervisor_factory().run_pair(
             server_command, command, run_dir, self.repo_root,
-            port=self.navdp_port, progress_callback=progress_callback,
+            port=self.navdp_port, timeout_s=timeout_s, progress_callback=progress_callback,
         )

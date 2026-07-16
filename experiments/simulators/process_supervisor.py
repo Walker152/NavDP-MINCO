@@ -62,14 +62,31 @@ class ProcessSupervisor:
             resource_monitor.start()
             self._wait_health(f"http://127.0.0.1:{port}/health")
             evaluation = self._launch("isaac_eval", eval_command, Path(run_dir) / "logs", cwd)
+            eval_stdout = Path(run_dir) / "logs" / "isaac_eval.stdout.log"
             deadline = time.monotonic() + float(timeout_s)
             while True:
-                if progress_callback is not None: progress_callback(self._completed_episode_count(run_dir))
+                if progress_callback is not None:
+                    log_age_s = (
+                        max(0.0, time.time() - eval_stdout.stat().st_mtime)
+                        if eval_stdout.exists() else None
+                    )
+                    progress_callback(
+                        self._completed_episode_count(run_dir),
+                        process_id=evaluation.pid,
+                        log_age_s=log_age_s,
+                    )
                 return_code = evaluation.poll()
                 if return_code is not None: break
-                if time.monotonic() >= deadline: raise subprocess.TimeoutExpired(eval_command, timeout_s)
+                if time.monotonic() >= deadline:
+                    completed = self._completed_episode_count(run_dir)
+                    raise TimeoutError(
+                        f"Isaac eval timed out after {timeout_s:.0f}s; "
+                        f"completed_episodes={completed}; pid={evaluation.pid}; "
+                        f"run_dir={run_dir}"
+                    )
                 time.sleep(0.5)
-            if progress_callback is not None: progress_callback(self._completed_episode_count(run_dir))
+            if progress_callback is not None:
+                progress_callback(self._completed_episode_count(run_dir), process_id=evaluation.pid)
             if return_code != 0:
                 raise RuntimeError(f"Isaac eval exited with code {return_code}")
             return return_code

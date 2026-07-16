@@ -25,13 +25,22 @@ from experiments.orchestrators.progress import SuiteProgressReporter
 def _run_config(run, scene, episodes, backend_name, data_source, manifest_id, video_required=None, trace_required=None, parameter_overrides=None):
     parameters = effective_parameters(video_required if video_required is not None else backend_name == "isaac", parameter_overrides)
     controller_parameters = parameters["raw_mpc"] if run.variant == "raw" else parameters["minco_mpc"]
+    episode_count = max(1, len(episodes))
+    timeout_per_episode_s = 240.0 if run.variant == "raw" else 600.0
+    run_timeout_s = max(1800.0, timeout_per_episode_s * episode_count)
     return {
         **asdict(run), "backend":backend_name, "data_source":data_source, "manifest_id":manifest_id,
         "scene_path":scene.scene_path, "asset_hash":scene.asset_hash,
         "episode_uids":[episode.episode_uid for episode in episodes],
         "episodes":[episode.as_dict() for episode in episodes],
         "speed_mps":controller_parameters.get("desired_v_mps", controller_parameters.get("desired_v")), "max_yaw_rate_radps":controller_parameters.get("w_max_radps", controller_parameters.get("w_max")), "optimization_safe_dist":parameters["minco"]["optimization_safe_distance_m"], "validation_safe_dist":parameters["minco"]["validation_safe_distance_m"],
-        "timeout_s":1800.0, "video_required":backend_name == "isaac" if video_required is None else bool(video_required),
+        "timeout_s":run_timeout_s,
+        "timeout_policy":{
+            "minimum_s":1800.0,
+            "per_episode_s":timeout_per_episode_s,
+            "episode_count":episode_count,
+        },
+        "video_required":backend_name == "isaac" if video_required is None else bool(video_required),
         "trace_required":backend_name == "isaac" if trace_required is None else bool(trace_required),
         "raw_controller":"original-navdp-mpc" if backend_name == "isaac" and run.variant == "raw" else "disabled",
         "effective_parameters":parameters,
