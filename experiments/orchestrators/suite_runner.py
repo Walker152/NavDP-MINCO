@@ -30,7 +30,7 @@ def _run_config(run, scene, episodes, backend_name, data_source, manifest_id, vi
         "scene_path":scene.scene_path, "asset_hash":scene.asset_hash,
         "episode_uids":[episode.episode_uid for episode in episodes],
         "episodes":[episode.as_dict() for episode in episodes],
-        "speed_mps":controller_parameters.get("desired_v_mps", controller_parameters.get("desired_v")), "max_yaw_rate_radps":controller_parameters.get("w_max_radps", controller_parameters.get("w_max")), "safe_dist":parameters["minco"]["safe_distance_m"],
+        "speed_mps":controller_parameters.get("desired_v_mps", controller_parameters.get("desired_v")), "max_yaw_rate_radps":controller_parameters.get("w_max_radps", controller_parameters.get("w_max")), "optimization_safe_dist":parameters["minco"]["optimization_safe_distance_m"], "validation_safe_dist":parameters["minco"]["validation_safe_distance_m"],
         "timeout_s":1800.0, "video_required":backend_name == "isaac" if video_required is None else bool(video_required),
         "trace_required":backend_name == "isaac" if trace_required is None else bool(trace_required),
         "raw_controller":"original-navdp-mpc" if backend_name == "isaac" and run.variant == "raw" else "disabled",

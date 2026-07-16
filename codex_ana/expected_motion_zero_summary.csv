@@ -1,0 +1,4 @@
+variant,samples,planned_velocity_observable_samples,planned_velocity_coverage,expected_motion_zero_samples,expected_motion_zero_rate,detected_stall_samples,episodes_with_expected_motion_zero,evidence_status
+minco-cold,1368,0,0.0,0,nan,0,0,LEGACY_DATA_MISSING_PLANNED_V
+minco-hot,1880,0,0.0,0,nan,0,0,LEGACY_DATA_MISSING_PLANNED_V
+raw,1644,0,0.0,0,nan,0,0,LEGACY_DATA_MISSING_PLANNED_V

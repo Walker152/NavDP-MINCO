@@ -87,7 +87,14 @@ class IsaacNavDPBackend:
         command.extend(["--raw-controller", "original-navdp-mpc" if run.variant == "raw" else "disabled"])
         minco = effective["minco"]; esdf = effective["esdf"]; video = effective["video"]
         command.extend([
-            "--minco_top_k", str(minco["top_k"]), "--minco_safe_dist", str(minco["safe_distance_m"]),
+            "--minco_initial_top_k", str(minco["initial_top_k"]),
+            "--minco_max_top_k", str(minco["max_top_k"]),
+            "--minco_candidate_time_budget_ms", str(minco["candidate_time_budget_ms"]),
+            "--minco_optimization_safe_dist", str(minco["optimization_safe_distance_m"]),
+            "--minco_validation_safe_dist", str(minco["validation_safe_distance_m"]),
+            "--minco_path_min_length", str(minco["path_min_length_m"]),
+            "--minco_path_max_start_gap", str(minco["path_max_start_gap_m"]),
+            "--minco_path_max_reversal_angle", str(minco["path_max_reversal_angle_rad"]),
             "--minco_sample_dt", str(minco["sample_dt_s"]), "--minco_max_vel", str(minco["max_velocity_mps"]),
             "--minco_max_acc", str(minco["max_acceleration_mps2"]), "--minco_max_iterations", str(minco["max_iterations"]),
             "--minco_penalty_weight_pos", str(minco["penalty_weight_pos"]), "--minco_penalty_weight_vel", str(minco["penalty_weight_vel"]),

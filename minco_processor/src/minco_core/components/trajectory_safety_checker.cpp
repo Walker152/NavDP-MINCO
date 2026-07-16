@@ -31,17 +31,33 @@ bool TrajectorySafetyChecker::checkPoint(const Eigen::Vector3d & pos) const
 
 bool TrajectorySafetyChecker::checkTrajectory(const geometry_utils::Trajectory & traj) const
 {
-  if (!dynamic_query_) {
-    return false;
-  }
+  return inspectTrajectory(traj).safe;
+}
 
+TrajectorySafetyReport TrajectorySafetyChecker::inspectTrajectory(
+  const geometry_utils::Trajectory & traj) const
+{
+  TrajectorySafetyReport report;
+  if (!dynamic_query_) {
+    return report;
+  }
   const double dur = traj.getTotalDuration();
   for (double t = 0.0; t <= dur; t += sample_dt_) {
-    if (!checkPoint(traj.getPos(t))) {
-      return false;
+    const auto query = dynamic_query_->query(traj.getPos(t));
+    if (!query.ok || !std::isfinite(query.distance)) {
+      ++report.out_of_bounds_count;
+      report.reason = "VALIDATION_ESDF_OOB";
+      return report;
+    }
+    report.min_clearance = std::min(report.min_clearance, query.distance);
+    if (query.distance <= safe_dist_) {
+      report.reason = "VALIDATION_CLEARANCE";
+      return report;
     }
   }
-  return true;
+  report.safe = true;
+  report.reason = "NONE";
+  return report;
 }
 
 double TrajectorySafetyChecker::getDistance(const Eigen::Vector3d & pos) const

@@ -7,8 +7,14 @@ from experiments.baselines.raw_navdp.original_mpc import ORIGINAL_MPC_SPEC
 
 EFFECTIVE_PARAMETERS = {
     "minco": {
-        "top_k": 2,
-        "safe_distance_m": 0.40,
+        "initial_top_k": 2,
+        "max_top_k": 4,
+        "candidate_time_budget_ms": 1500.0,
+        "optimization_safe_distance_m": 0.45,
+        "validation_safe_distance_m": 0.40,
+        "path_min_length_m": 0.20,
+        "path_max_start_gap_m": 0.50,
+        "path_max_reversal_angle_rad": 2.6179938779914944,
         "sample_dt_s": 0.05,
         "max_velocity_mps": 1.0,
         "max_acceleration_mps2": 1.0,

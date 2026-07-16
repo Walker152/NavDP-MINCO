@@ -5,12 +5,51 @@ import numpy as np
 from utils_tasks.esdf_query_utils import EsdfGridView
 
 
+def preprocess_guide_path(candidate, position, min_length, max_start_gap, max_reversal_angle):
+    path = np.asarray(candidate, dtype=np.float64)
+    position = np.asarray(position, dtype=np.float64).reshape(-1)
+    if path.ndim != 2 or path.shape[0] < 2 or path.shape[1] < 2:
+        return {"valid": False, "reason": "INVALID_PATH_SHAPE", "path": None}
+    if not np.all(np.isfinite(path)) or position.size < 2 or not np.all(np.isfinite(position[:2])):
+        return {"valid": False, "reason": "NONFINITE_PATH", "path": None}
+    path = path[:, :3] if path.shape[1] >= 3 else np.column_stack((path[:, :2], np.zeros(len(path))))
+    path[:, 2] = 0.0
+    keep = np.r_[True, np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1) > 1e-4]
+    path = path[keep]
+    if len(path) < 2:
+        return {"valid": False, "reason": "PATH_TOO_SHORT", "path": None}
+    nearest = int(np.argmin(np.linalg.norm(path[:, :2] - position[:2], axis=1)))
+    if np.linalg.norm(path[nearest, :2] - position[:2]) > float(max_start_gap):
+        return {"valid": False, "reason": "START_DISCONNECTED", "path": None}
+    path = path[nearest:]
+    robot = np.array([position[0], position[1], 0.0], dtype=np.float64)
+    if np.linalg.norm(path[0, :2] - robot[:2]) > 1e-4:
+        path = np.vstack((robot, path))
+    segments = np.diff(path[:, :2], axis=0)
+    lengths = np.linalg.norm(segments, axis=1)
+    if lengths.sum() < float(min_length):
+        return {"valid": False, "reason": "PATH_TOO_SHORT", "path": None}
+    for first, second, l1, l2 in zip(segments[:-1], segments[1:], lengths[:-1], lengths[1:]):
+        if l1 <= 1e-6 or l2 <= 1e-6:
+            continue
+        angle = np.arccos(np.clip(np.dot(first, second) / (l1 * l2), -1.0, 1.0))
+        if angle > float(max_reversal_angle):
+            return {"valid": False, "reason": "PATH_REVERSAL", "path": None}
+    return {"valid": True, "reason": "NONE", "path": path}
+
+
 class NavDPMincoAdapter:
     def __init__(
         self,
         esdf: dict,
-        safe_dist=0.30,
-        top_k=4,
+        optimization_safe_dist=0.45,
+        validation_safe_dist=0.40,
+        initial_top_k=2,
+        max_top_k=4,
+        candidate_time_budget_ms=1500.0,
+        path_min_length=0.20,
+        path_max_start_gap=0.50,
+        path_max_reversal_angle=np.deg2rad(150.0),
         sample_dt=0.05,
         speed=0.5,
         max_vel=None,
@@ -28,8 +67,16 @@ class NavDPMincoAdapter:
     ):
         self.esdf = esdf
         self._esdf_grid = EsdfGridView.from_mapping(esdf)
-        self.safe_dist = float(safe_dist)
-        self.top_k = max(1, int(top_k))
+        self.optimization_safe_dist = float(optimization_safe_dist)
+        self.validation_safe_dist = float(validation_safe_dist)
+        if self.optimization_safe_dist < self.validation_safe_dist:
+            raise ValueError("optimization_safe_dist must be >= validation_safe_dist")
+        self.initial_top_k = max(1, int(initial_top_k))
+        self.max_top_k = max(self.initial_top_k, int(max_top_k))
+        self.candidate_time_budget_ms = float(candidate_time_budget_ms)
+        self.path_min_length = float(path_min_length)
+        self.path_max_start_gap = float(path_max_start_gap)
+        self.path_max_reversal_angle = float(path_max_reversal_angle)
         self.sample_dt = float(sample_dt)
         self.speed = float(speed)
         self.max_vel = float(self.speed if max_vel is None else max_vel)
@@ -60,7 +107,8 @@ class NavDPMincoAdapter:
                 self.processor.configure(
                     max_vel=self.max_vel,
                     max_acc=self.max_acc,
-                    safe_dist=self.safe_dist,
+                    optimization_safe_dist=self.optimization_safe_dist,
+                    validation_safe_dist=self.validation_safe_dist,
                     sample_dt=self.sample_dt,
                     max_iterations=self.max_iterations,
                     max_yaw_rate=self.max_yaw_rate,
@@ -109,11 +157,19 @@ class NavDPMincoAdapter:
             yaw_rate = float(state.get("yaw_rate", 0.0))
             terminal_goal = self._as_terminal_goal(terminal_goals_world[env_idx])
             order = self._candidate_order(critic_values[env_idx], len(candidates_world[env_idx]))
-            candidate_indices = order[:min(self.top_k, len(order))]
+            candidate_indices = order[:min(self.max_top_k, len(order))]
             for rank, selected_idx in enumerate(candidate_indices):
-                candidate = self._as_guide_path(candidates_world[env_idx][selected_idx])
-                if candidate is None:
-                    failures.append(f"idx={selected_idx}: invalid_candidate")
+                if rank >= self.initial_top_k and (time.perf_counter() - start_time) * 1000.0 >= self.candidate_time_budget_ms:
+                    failures.append("CANDIDATE_TIME_BUDGET_EXHAUSTED")
+                    break
+                screened = preprocess_guide_path(
+                    candidates_world[env_idx][selected_idx], position,
+                    self.path_min_length, self.path_max_start_gap, self.path_max_reversal_angle,
+                )
+                candidate = screened["path"]
+                if not screened["valid"]:
+                    reason = screened["reason"]
+                    failures.append(f"idx={selected_idx}: {reason}")
                     candidate_timings.append({
                         "candidate_rank": int(rank),
                         "selected_index": int(selected_idx),
@@ -122,7 +178,7 @@ class NavDPMincoAdapter:
                         "success": False,
                         "objective": float("inf"),
                         "min_esdf": float("nan"),
-                        "failure_reason": "invalid_candidate",
+                        "failure_reason": reason,
                     })
                     continue
                 candidate_call_start = time.perf_counter()
@@ -182,11 +238,11 @@ class NavDPMincoAdapter:
                     candidate_timings[-1]["failure_reason"] = "invalid_waypoints"
                     continue
                 py_min_esdf = self._query_min_esdf(waypoints)
-                if not np.isfinite(py_min_esdf) or py_min_esdf <= self.safe_dist:
+                if not np.isfinite(py_min_esdf) or py_min_esdf <= self.validation_safe_dist:
                     if result.get("proposal_id") is not None and hasattr(self.processor, "discard_proposal"):
                         self.processor.discard_proposal(int(result["proposal_id"]))
                     unsafe_reason = (
-                        f"PY_ESDF_UNSAFE py_min={py_min_esdf:.3f} safe={self.safe_dist:.3f}"
+                        f"PY_ESDF_UNSAFE py_min={py_min_esdf:.3f} safe={self.validation_safe_dist:.3f}"
                     )
                     failures.append(f"idx={selected_idx}: {unsafe_reason}")
                     candidate_timings[-1]["success"] = False
@@ -239,7 +295,7 @@ class NavDPMincoAdapter:
                     "waypoints": np.asarray(best["waypoints"], dtype=np.float64)[:, :2],
                     "samples": samples_np,
                     "selected_index": int(best["selected_index"]),
-                    "configured_top_k": int(self.top_k),
+                    "configured_top_k": int(self.max_top_k),
                     "attempted_candidate_count": int(len(candidate_timings)),
                     "attempted_candidate_indices": [
                         int(item["selected_index"]) for item in candidate_timings
@@ -248,7 +304,9 @@ class NavDPMincoAdapter:
                     "objective": float(best.get("objective", np.inf)),
                     "min_esdf": float(best.get("min_esdf", np.nan)),
                     "py_min_esdf": float(best.get("py_min_esdf", np.nan)),
-                    "safe_dist": self.safe_dist,
+                    "optimization_safe_dist": self.optimization_safe_dist,
+                    "validation_safe_dist": self.validation_safe_dist,
+                    "validation_failure_reason": str(best.get("validation_failure_reason", "NONE")),
                     "failure_reason": best.get("failure_reason", "NONE"),
                     "fallback": False,
                     "fallback_mode": "NONE",
@@ -327,7 +385,7 @@ class NavDPMincoAdapter:
             "waypoints": None,
             "samples": None,
             "selected_index": -1,
-            "configured_top_k": int(self.top_k),
+            "configured_top_k": int(self.max_top_k),
             "attempted_candidate_count": int(len(candidate_timings or [])),
             "attempted_candidate_indices": [
                 int(item["selected_index"]) for item in (candidate_timings or [])
@@ -336,7 +394,9 @@ class NavDPMincoAdapter:
             "objective": float("inf"),
             "min_esdf": float("nan"),
             "py_min_esdf": float("nan"),
-            "safe_dist": self.safe_dist,
+            "optimization_safe_dist": self.optimization_safe_dist,
+            "validation_safe_dist": self.validation_safe_dist,
+            "validation_failure_reason": reason,
             "failure_reason": reason,
             "fallback": False,
             "fallback_mode": "HOLD_LAST_OR_STOP",

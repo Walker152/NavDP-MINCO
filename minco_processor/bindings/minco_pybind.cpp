@@ -23,11 +23,12 @@ class MincoProcessorPy
 public:
   MincoProcessorPy()
   {
-    configure(2.0, 4.0, 0.3, 0.05, 64, 0.5, 1000.0, 1000.0, 10000.0, 20.0, 0.01, 100.0);
+    configure(2.0, 4.0, 0.45, 0.4, 0.05, 64, 0.5, 1000.0, 1000.0, 10000.0, 20.0, 0.01, 100.0);
   }
 
   void configure(
-    double max_vel, double max_acc, double safe_dist, double sample_dt, int max_iterations,
+    double max_vel, double max_acc, double optimization_safe_dist, double validation_safe_dist,
+    double sample_dt, int max_iterations,
     double max_yaw_rate, double penalty_weight_pos, double penalty_weight_vel,
     double penalty_weight_acc, double penalty_weight_attractor, double time_weight,
     double time_barrier_weight)
@@ -36,7 +37,8 @@ public:
     config.sample_dt = sample_dt;
     config.validation_sample_dt = sample_dt;
     config.safety_sample_dt = sample_dt;
-    config.optimizer.safe_dist = safe_dist;
+    config.optimizer.safe_dist = optimization_safe_dist;
+    config.validation_safe_dist = validation_safe_dist;
     config.optimizer.max_vel = max_vel;
     config.optimizer.max_acc = max_acc;
     config.optimizer.max_iterations = max_iterations;
@@ -207,6 +209,11 @@ private:
     out["copied_waypoints"] = result.copied_waypoints;
     out["copied_durations"] = result.copied_durations;
     out["optimizer_iteration_count"] = result.optimizer_iteration_count;
+    out["optimization_safe_dist"] = result.optimization_safe_dist;
+    out["validation_safe_dist"] = result.validation_safe_dist;
+    out["validation_min_clearance"] = result.validation_min_clearance;
+    out["validation_oob_count"] = result.validation_oob_count;
+    out["validation_failure_reason"] = result.validation_failure_reason;
 
     Eigen::MatrixXd sparse_waypoints(static_cast<int>(result.sparse_waypoints.size()), 3);
     for (int i = 0; i < sparse_waypoints.rows(); ++i) {
@@ -233,7 +240,8 @@ PYBIND11_MODULE(_minco_processor, m)
     .def("configure", &MincoProcessorPy::configure,
       py::arg("max_vel"),
       py::arg("max_acc"),
-      py::arg("safe_dist"),
+      py::arg("optimization_safe_dist"),
+      py::arg("validation_safe_dist"),
       py::arg("sample_dt"),
       py::arg("max_iterations"),
       py::arg("max_yaw_rate"),

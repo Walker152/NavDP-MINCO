@@ -439,7 +439,7 @@ void MincoPipeline::setConfig(const Config & config)
   optimizer_ = std::make_unique<minco_planner::MincoOptimizer>(config_.optimizer);
   yaw_optimizer_ = std::make_unique<traj_opt::YawTrajOpt>(config_.max_yaw_rate);
   safety_checker_ = std::make_unique<minco_planner::TrajectorySafetyChecker>();
-  safety_checker_->configure(config_.optimizer.safe_dist, config_.safety_sample_dt);
+  safety_checker_->configure(config_.validation_safe_dist, config_.safety_sample_dt);
   setMap(map_);
 }
 
@@ -484,6 +484,8 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   using Clock = std::chrono::steady_clock;
 
   Result result;
+  result.optimization_safe_dist = config_.optimizer.safe_dist;
+  result.validation_safe_dist = config_.validation_safe_dist;
   const auto pipeline_start = Clock::now();
   auto elapsedMs = [](const Clock::time_point & start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
@@ -630,9 +632,9 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     return finish();
   }
   stage_start = Clock::now();
-  if (!validateTrajectory(result.trajectory, result.end_state.col(0))) {
+  if (!validateTrajectory(result.trajectory, result.end_state.col(0), &result)) {
     result.timing_ms["validate_ms"] = elapsedMs(stage_start);
-    result.failure_reason = "VALIDATION_FAILED";
+    result.failure_reason = result.validation_failure_reason;
     return finish();
   }
   result.timing_ms["validate_ms"] = elapsedMs(stage_start);
@@ -736,7 +738,7 @@ bool MincoPipeline::isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d
     p.z() = 0.0;
 
     const auto query = map_->query(p);
-    if (!query.ok || query.distance <= config_.optimizer.safe_dist) {
+    if (!query.ok || query.distance <= config_.validation_safe_dist) {
       return false;
     }
   }
@@ -793,7 +795,7 @@ MincoPipeline::PlanningState MincoPipeline::determinePlanningState(
       sample_pos.z() = 0.0;
       const auto query = map_->query(sample_pos);
       if (query.ok) min_clearance = std::min(min_clearance, query.distance);
-      if (!query.ok || query.distance <= config_.optimizer.safe_dist) {
+      if (!query.ok || query.distance <= config_.validation_safe_dist) {
         if (diagnostics && std::isfinite(min_clearance)) diagnostics->history_min_clearance = min_clearance;
         return reject(query.ok ? "HOT_REJECT_HISTORY_UNSAFE" : "HOT_REJECT_HISTORY_OOB");
       }
@@ -934,11 +936,18 @@ void MincoPipeline::allocatePathTime(const std::vector<Eigen::Vector3d> & sparse
 }
 
 bool MincoPipeline::validateTrajectory(
-  const geometry_utils::Trajectory & trajectory, const Eigen::Vector3d & expected_end_pos) const
+  const geometry_utils::Trajectory & trajectory, const Eigen::Vector3d & expected_end_pos,
+  Result * diagnostics) const
 {
+  auto reject = [diagnostics](const std::string & reason) {
+    if (diagnostics) {
+      diagnostics->validation_failure_reason = reason;
+    }
+    return false;
+  };
   const double dur = trajectory.getTotalDuration();
   if (!(std::isfinite(dur) && dur > 1e-6)) {
-    return false;
+    return reject("VALIDATION_INVALID_DURATION");
   }
   const double vmax = config_.optimizer.max_vel;
   const double amax = config_.optimizer.max_acc;
@@ -948,15 +957,34 @@ bool MincoPipeline::validateTrajectory(
   for (double t = 0.0; t <= dur; t += dt) {
     const Eigen::Vector3d v = trajectory.getVel(t);
     const Eigen::Vector3d a = trajectory.getAcc(t);
-    if (!(v.allFinite() && a.allFinite()) || v.norm() > vmax_severe || a.norm() > amax_severe) {
-      return false;
+    if (!(v.allFinite() && a.allFinite())) {
+      return reject("VALIDATION_NONFINITE_DYNAMICS");
+    }
+    if (v.norm() > vmax_severe) {
+      return reject("VALIDATION_VELOCITY_LIMIT");
+    }
+    if (a.norm() > amax_severe) {
+      return reject("VALIDATION_ACCELERATION_LIMIT");
     }
   }
   const Eigen::Vector3d end_pos = trajectory.getPos(dur);
   if (!end_pos.allFinite() || (end_pos - expected_end_pos).norm() > config_.traj_goal_tolerance) {
-    return false;
+    return reject(end_pos.allFinite() ? "VALIDATION_GOAL_TOLERANCE" : "VALIDATION_NONFINITE_END");
   }
-  return safety_checker_ ? safety_checker_->checkTrajectory(trajectory) : true;
+  if (safety_checker_) {
+    const auto report = safety_checker_->inspectTrajectory(trajectory);
+    if (diagnostics) {
+      diagnostics->validation_min_clearance = report.min_clearance;
+      diagnostics->validation_oob_count = report.out_of_bounds_count;
+    }
+    if (!report.safe) {
+      return reject(report.reason);
+    }
+  }
+  if (diagnostics) {
+    diagnostics->validation_failure_reason = "NONE";
+  }
+  return true;
 }
 
 bool MincoPipeline::optimizeYaw(const Eigen::Matrix3d & start_state,

@@ -4,11 +4,21 @@
 #include <Eigen/Core>
 
 #include <memory>
+#include <limits>
+#include <string>
 
 #include "data_structure/base/trajectory.h"
 #include "minco_processor/esdf_map.hpp"
 
 namespace minco_planner {
+
+struct TrajectorySafetyReport
+{
+  bool safe{false};
+  std::string reason{"NO_MAP"};
+  double min_clearance{std::numeric_limits<double>::infinity()};
+  int out_of_bounds_count{0};
+};
 
 class TrajectorySafetyChecker
 {
@@ -18,6 +28,7 @@ public:
 
   bool checkPoint(const Eigen::Vector3d & pos) const;
   bool checkTrajectory(const geometry_utils::Trajectory & traj) const;
+  TrajectorySafetyReport inspectTrajectory(const geometry_utils::Trajectory & traj) const;
   double getDistance(const Eigen::Vector3d & pos) const;
   bool projectOutOfObstacle(Eigen::Vector3d & pos, double margin) const;
 

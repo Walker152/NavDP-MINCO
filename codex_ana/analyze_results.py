@@ -130,6 +130,37 @@ def main() -> None:
          "control_states"],
     )
 
+    expected_motion_rows = []
+    for variant in sorted({r["variant"] for r in controls}):
+        subset = [r for r in controls if r["variant"] == variant]
+        observable = [
+            r for r in subset
+            if math.isfinite(f(r, "planned_v_mps")) and math.isfinite(f(r, "cmd_v_mps"))
+        ]
+        mismatches = [
+            r for r in observable
+            if f(r, "planned_v_mps") > 0.05 and abs(f(r, "cmd_v_mps")) <= 0.01
+        ]
+        stalls = [r for r in subset if r.get("zero_command_reason") == "EXPECTED_MOTION_ZERO_STALL"]
+        expected_motion_rows.append({
+            "variant": variant,
+            "samples": len(subset),
+            "planned_velocity_observable_samples": len(observable),
+            "planned_velocity_coverage": len(observable) / len(subset) if subset else math.nan,
+            "expected_motion_zero_samples": len(mismatches),
+            "expected_motion_zero_rate": len(mismatches) / len(observable) if observable else math.nan,
+            "detected_stall_samples": len(stalls),
+            "episodes_with_expected_motion_zero": len({r["episode_uid"] for r in mismatches}),
+            "evidence_status": "MEASURED" if observable else "LEGACY_DATA_MISSING_PLANNED_V",
+        })
+    write_csv(
+        OUT / "expected_motion_zero_summary.csv",
+        expected_motion_rows,
+        ["variant", "samples", "planned_velocity_observable_samples", "planned_velocity_coverage",
+         "expected_motion_zero_samples", "expected_motion_zero_rate", "detected_stall_samples",
+         "episodes_with_expected_motion_zero", "evidence_status"],
+    )
+
     active_zero_cases = []
     grouped = defaultdict(list)
     for row in controls:
@@ -216,6 +247,31 @@ def main() -> None:
     ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(OUT / "zero_command_rates.png", dpi=160)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    measured = [row for row in expected_motion_rows if math.isfinite(row["expected_motion_zero_rate"])]
+    if measured:
+        ax.bar(
+            [row["variant"] for row in measured],
+            [row["expected_motion_zero_rate"] for row in measured],
+            color="#C55A11",
+        )
+        ax.set_ylabel("planned_v > 0.05 and |cmd_v| <= 0.01 rate")
+        ax.set_title("Unexpected MPC zero-speed rate under positive planned velocity")
+    else:
+        ax.text(
+            0.5, 0.5,
+            "Legacy result files do not contain planned_v_mps;\n"
+            "the requested mismatch cannot be reconstructed reliably.",
+            ha="center", va="center", transform=ax.transAxes,
+        )
+        ax.set_title("Unexpected MPC zero-speed observability")
+        ax.set_xticks([])
+        ax.set_yticks([])
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(OUT / "expected_motion_zero_rates.png", dpi=160)
     plt.close(fig)
 
     fail_counts = [row["not_published"] for row in cycle_rows]

@@ -19,8 +19,10 @@ parser.add_argument(
 parser.add_argument(
     "--port", type=int, default=8888)
 parser.add_argument("--enable_minco", action="store_true")
-parser.add_argument("--minco_top_k", type=int, default=4)
-parser.add_argument("--minco_safe_dist", type=float, default=0.30)
+parser.add_argument("--minco_initial_top_k", type=int, default=2)
+parser.add_argument("--minco_max_top_k", type=int, default=4)
+parser.add_argument("--minco_optimization_safe_dist", type=float, default=0.45)
+parser.add_argument("--minco_validation_safe_dist", type=float, default=0.40)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
 parser.add_argument("--esdf_resolution", type=float, default=0.05)
 parser.add_argument("--esdf_padding", type=float, default=1.0)
@@ -233,7 +235,7 @@ if args_cli.enable_minco:
     esdf_builder = SimEsdfBuilder(
         resolution=args_cli.esdf_resolution,
         padding=args_cli.esdf_padding,
-        safe_dist=args_cli.minco_safe_dist,
+        safe_dist=args_cli.minco_validation_safe_dist,
         cache_name=args_cli.esdf_cache_name,
         force_rebuild=args_cli.esdf_force_rebuild,
         obstacle_min_height=args_cli.esdf_obstacle_min_height,
@@ -250,8 +252,10 @@ if args_cli.enable_minco:
     print(f"[SimESDF] initial camera query ok={ok} dist={dist}")
     minco_adapter = NavDPMincoAdapter(
         esdf=esdf,
-        safe_dist=args_cli.minco_safe_dist,
-        top_k=args_cli.minco_top_k,
+        optimization_safe_dist=args_cli.minco_optimization_safe_dist,
+        validation_safe_dist=args_cli.minco_validation_safe_dist,
+        initial_top_k=args_cli.minco_initial_top_k,
+        max_top_k=args_cli.minco_max_top_k,
         sample_dt=args_cli.minco_sample_dt,
         speed=args_cli.speed,
         enable=True,

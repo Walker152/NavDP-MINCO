@@ -34,6 +34,7 @@ public:
     double lookahead_dist{5.0};
     double traj_goal_tolerance{0.3};
     double safety_sample_dt{0.05};
+    double validation_safe_dist{0.3};
     double validation_sample_dt{0.05};
     double sample_dt{0.05};
     double validation_dynamic_scale{1.5};
@@ -108,6 +109,11 @@ public:
     double direction_dot{std::numeric_limits<double>::quiet_NaN()};
     double remaining_duration{std::numeric_limits<double>::quiet_NaN()};
     double history_min_clearance{std::numeric_limits<double>::quiet_NaN()};
+    double optimization_safe_dist{std::numeric_limits<double>::quiet_NaN()};
+    double validation_safe_dist{std::numeric_limits<double>::quiet_NaN()};
+    double validation_min_clearance{std::numeric_limits<double>::quiet_NaN()};
+    int validation_oob_count{0};
+    std::string validation_failure_reason{"NOT_RUN"};
   };
 
   MincoPipeline();
@@ -143,7 +149,8 @@ private:
     super_utils::VecDf & init_ts,
     super_utils::VecDf & local_vmaxs) const;
   bool validateTrajectory(
-    const geometry_utils::Trajectory & trajectory, const Eigen::Vector3d & expected_end_pos) const;
+    const geometry_utils::Trajectory & trajectory, const Eigen::Vector3d & expected_end_pos,
+    Result * diagnostics) const;
   bool optimizeYaw(const Eigen::Matrix3d & start_state,
     const geometry_utils::Trajectory & pos_traj,
     geometry_utils::Trajectory & out_yaw_traj,

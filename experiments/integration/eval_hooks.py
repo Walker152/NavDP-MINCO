@@ -18,7 +18,7 @@ class ExperimentHookBridge:
         self.sink.submit_csv("events", {**self._base(), "timestamp_monotonic_s":time.monotonic(), "frame_idx":0, "plan_uid":"", "event_type":"EPISODE_START", "severity":"INFO", "primary_reason":"", "secondary_reason":"", "message":f"generation={generation}"})
 
     def record_planning_cycle(self, cycle_uid, published, stale, fallback_mode, failure_reason="", **fields):
-        row = {**self._base(), "episode_generation":self.generation, "planning_cycle_uid":cycle_uid, "trigger_timestamp_s":time.monotonic(), "raw_available":fields.get("raw_available", True), "candidate_count":fields.get("candidate_count", 0), "attempted_candidate_count":fields.get("attempted_candidate_count", 0), "selected_candidate_index":fields.get("selected_candidate_index", ""), "optimizer_success":fields.get("optimizer_success", ""), "cpp_validation_success":fields.get("cpp_validation_success", ""), "python_validation_success":fields.get("python_validation_success", ""), "stale":bool(stale), "published":bool(published), "fallback_mode":fallback_mode, "failure_reason":failure_reason, "navdp_ms":fields.get("navdp_ms", ""), "minco_ms":fields.get("minco_ms", ""), "validation_ms":fields.get("validation_ms", ""), "planning_total_ms":fields.get("planning_total_ms", ""), "plan_age_when_applied_ms":fields.get("plan_age_when_applied_ms", "")}
+        row = {**self._base(), "episode_generation":self.generation, "planning_cycle_uid":cycle_uid, "trigger_timestamp_s":time.monotonic(), "raw_available":fields.get("raw_available", True), "candidate_count":fields.get("candidate_count", 0), "screened_candidate_count":fields.get("screened_candidate_count", 0), "rejected_candidate_count":fields.get("rejected_candidate_count", 0), "attempted_candidate_count":fields.get("attempted_candidate_count", 0), "selected_candidate_index":fields.get("selected_candidate_index", ""), "optimizer_success":fields.get("optimizer_success", ""), "cpp_validation_success":fields.get("cpp_validation_success", ""), "python_validation_success":fields.get("python_validation_success", ""), "validation_failure_reason":fields.get("validation_failure_reason", ""), "stale":bool(stale), "published":bool(published), "fallback_mode":fallback_mode, "failure_reason":failure_reason, "navdp_ms":fields.get("navdp_ms", ""), "minco_ms":fields.get("minco_ms", ""), "validation_ms":fields.get("validation_ms", ""), "planning_total_ms":fields.get("planning_total_ms", ""), "plan_age_when_applied_ms":fields.get("plan_age_when_applied_ms", "")}
         self.sink.submit_csv("planning_cycles", row)
         self._cycle_rows.append({**row, "planning_state":fields.get("planning_state", ""), "hot_start_accepted":fields.get("hot_start_accepted", False)})
         self._cycle += 1
@@ -72,7 +72,13 @@ class ExperimentHookBridge:
             "timestamp_monotonic_s":time.monotonic(), "control_state":fields.get("control_state", "TRACK"),
             "robot_x_m":fields.get("robot_x_m", ""), "robot_y_m":fields.get("robot_y_m", ""),
             "robot_yaw_rad":fields.get("robot_yaw_rad", ""), "reference_x_m":fields.get("reference_x_m", ""),
-            "reference_y_m":fields.get("reference_y_m", ""), "cmd_v_mps":cmd_v, "cmd_w_radps":cmd_w,
+            "reference_y_m":fields.get("reference_y_m", ""), "planned_v_mps":fields.get("planned_v_mps", ""),
+            "planned_w_radps":fields.get("planned_w_radps", ""), "cmd_v_mps":cmd_v, "cmd_w_radps":cmd_w,
+            "zero_command_reason":fields.get("zero_command_reason", ""),
+            "expected_motion_zero":fields.get("expected_motion_zero", False),
+            "expected_motion_zero_streak":fields.get("expected_motion_zero_streak", 0),
+            "mpc_solver_status":fields.get("mpc_solver_status", ""),
+            "mpc_recovery_action":fields.get("mpc_recovery_action", ""),
             "cross_track_error_m":fields.get("cross_track_error_m", ""),
             "time_aligned_position_error_m":error, "mpc_success":fields.get("mpc_success", ""),
             "mpc_solve_ms":fields.get("mpc_solve_ms", ""), "reference_age_ms":fields.get("reference_age_ms", ""),

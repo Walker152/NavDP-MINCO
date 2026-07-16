@@ -85,7 +85,8 @@ RAW-SPARSE × 10 → RAW-DENSE × 10
 | JSON 参数 | 默认值 | 含义 |
 |---|---:|---|
 | `minco.top_k` | 2 | 送入 MINCO 的 NavDP 候选数量 |
-| `minco.safe_distance_m` | 0.4 | ESDF 安全距离 |
+| `minco.optimization_safe_distance_m` | 0.45 | 优化代价使用的 ESDF 安全距离 |
+| `minco.validation_safe_distance_m` | 0.4 | C++/Python 轨迹验收与热启动历史检查距离 |
 | `minco.sample_dt_s` | 0.05 | MINCO 轨迹时间采样间隔 |
 | `minco.max_velocity_mps` | 1.0 | 优化器速度约束 |
 | `minco.max_acceleration_mps2` | 1.0 | 优化器加速度约束 |
@@ -179,7 +180,10 @@ bash scripts/run_all_experiments.sh <新配置.json> \
 
 ### 安全距离敏感性实验
 
-分别创建 `safe_030`、`safe_040`、`safe_050` 三个 suite，将 `minco.safe_distance_m` 设置为 0.30、0.40、0.50。每个 suite 使用独立 `suite_id`。RAW 数据可作为共同基线，但正式统计必须校验配置一致性。
+分别创建不同安全距离的 suite，并同时明确
+`minco.optimization_safe_distance_m` 与 `minco.validation_safe_distance_m`。
+优化距离应不小于验收距离；每个 suite 使用独立 `suite_id`。RAW 数据可作为共同基线，
+但正式统计必须校验配置一致性。
 
 ### ESDF 分辨率实验
 

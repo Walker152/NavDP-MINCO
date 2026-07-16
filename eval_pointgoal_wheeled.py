@@ -29,8 +29,14 @@ parser.add_argument(
 parser.add_argument(
     "--port", type=int, default=8888)
 parser.add_argument("--enable_minco", default=True, action=argparse.BooleanOptionalAction)
-parser.add_argument("--minco_top_k", type=int, default=2)
-parser.add_argument("--minco_safe_dist", type=float, default=0.40)
+parser.add_argument("--minco_initial_top_k", type=int, default=2)
+parser.add_argument("--minco_max_top_k", type=int, default=4)
+parser.add_argument("--minco_candidate_time_budget_ms", type=float, default=1500.0)
+parser.add_argument("--minco_optimization_safe_dist", type=float, default=0.45)
+parser.add_argument("--minco_validation_safe_dist", type=float, default=0.40)
+parser.add_argument("--minco_path_min_length", type=float, default=0.20)
+parser.add_argument("--minco_path_max_start_gap", type=float, default=0.50)
+parser.add_argument("--minco_path_max_reversal_angle", type=float, default=2.6179938779914944)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
 parser.add_argument("--minco_max_vel", type=float, default=1.0)
 parser.add_argument("--minco_max_acc", type=float, default=1.0)
@@ -133,6 +139,7 @@ from utils_tasks.timing_utils import (
     mean_timing,
 )
 from utils_tasks.episode_diagnostics import EpisodeStartupDiagnostics, infer_termination_reason
+from utils_tasks.mpc_diagnostics import ExpectedMotionZeroDetector
 
 experiment_writer = None
 experiment_hook = None
@@ -182,6 +189,7 @@ need_visual_frame = args_cli.save_video or args_cli.save_debug_visuals
 vis_manager = [VisualizationManager(history_size=5, show_all_candidates=True) for i in range(args_cli.num_envs)] if need_visual_frame else [None for _ in range(args_cli.num_envs)]
 mpc = [None for _ in range(args_cli.num_envs)]
 last_applied_plan_id = [-1 for _ in range(args_cli.num_envs)]
+mpc_zero_detectors = [ExpectedMotionZeroDetector() for _ in range(args_cli.num_envs)]
 per_env_plan_id = np.zeros(args_cli.num_envs, dtype=np.int64)
 minco_hold_cache = [None for _ in range(args_cli.num_envs)]
 episode_generation = np.zeros(args_cli.num_envs, dtype=np.int64)
@@ -509,7 +517,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             "objective": float("inf"),
                             "min_esdf": float("nan"),
                             "py_min_esdf": float("nan"),
-                            "safe_dist": args_cli.minco_safe_dist,
+                            "optimization_safe_dist": args_cli.minco_optimization_safe_dist,
+                            "validation_safe_dist": args_cli.minco_validation_safe_dist,
                             "adapter_total_ms": 0.0,
                             "selected_cpp_optimize_time_ms": float("nan"),
                         })
@@ -712,7 +721,7 @@ if args_cli.enable_minco:
     esdf_builder = SimEsdfBuilder(
         resolution=args_cli.esdf_resolution,
         padding=args_cli.esdf_padding,
-        safe_dist=args_cli.minco_safe_dist,
+        safe_dist=args_cli.minco_validation_safe_dist,
         cache_name=args_cli.esdf_cache_name,
         force_rebuild=args_cli.esdf_force_rebuild,
         obstacle_min_height=args_cli.esdf_obstacle_min_height,
@@ -750,8 +759,14 @@ if args_cli.enable_minco:
     print(f"[SimESDF] initial camera query ok={ok} dist={dist}")
     minco_adapter = NavDPMincoAdapter(
         esdf=esdf,
-        safe_dist=args_cli.minco_safe_dist,
-        top_k=args_cli.minco_top_k,
+        optimization_safe_dist=args_cli.minco_optimization_safe_dist,
+        validation_safe_dist=args_cli.minco_validation_safe_dist,
+        initial_top_k=args_cli.minco_initial_top_k,
+        max_top_k=args_cli.minco_max_top_k,
+        candidate_time_budget_ms=args_cli.minco_candidate_time_budget_ms,
+        path_min_length=args_cli.minco_path_min_length,
+        path_max_start_gap=args_cli.minco_path_max_start_gap,
+        path_max_reversal_angle=args_cli.minco_path_max_reversal_angle,
         sample_dt=args_cli.minco_sample_dt,
         speed=args_cli.speed,
         max_vel=args_cli.minco_max_vel,
@@ -922,6 +937,11 @@ try:
             cmd_w_batch = np.zeros(args_cli.num_envs, dtype=np.float64)
             planned_v_batch = np.full(args_cli.num_envs, np.nan, dtype=np.float64)
             planned_w_batch = np.full(args_cli.num_envs, np.nan, dtype=np.float64)
+            zero_reason_batch = ["NONE" for _ in range(args_cli.num_envs)]
+            zero_streak_batch = np.zeros(args_cli.num_envs, dtype=np.int64)
+            expected_motion_zero_batch = np.zeros(args_cli.num_envs, dtype=bool)
+            mpc_solver_status_batch = ["NOT_RUN" for _ in range(args_cli.num_envs)]
+            mpc_recovery_action_batch = ["NONE" for _ in range(args_cli.num_envs)]
             control_timers = [StageTimer() for _ in range(args_cli.num_envs)]
 
             for i in range(args_cli.num_envs):
@@ -1016,6 +1036,7 @@ try:
                                 try:
                                     with control_timer.section("mpc_solve_ms"):
                                         opt_u_controls, opt_x_states = mpc_i.solve(x0[i, :5])
+                                    mpc_solver_status_batch[i] = "SUCCESS"
                                     v, w = opt_u_controls[0, 0], opt_u_controls[0, 1]
                                     if not np.isfinite(v) or not np.isfinite(w):
                                         raise ValueError(f"non-finite MPC command v={v}, w={w}")
@@ -1031,6 +1052,19 @@ try:
                                             planned_v_batch[i] = float(current_ref[3])
                                         if np.isfinite(current_ref[4]):
                                             planned_w_batch[i] = float(current_ref[4])
+                                    zero_diagnostic = mpc_zero_detectors[i].update(
+                                        planned_v=planned_v_batch[i],
+                                        cmd_v=v,
+                                        solve_success=True,
+                                    )
+                                    zero_reason_batch[i] = zero_diagnostic.reason
+                                    zero_streak_batch[i] = zero_diagnostic.streak
+                                    expected_motion_zero_batch[i] = zero_diagnostic.expected_motion_zero
+                                    mpc_recovery_action_batch[i] = zero_diagnostic.recovery_action
+                                    if zero_diagnostic.reason == "EXPECTED_MOTION_ZERO_STALL":
+                                        control_states[i] = "MPC_EXPECTED_MOTION_ZERO_STALL"
+                                        mpc_i.reset()
+                                        last_applied_plan_id[i] = -1
                                     if frame_idx % max(1, args_cli.timing_log_interval) == 0 and current_ref is not None:
                                         print(
                                             f"[ControlRef] env={i} plan={env_plan_id} status={status_i} idx={mpc_i.progress_idx} "
@@ -1042,6 +1076,16 @@ try:
                                     cmd_w_batch[i] = 0.0
                                     joint_velocities = np.zeros(2, dtype=np.float32)
                                     control_states[i] = "MPC_SOLVE_FAILED"
+                                    diagnostic = mpc_zero_detectors[i].update(
+                                        planned_v=planned_v_batch[i], cmd_v=0.0, solve_success=False
+                                    )
+                                    zero_reason_batch[i] = diagnostic.reason
+                                    zero_streak_batch[i] = diagnostic.streak
+                                    mpc_solver_status_batch[i] = "EXCEPTION"
+                                    mpc_recovery_action_batch[i] = diagnostic.recovery_action
+                                    if mpc_i is not None:
+                                        mpc_i.reset()
+                                    last_applied_plan_id[i] = -1
                                     print(f"[MPC] env={i} solve failed: {exc}")
                 action_list.append(joint_velocities)
 
@@ -1181,6 +1225,13 @@ try:
                     cross_track_error_m=tracking_error, time_aligned_position_error_m=tracking_error,
                     mpc_success=control_states[0] == "CONTROL_ACTIVE",
                     mpc_solve_ms=control_timers[0].records.get("mpc_solve_ms", ""), reference_age_ms="",
+                    planned_v_mps=planned_v_batch[0] if np.isfinite(planned_v_batch[0]) else "",
+                    planned_w_radps=planned_w_batch[0] if np.isfinite(planned_w_batch[0]) else "",
+                    zero_command_reason=zero_reason_batch[0],
+                    expected_motion_zero=bool(expected_motion_zero_batch[0]),
+                    expected_motion_zero_streak=int(zero_streak_batch[0]),
+                    mpc_solver_status=mpc_solver_status_batch[0],
+                    mpc_recovery_action=mpc_recovery_action_batch[0],
                 )
             env_step_timer = StageTimer()
             with env_step_timer.section("env_step_ms"):
@@ -1235,6 +1286,7 @@ try:
                     if minco_adapter is not None:
                         minco_adapter.reset_history()
                     last_applied_plan_id[i] = -1
+                    mpc_zero_detectors[i].reset()
                     with output_lock:
                         minco_hold_cache[i] = None
                         per_env_plan_id[i] += 1
