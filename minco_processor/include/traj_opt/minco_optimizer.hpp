@@ -45,7 +45,7 @@ public:
 
     VecDf magnitudeBounds, penaltyWeights;
     int time_allocation_iters{5};
-    int integral_res{16};
+    int integral_res{32};
     int max_iterations{256};
     double opt_accuracy{1e-4};
 

@@ -33,7 +33,7 @@ parser.add_argument("--minco_initial_top_k", type=int, default=2)
 parser.add_argument("--minco_max_top_k", type=int, default=4)
 parser.add_argument("--minco_candidate_time_budget_ms", type=float, default=1500.0)
 parser.add_argument("--minco_optimization_safe_dist", type=float, default=0.45)
-parser.add_argument("--minco_validation_safe_dist", type=float, default=0.40)
+parser.add_argument("--minco_validation_safe_dist", type=float, default=0.35)
 parser.add_argument("--minco_path_min_length", type=float, default=0.20)
 parser.add_argument("--minco_path_max_start_gap", type=float, default=0.50)
 parser.add_argument("--minco_path_max_reversal_angle", type=float, default=2.6179938779914944)
@@ -140,6 +140,7 @@ from utils_tasks.timing_utils import (
 )
 from utils_tasks.episode_diagnostics import EpisodeStartupDiagnostics, infer_termination_reason
 from utils_tasks.mpc_diagnostics import ExpectedMotionZeroDetector
+from utils_tasks.minco_fallback import is_hold_trajectory_valid
 
 experiment_writer = None
 experiment_hook = None
@@ -247,11 +248,13 @@ def minco_cache_entry(result, episode_gen):
     }
 
 def is_minco_cache_valid(cache, episode_gen):
-    if cache is None or int(cache.get("episode_generation", -1)) != int(episode_gen):
-        return False
-    elapsed = time.monotonic() - float(cache.get("published_time", 0.0))
-    duration = float(cache.get("duration", 0.0))
-    return np.isfinite(elapsed) and np.isfinite(duration) and elapsed <= duration
+    return is_hold_trajectory_valid(
+        cache,
+        episode_gen,
+        time.monotonic(),
+        args_cli.minco_validation_safe_dist,
+        minco_adapter._query_min_esdf if minco_adapter is not None else lambda _: np.nan,
+    )
 
 def mark_planning_idle():
     with output_lock:

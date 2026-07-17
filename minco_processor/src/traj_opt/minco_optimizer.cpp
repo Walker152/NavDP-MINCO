@@ -108,7 +108,7 @@ double MincoOptimizer::optimize(const std::vector<Eigen::Vector3d> & waypoints,
     // 5'. Optimization failed
     minCostFunctional = INFINITY;
   }
-  return minCostFunctional + ret;
+  return minCostFunctional;
 }
 
 double MincoOptimizer::costFunctional(void * ptr, const VecDf & x, VecDf & g)

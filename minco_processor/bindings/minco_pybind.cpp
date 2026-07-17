@@ -23,7 +23,7 @@ class MincoProcessorPy
 public:
   MincoProcessorPy()
   {
-    configure(2.0, 4.0, 0.45, 0.4, 0.05, 64, 0.5, 1000.0, 1000.0, 10000.0, 20.0, 0.01, 100.0);
+    configure(2.0, 4.0, 0.45, 0.35, 0.05, 64, 0.5, 1000.0, 1000.0, 10000.0, 20.0, 0.01, 100.0);
   }
 
   void configure(

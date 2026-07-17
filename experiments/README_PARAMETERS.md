@@ -86,7 +86,7 @@ RAW-SPARSE × 10 → RAW-DENSE × 10
 |---|---:|---|
 | `minco.top_k` | 2 | 送入 MINCO 的 NavDP 候选数量 |
 | `minco.optimization_safe_distance_m` | 0.45 | 优化代价使用的 ESDF 安全距离 |
-| `minco.validation_safe_distance_m` | 0.4 | C++/Python 轨迹验收与热启动历史检查距离 |
+| `minco.validation_safe_distance_m` | 0.35 | C++/Python 轨迹验收、HOLD 轨迹复核与热启动历史检查距离 |
 | `minco.sample_dt_s` | 0.05 | MINCO 轨迹时间采样间隔 |
 | `minco.max_velocity_mps` | 1.0 | 优化器速度约束 |
 | `minco.max_acceleration_mps2` | 1.0 | 优化器加速度约束 |

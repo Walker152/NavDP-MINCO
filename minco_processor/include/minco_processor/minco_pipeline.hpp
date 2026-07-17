@@ -34,7 +34,7 @@ public:
     double lookahead_dist{5.0};
     double traj_goal_tolerance{0.3};
     double safety_sample_dt{0.05};
-    double validation_safe_dist{0.3};
+    double validation_safe_dist{0.35};
     double validation_sample_dt{0.05};
     double sample_dt{0.05};
     double validation_dynamic_scale{1.5};

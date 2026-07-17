@@ -43,7 +43,7 @@ class NavDPMincoAdapter:
         self,
         esdf: dict,
         optimization_safe_dist=0.45,
-        validation_safe_dist=0.40,
+        validation_safe_dist=0.35,
         initial_top_k=2,
         max_top_k=4,
         candidate_time_budget_ms=1500.0,
