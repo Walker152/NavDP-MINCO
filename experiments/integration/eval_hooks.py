@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import math
 import json
+import numpy as np
 
 
 def _finite_or_blank(value):
@@ -21,9 +22,10 @@ class ExperimentHookBridge:
 
     def _base(self): return {**self.identity, "episode_uid":self.episode_uid, "data_source":"REAL"}
 
-    def start_episode(self, episode_uid, generation):
+    def start_episode(self, episode_uid, generation, initial_goal_distance_m=None):
         self.episode_uid = str(episode_uid); self.generation = int(generation); self._cycle = 0; self._frame = 0
         self._cycle_rows = []; self._tracking_errors = []; self._episode_started = time.monotonic()
+        self._initial_goal_distance_m = float(initial_goal_distance_m) if initial_goal_distance_m is not None else None
         self.sink.submit_csv("events", {**self._base(), "timestamp_monotonic_s":time.monotonic(), "frame_idx":0, "plan_uid":"", "event_type":"EPISODE_START", "severity":"INFO", "primary_reason":"", "secondary_reason":"", "message":f"generation={generation}"})
 
     def record_planning_cycle(self, cycle_uid, published, stale, fallback_mode, failure_reason="", **fields):
@@ -51,10 +53,14 @@ class ExperimentHookBridge:
             "raw_safety_class", "turn_class", "temporal_class",
             "raw_min_clearance_m", "raw_unsafe_ratio", "raw_esdf_oob_ratio",
             "raw_path_length_m", "raw_curvature_abs_p95_1pm", "raw_curvature_tv_1pm",
+            "raw_curvature_rate_rms_1pm2",
             "raw_interplan_position_rmse_m", "raw_initial_tangent_jump_rad",
             "minco_min_clearance_m", "minco_unsafe_ratio", "minco_path_length_m",
-            "actual_speed_mean_mps", "actual_acc_rms_mps2", "actual_jerk_rms_mps3",
-            "actual_yaw_rate_rms_radps", "planning_state", "hot_start_accepted",
+            "actual_speed_mean_mps", "actual_speed_p95_mps", "actual_speed_max_mps",
+            "actual_acc_rms_mps2", "actual_acc_p95_mps2", "actual_acc_max_mps2",
+            "actual_jerk_rms_mps3", "actual_jerk_p95_mps3", "actual_jerk_max_mps3",
+            "actual_yaw_rate_rms_radps", "actual_yaw_rate_max_radps", "trajectory_duration_s",
+            "planning_state", "hot_start_accepted",
             "hot_reject_reason", "optimizer_success", "python_validation_success",
             "optimizer_return_code", "optimizer_iteration_count", "objective",
             "cpp_validation_success", "cpp_validation_min_clearance_m",
@@ -71,10 +77,14 @@ class ExperimentHookBridge:
         for column in (
             "raw_min_clearance_m", "raw_unsafe_ratio", "raw_esdf_oob_ratio",
             "raw_path_length_m", "raw_curvature_abs_p95_1pm", "raw_curvature_tv_1pm",
+            "raw_curvature_rate_rms_1pm2",
             "raw_interplan_position_rmse_m", "raw_initial_tangent_jump_rad",
             "minco_min_clearance_m", "minco_unsafe_ratio", "minco_path_length_m",
-            "actual_speed_mean_mps", "actual_acc_rms_mps2", "actual_jerk_rms_mps3",
-            "actual_yaw_rate_rms_radps", "optimizer_return_code",
+            "actual_speed_mean_mps", "actual_speed_p95_mps", "actual_speed_max_mps",
+            "actual_acc_rms_mps2", "actual_acc_p95_mps2", "actual_acc_max_mps2",
+            "actual_jerk_rms_mps3", "actual_jerk_p95_mps3", "actual_jerk_max_mps3",
+            "actual_yaw_rate_rms_radps", "actual_yaw_rate_max_radps", "trajectory_duration_s",
+            "optimizer_return_code",
             "optimizer_iteration_count", "objective", "cpp_validation_min_clearance_m",
             "python_validation_min_clearance_m", "validation_start_exempt_count",
             "validation_oob_count", "planning_total_ms",
@@ -149,6 +159,14 @@ class ExperimentHookBridge:
                 "selected":index == int(selected_index),
             })
 
+    def record_event(self, event_type, severity="INFO", primary_reason="", secondary_reason="", message="", plan_uid="", frame_idx=-1):
+        self.sink.submit_csv("events", {
+            **self._base(), "timestamp_monotonic_s":time.monotonic(),
+            "frame_idx":frame_idx, "plan_uid":plan_uid, "event_type":event_type,
+            "severity":severity, "primary_reason":primary_reason,
+            "secondary_reason":secondary_reason, "message":message,
+        })
+
     def record_timing(self, metric_name, duration_ms, plan_uid="", frame_idx=-1, status="OK", event_type="STAGE"):
         self.sink.submit_csv("timing_samples", {
             **self._base(), "event_type":event_type, "plan_uid":plan_uid,
@@ -166,7 +184,8 @@ class ExperimentHookBridge:
             **self._base(), "frame_idx":frame_idx, "plan_uid":plan_uid,
             "timestamp_monotonic_s":time.monotonic(), "control_state":fields.get("control_state", "TRACK"),
             "robot_x_m":fields.get("robot_x_m", ""), "robot_y_m":fields.get("robot_y_m", ""),
-            "robot_yaw_rad":fields.get("robot_yaw_rad", ""), "reference_x_m":fields.get("reference_x_m", ""),
+            "robot_yaw_rad":fields.get("robot_yaw_rad", ""), "actual_v_mps":fields.get("actual_v_mps", ""),
+            "actual_w_radps":fields.get("actual_w_radps", ""), "reference_x_m":fields.get("reference_x_m", ""),
             "reference_y_m":fields.get("reference_y_m", ""), "planned_v_mps":fields.get("planned_v_mps", ""),
             "planned_w_radps":fields.get("planned_w_radps", ""), "cmd_v_mps":cmd_v, "cmd_w_radps":cmd_w,
             "zero_command_reason":fields.get("zero_command_reason", ""),
@@ -187,7 +206,10 @@ class ExperimentHookBridge:
             "collision":fields.get("collision", False), "timeout":fields.get("timeout", False),
             "done_reason":fields.get("done_reason", "GOAL_REACHED" if success else "UNKNOWN"),
             "episode_duration_s":duration, "actual_path_length_m":fields.get("actual_path_length_m", ""),
-            "repository_spl":fields.get("repository_spl", ""), "tracking_error_rmse_m":tracking_rmse,
+            "repository_spl":fields.get("repository_spl", ""),
+            "tracking_error_rmse_m":tracking_rmse,
+            "tracking_error_p95_m": float(np.percentile(self._tracking_errors, 95)) if self._tracking_errors else "",
+            "initial_goal_distance_m": getattr(self, '_initial_goal_distance_m', None) or "",
             "minimum_executed_clearance_m":fields.get("minimum_executed_clearance_m", ""),
             "planning_count":self._cycle,
             "minco_ok_count":sum(bool(row.get("published")) for row in self._cycle_rows) if self.identity.get("variant") != "raw" else 0,

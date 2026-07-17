@@ -34,6 +34,8 @@ class PlanningOutput:
     minco_sparse_waypoints_world: Optional[np.ndarray] = None
     minco_samples: Optional[List[np.ndarray]] = None
     minco_speed_profile: Optional[List[np.ndarray]] = None
+    prev_minco_samples: Optional[List[np.ndarray]] = None
+    prev_published_time: Optional[float] = None
     minco_info: Optional[List[dict]] = None
     per_env_plan_id: Optional[np.ndarray] = None
     stop_required: Optional[np.ndarray] = None

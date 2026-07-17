@@ -152,7 +152,10 @@ Feed a fake `ps` snapshot containing:
 401 1 401 401 600 python unrelated_worker.py
 ```
 
-Use a fake `KILL_BIN` that records signals. Assert default mode signals 101/102/201 (or their wholly-owned groups), never 301/401, and check-only records candidates without any kill call:
+Use the internal test-mode signal recorder. Assert default mode records signals
+for old PPID-1 roots 101/201 and matching descendant 102, never 301/401, never
+executes an external kill backend, and check-only records candidates without
+any signal:
 
 ```bash
 assert_contains "$CASE_KILL_LOG" "-TERM"
@@ -178,7 +181,6 @@ Add functions:
 ```bash
 collect_ancestor_pids()
 scan_stale_processes()
-process_group_is_fully_owned()
 signal_stale_processes()
 ```
 
@@ -191,13 +193,13 @@ signal_stale_processes()
 
 Build the ancestor set by following PPID from the same snapshot. Exclude PID 1, `$$`, `$PPID`, all ancestors, and all non-target paths.
 
-For a PGID whose visible members are all candidates, call:
-
-```bash
-"$KILL_BIN" -TERM -- "-$pgid"
-```
-
-Otherwise signal candidate PIDs individually. Wait up to five one-second polls, then signal remaining candidate PIDs with `-KILL`. `--check-only` must not call the kill binary.
+Require a PPID-1 root to be at least
+`NAVDP_STALE_MIN_AGE_SECONDS` old, then add matching descendants through the
+PPID graph. Revalidate each PID identity and use pidfd in production to send
+`TERM`, wait up to five one-second polls, then send `KILL` only to still-live
+unchanged targets. Do not signal a snapshot PGID. Test mode uses an internal
+recorder/simulator and must never execute an external kill backend.
+`--check-only` records candidates without sending any signal.
 
 - [ ] **Step 4: Verify process tests pass**
 

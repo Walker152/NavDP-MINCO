@@ -155,6 +155,59 @@ def compute_command_deltas(commands_vw):
     return {"command_delta_v_abs_mean_mps": float(np.mean(delta[:, 0])), "command_delta_w_abs_mean_radps": float(np.mean(delta[:, 1]))}
 
 
+def compute_equivalent_constant_speed_profile(geometric_profile, speed):
+    """从几何曲率推导等效恒速运动学变化率。
+
+    公式:
+      ω_eq(s) = v₀ × κ(s)              # 等效角速度
+      a_eq(s) = v₀² × |κ(s)|           # 等效法向加速度
+      α_eq(s) = v₀² × κ'(s)            # 等效角加速度
+      j_eq(s) = v₀³ × √(κ'(s)²+κ(s)⁴) # 等效 jerk
+
+    Args:
+        geometric_profile: compute_geometric_metrics 返回的 detail dict，
+                          含 curvature_1pm, curvature_rate_1pm2
+        speed: 恒定跟踪速度 v₀ (m/s)
+
+    Returns:
+        dict with keys: equiv_speed_mps, equiv_yaw_rate_rms_radps,
+        equiv_yaw_rate_max_radps, equiv_acc_rms_mps2, equiv_acc_max_mps2,
+        equiv_yaw_acc_rms_radps2, equiv_jerk_rms_mps3, equiv_jerk_max_mps3
+    """
+    names = [
+        "equiv_speed_mps", "equiv_yaw_rate_rms_radps",
+        "equiv_yaw_rate_max_radps", "equiv_acc_rms_mps2",
+        "equiv_acc_max_mps2", "equiv_yaw_acc_rms_radps2",
+        "equiv_jerk_rms_mps3", "equiv_jerk_max_mps3",
+    ]
+    kappa = np.asarray(geometric_profile.get("curvature_1pm", []), dtype=np.float64)
+    kappa_rate = np.asarray(geometric_profile.get("curvature_rate_1pm2", []), dtype=np.float64)
+    if len(kappa) < 2 or not np.all(np.isfinite(kappa)):
+        return {name: float("nan") for name in names}
+    if len(kappa_rate) != len(kappa) or not np.all(np.isfinite(kappa_rate)):
+        kappa_rate = np.zeros_like(kappa)
+
+    v0 = float(speed)
+    v0_sq = v0 * v0
+    v0_cu = v0_sq * v0
+
+    yaw_rate = v0 * kappa
+    acc = v0_sq * np.abs(kappa)
+    yaw_acc = v0_sq * kappa_rate
+    jerk = v0_cu * np.sqrt(kappa_rate * kappa_rate + kappa * kappa * kappa * kappa)
+
+    return {
+        "equiv_speed_mps": v0,
+        "equiv_yaw_rate_rms_radps": float(np.sqrt(np.mean(yaw_rate * yaw_rate))),
+        "equiv_yaw_rate_max_radps": float(np.max(np.abs(yaw_rate))),
+        "equiv_acc_rms_mps2": float(np.sqrt(np.mean(acc * acc))),
+        "equiv_acc_max_mps2": float(np.max(acc)),
+        "equiv_yaw_acc_rms_radps2": float(np.sqrt(np.mean(yaw_acc * yaw_acc))),
+        "equiv_jerk_rms_mps3": float(np.sqrt(np.mean(jerk * jerk))),
+        "equiv_jerk_max_mps3": float(np.max(jerk)),
+    }
+
+
 def compute_deadline_metrics(durations_ms, deadline_ms):
     values = np.asarray(durations_ms, float); values = values[np.isfinite(values)]
     if not len(values) or deadline_ms <= 0: return {"count": int(len(values)), "deadline_miss_ratio": float("nan")}

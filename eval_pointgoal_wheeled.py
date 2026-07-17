@@ -109,6 +109,9 @@ import torchvision.transforms as F
 import time
 import threading
 
+from experiments.analyzers.situations import SituationThresholds, classify_plan_situation
+from experiments.analyzers.metrics import compare_trajectory_prefixes
+
 from utils_tasks.basic_utils import (
     PlanningInput,
     PlanningOutput,
@@ -163,7 +166,7 @@ if args_cli.eval_monitor:
         monitor_identity.update({key: run_identity[key] for key in monitor_identity if key in run_identity})
     experiment_hook = ExperimentHookBridge(experiment_writer, monitor_identity)
     initial_uid = args_cli.episode_uids[0] if args_cli.episode_uids else f"scene_{args_cli.scene_index}_episode_0"
-    experiment_hook.start_episode(initial_uid, generation=0)
+    experiment_hook.start_episode(initial_uid, generation=0, initial_goal_distance_m=float(euclidean[0]) if euclidean.size > 0 and np.isfinite(euclidean[0]) else None)
 if args_cli.save_planning_trace:
     if not args_cli.experiment_run_dir:
         raise ValueError("--experiment-run-dir is required when --save-planning-trace is enabled")
@@ -482,6 +485,12 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                                     "samples": None,
                                 })
                                 print(f"[NavDP-Minco] env={idx} status=MINCO_STOP reason={result.get('failure_reason', '')}")
+                                if experiment_hook is not None:
+                                    experiment_hook.record_event(
+                                        "PLANNING_FAILURE", severity="ERROR",
+                                        primary_reason=f"MINCO_STOP: {result.get('failure_reason', 'UNKNOWN')}",
+                                        message=f"env={idx}",
+                                    )
                         batch_optimal_points_world.append(trajectory_points_world)
                         batch_raw_top1_world.append(result.get("raw_top1"))
                         batch_selected_candidate_world.append(
@@ -640,6 +649,33 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         hot_start_accepted=cycle_info.get("hot_start_accepted", False),
                     )
                     plan_uid = f"{cycle_uid}_plan" if published else ""
+                    # --- situation classification for EXP-01 ---
+                    sit_thresholds = SituationThresholds(
+                        safe_dist_m=args_cli.minco_validation_safe_dist,
+                        high_turn_curvature_p95_1pm=2.0,
+                        high_turn_curvature_tv_1pm=100.0,
+                        jump_position_rmse_m=0.3,
+                        jump_tangent_rad=0.3,
+                    )
+                    situation = classify_plan_situation({
+                        "raw_min_clearance_m": cycle_info.get("raw_min_clearance_m", float("nan")),
+                        "raw_unsafe_ratio": cycle_info.get("raw_unsafe_ratio", 0),
+                        "raw_esdf_oob_ratio": cycle_info.get("raw_esdf_oob_ratio", 0),
+                        "raw_curvature_abs_p95_1pm": cycle_info.get("raw_curvature_abs_p95_1pm", 0),
+                        "raw_curvature_tv_1pm": cycle_info.get("raw_curvature_tv_1pm", 0),
+                        "raw_interplan_position_rmse_m": cycle_info.get("raw_interplan_position_rmse_m", float("nan")),
+                        "raw_initial_tangent_jump_rad": cycle_info.get("raw_initial_tangent_jump_rad", float("nan")),
+                    }, sit_thresholds)
+                    # --- interplan comparison for EXP-04 ---
+                    interplan_metrics = {}
+                    prev_samples = planning_output.prev_minco_samples
+                    prev_published_time = planning_output.prev_published_time
+                    curr_samples = cycle_info.get("samples")
+                    if prev_samples is not None and curr_samples is not None and prev_published_time is not None:
+                        interplan_metrics, _ = compare_trajectory_prefixes(
+                            prev_samples, prev_published_time, curr_samples,
+                            time.monotonic(), args_cli.minco_sample_dt,
+                        )
                     if published:
                         experiment_hook.record_plan(
                             plan_uid, published=True, stale=False, plan_status=status,
@@ -664,14 +700,33 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             raw_path_length_m=cycle_info.get("raw_path_length_m", ""),
                             raw_curvature_abs_p95_1pm=cycle_info.get("raw_curvature_abs_p95_1pm", ""),
                             raw_curvature_tv_1pm=cycle_info.get("raw_curvature_tv_1pm", ""),
+                            raw_curvature_rate_rms_1pm2=cycle_info.get("raw_curvature_rate_rms_1pm2", ""),
+                            raw_safety_class=situation.get("raw_safety_class", ""),
+                            turn_class=situation.get("turn_class", ""),
+                            temporal_class=situation.get("temporal_class", ""),
+                            raw_interplan_position_rmse_m=interplan_metrics.get("interplan_position_rmse_m", ""),
+                            raw_initial_tangent_jump_rad=interplan_metrics.get("initial_tangent_jump_rad", ""),
                             minco_min_clearance_m=cycle_info.get("minco_min_clearance_m", ""),
                             minco_unsafe_ratio=cycle_info.get("minco_unsafe_ratio", ""),
                             minco_path_length_m=cycle_info.get("minco_path_length_m", ""),
                             actual_speed_mean_mps=cycle_info.get("actual_speed_mean_mps", ""),
+                            actual_speed_p95_mps=cycle_info.get("actual_speed_p95_mps", ""),
+                            actual_speed_max_mps=cycle_info.get("actual_speed_max_mps", ""),
                             actual_acc_rms_mps2=cycle_info.get("actual_acc_rms_mps2", ""),
+                            actual_acc_p95_mps2=cycle_info.get("actual_acc_p95_mps2", ""),
+                            actual_acc_max_mps2=cycle_info.get("actual_acc_max_mps2", ""),
                             actual_jerk_rms_mps3=cycle_info.get("actual_jerk_rms_mps3", ""),
+                            actual_jerk_p95_mps3=cycle_info.get("actual_jerk_p95_mps3", ""),
+                            actual_jerk_max_mps3=cycle_info.get("actual_jerk_max_mps3", ""),
                             actual_yaw_rate_rms_radps=cycle_info.get("actual_yaw_rate_rms_radps", ""),
+                            actual_yaw_rate_max_radps=cycle_info.get("actual_yaw_rate_max_radps", ""),
+                            trajectory_duration_s=cycle_info.get("trajectory_duration_s", ""),
                         )
+                    # Cache previous MINCO samples for interplan comparison
+                    curr_minco_samples = cycle_info.get("samples")
+                    if curr_minco_samples is not None:
+                        planning_output.prev_minco_samples = curr_minco_samples
+                        planning_output.prev_published_time = float(cycle_info.get("timestamp_monotonic_s", time.monotonic()))
                     selected_index = int(cycle_info.get("selected_index", 0 if not used_minco else -1))
                     experiment_hook.record_candidates(
                         cycle_uid,
@@ -888,6 +943,7 @@ video_frame_shapes = [None for _ in range(args_cli.num_envs)]
 video_writer_failed = [False for _ in range(args_cli.num_envs)]
 
 trajectory_length = np.zeros((scene_config.num_envs))
+ep_min_clearance = np.full(args_cli.num_envs, float("inf"))
 frame_idx = 0
 
 try:
@@ -1123,6 +1179,16 @@ try:
                                     cmd_w_batch[i] = w
                                     joint_velocities = controller.forward(np.array([v, w])).joint_velocities
                                     control_states[i] = "CONTROL_ACTIVE"
+                                    # --- ESDF min clearance tracking for EXP-02/06 ---
+                                    if minco_adapter is not None and hasattr(minco_adapter, '_esdf_grid') and minco_adapter._esdf_grid is not None:
+                                        try:
+                                            robot_xy = robot_pos_w[i, :2]
+                                            esdf_vals, esdf_valid = minco_adapter._esdf_grid.query_points(np.atleast_2d(robot_xy))
+                                            if np.any(esdf_valid) and np.any(np.isfinite(esdf_vals[esdf_valid])):
+                                                clearance = float(np.min(esdf_vals[esdf_valid]))
+                                                ep_min_clearance[i] = min(ep_min_clearance[i], clearance)
+                                        except Exception:
+                                            pass
                                     current_ref = mpc_i.get_current_reference()
                                     if current_ref is not None:
                                         if np.isfinite(current_ref[3]):
@@ -1163,6 +1229,12 @@ try:
                                     if mpc_i is not None:
                                         mpc_i.reset()
                                     last_applied_plan_id[i] = -1
+                                    if experiment_hook is not None:
+                                        experiment_hook.record_event(
+                                            "MPC_FAILURE", severity="ERROR",
+                                            primary_reason=f"MPC_SOLVE_EXCEPTION: {exc}",
+                                            message=f"env={i} frame={frame_idx}",
+                                        )
                                     print(f"[MPC] env={i} solve failed: {exc}")
                 action_list.append(joint_velocities)
 
@@ -1295,13 +1367,17 @@ try:
                 reference_x = float(reference[0]) if reference is not None and np.isfinite(reference[0]) else ""
                 reference_y = float(reference[1]) if reference is not None and np.isfinite(reference[1]) else ""
                 tracking_error = float(np.linalg.norm(x0[0, :2] - reference[:2])) if reference is not None and np.all(np.isfinite(reference[:2])) else ""
+                ref_age = (time.monotonic() - planning_output.prev_published_time) * 1000.0 if planning_output.prev_published_time is not None else ""
                 experiment_hook.record_control_step(
                     frame_idx, str(current_plan_id), float(cmd_v_batch[0]), float(cmd_w_batch[0]),
                     control_state=control_states[0], robot_x_m=float(x0[0, 0]), robot_y_m=float(x0[0, 1]),
-                    robot_yaw_rad=float(x0[0, 2]), reference_x_m=reference_x, reference_y_m=reference_y,
+                    robot_yaw_rad=float(x0[0, 2]),
+                    actual_v_mps=float(robot_vel_batch[0]) if np.isfinite(robot_vel_batch[0]) else "",
+                    actual_w_radps=float(robot_ang_vel_batch[0]) if np.isfinite(robot_ang_vel_batch[0]) else "",
+                    reference_x_m=reference_x, reference_y_m=reference_y,
                     cross_track_error_m=tracking_error, time_aligned_position_error_m=tracking_error,
                     mpc_success=control_states[0] == "CONTROL_ACTIVE",
-                    mpc_solve_ms=control_timers[0].records.get("mpc_solve_ms", ""), reference_age_ms="",
+                    mpc_solve_ms=control_timers[0].records.get("mpc_solve_ms", ""), reference_age_ms=ref_age,
                     planned_v_mps=planned_v_batch[0] if np.isfinite(planned_v_batch[0]) else "",
                     planned_w_radps=planned_w_batch[0] if np.isfinite(planned_w_batch[0]) else "",
                     zero_command_reason=zero_reason_batch[0],
@@ -1329,10 +1405,18 @@ try:
                     executed_length = float(trajectory_length[i])
                     repository_spl = float(np.clip(euclidean[i] / executed_length, 0, 1)) if success_flag_bool and executed_length > 0 else 0.0
                     if experiment_hook is not None:
+                        experiment_hook.record_event(
+                            "EPISODE_END",
+                            severity="ERROR" if termination_reason in ("COLLISION", "TIMEOUT") else "INFO",
+                            primary_reason=termination_reason,
+                            message=f"env={i} generation={int(episode_generation[i])}",
+                        )
+                        min_clearance = float(ep_min_clearance[i]) if ep_min_clearance[i] < float("inf") else ""
                         experiment_hook.end_episode(
                             success=success_flag_bool, episode_index=episode_num, done_reason=termination_reason,
                             collision=termination_reason == "COLLISION", timeout=termination_reason == "TIMEOUT",
                             actual_path_length_m=executed_length, repository_spl=repository_spl,
+                            minimum_executed_clearance_m=min_clearance,
                         )
                     if episode_video_recorder is not None:
                         episode_video_recorder.end_episode()
@@ -1353,7 +1437,9 @@ try:
                         next_index = episode_num + 1
                         next_uid = args_cli.episode_uids[next_index] if args_cli.episode_uids else f"scene_{args_cli.scene_index}_episode_{next_index}"
                         if experiment_hook is not None:
-                            experiment_hook.reset(episode_generation[i]); experiment_hook.start_episode(next_uid, episode_generation[i])
+                            experiment_hook.reset(episode_generation[i])
+                            experiment_hook.start_episode(next_uid, episode_generation[i],
+                                initial_goal_distance_m=float(euclidean[i]) if np.isfinite(euclidean[i]) else None)
                         if episode_video_recorder is not None:
                             episode_video_recorder.start_episode(next_uid)
                     episode_diagnostics.begin_generation(i, episode_generation[i])
@@ -1362,6 +1448,8 @@ try:
                         mpc[i].reset()
                     if minco_adapter is not None:
                         minco_adapter.reset_history()
+                    ep_min_clearance[i] = float("inf")
+                    trajectory_length[i] = 0.0
                     last_applied_plan_id[i] = -1
                     mpc_zero_detectors[i].reset()
                     with output_lock:

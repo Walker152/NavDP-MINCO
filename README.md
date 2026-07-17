@@ -245,6 +245,82 @@ the v1.2.0-compatible `torch==2.4.0`/`triton==3.0.0` pair, and runs `pip check`.
 It also replaces stale `packaging` and `s3transfer` pins from that freeze with
 ranges compatible with the installed wheel and boto3 packages.
 
+#### AutoDL self-check and repair
+
+After setup, run the safe, one-command AutoDL diagnosis and repair:
+
+```bash
+bash scripts/autodl_self_check_repair.sh
+```
+
+By default, the script applies reversible runtime fixes, checks CUDA and Vulkan,
+runs an Isaac headless smoke test and an experiment dry-run, and writes an
+auditable report. It also strictly matches old orphaned Isaac/Kit, evaluation,
+NavDP server, and related Conda wrapper process trees tied to this repository
+or the configured IsaacLab path, then terminates those residual trees. The
+default minimum orphan age is 60 seconds and can be changed with
+`NAVDP_STALE_MIN_AGE_SECONDS`. The script excludes active process trees,
+younger orphans, itself and its ancestors, editors, log viewers, and unrelated
+same-name processes; a failed termination makes the repair fail instead of
+being reported as successful.
+
+Useful modes and overrides can be combined:
+
+```bash
+# Read-only diagnosis: do not write runtime files, update ~/.bashrc, or stop processes
+bash scripts/autodl_self_check_repair.sh --check-only
+
+# Skip either of the longer runtime checks
+bash scripts/autodl_self_check_repair.sh --skip-smoke --skip-dry-run
+
+# Select the suite, report location, and Isaac smoke timeout in seconds
+bash scripts/autodl_self_check_repair.sh \
+  --config configs/experiments/full_suite.json \
+  --report-dir results/autodl_self_check \
+  --smoke-timeout 180
+```
+
+`--config` defaults to `configs/experiments/full_suite.json`, and
+`--smoke-timeout` defaults to 180 seconds.
+
+In repair mode, the selected Vulkan ICD and resolved runtime paths are written
+to `${NAVDP_RUNTIME_ENV_FILE:-$HOME/.config/navdp/autodl-runtime.env}`. The
+script adds an idempotent `~/.bashrc` source block unless
+`NAVDP_SKIP_BASHRC_UPDATE=1` is set. To apply the repaired environment to the
+current shell immediately, run:
+
+```bash
+source "${NAVDP_RUNTIME_ENV_FILE:-$HOME/.config/navdp/autodl-runtime.env}"
+```
+
+Each run creates a timestamped report under
+`${REPO_ROOT}/results/autodl_self_check/` by default (or under `--report-dir`).
+Start with `summary.txt`; the same run directory also retains environment,
+process, Vulkan, CUDA, runtime-contract, Isaac smoke, dry-run, and historical
+diagnostic details. Report directories are private to the current user, and
+common token, password, secret, and key options are redacted from recorded
+process commands.
+
+Exit codes are `0` when all required checks pass (warnings are allowed), `1`
+when a required check still fails, `2` for invalid command-line arguments, and
+`130` when interrupted by the user.
+
+The repair safety boundary is intentionally narrow: the script never deletes
+NVIDIA driver packages or Vulkan ICD files, never deletes experiment results,
+checkpoints, scene assets, or logs, never overwrites repository runtime code or
+unpacks update bundles, and never starts a real experiment. The experiment
+check only builds and validates a zero-process dry-run plan.
+
+After repairing the cause of a historical `FAILED` run, source the runtime
+environment and explicitly resume and retry failed runs. This command starts
+real simulation and therefore remains a separate user action:
+
+```bash
+source "${NAVDP_RUNTIME_ENV_FILE:-$HOME/.config/navdp/autodl-runtime.env}"
+bash scripts/run_all_experiments.sh configs/experiments/full_suite.json \
+  --backend isaac --allow-real-simulation --resume --retry-failed
+```
+
 ```bash
 # create the environment
 conda create -n isaaclab python=3.10

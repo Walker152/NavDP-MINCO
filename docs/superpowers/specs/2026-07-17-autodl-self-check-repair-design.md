@@ -11,7 +11,7 @@
 - 不覆盖仓库运行时代码，不自动解压更新包。
 - 不删除实验结果、checkpoint、场景资源或日志。
 - 不启动带 `--allow-real-simulation` 的真实评测。
-- 默认直接终止严格匹配本仓库的残留 Isaac、Kit、eval、NavDP server 和相关 conda wrapper 进程，但必须排除脚本自身、祖先进程和不含仓库/IsaacLab 路径的同名系统进程。
+- 默认直接终止严格匹配本仓库、已被 PID 1 接管且超过最小存活时间的残留 Isaac、Kit、eval、NavDP server 和相关 conda wrapper 进程树，但必须排除脚本自身、祖先进程、仍有正常父进程的活动任务、低于最小存活时间的年轻孤儿，以及不含仓库/IsaacLab 路径的同名系统进程。
 
 ## 方案
 
@@ -68,6 +68,7 @@ bash scripts/autodl_self_check_repair.sh
 - `CONDA_ENVS_PATH`：默认 `$AUTODL_WORK_DIR/conda/envs`。
 - `NAVDP_RUNTIME_ENV_FILE`：默认 `$HOME/.config/navdp/autodl-runtime.env`。
 - `NAVDP_SKIP_BASHRC_UPDATE=1`：允许写运行环境文件但不更新 `~/.bashrc`。
+- `NAVDP_STALE_MIN_AGE_SECONDS`：孤儿进程被视为可清理残留前的最小存活时间，默认 60 秒。
 
 ## 执行流程
 
@@ -94,7 +95,7 @@ bash scripts/autodl_self_check_repair.sh
 
 ### 2. 残留进程识别与清理
 
-从 `ps -eo pid=,ppid=,pgid=,sid=,etimes=,args=` 读取进程快照。候选命令必须匹配至少一个运行入口：
+从 `ps -eo pid=,ppid=,pgid=,sid=,etimes=,args=` 读取进程快照。残留根必须已经被 PID 1 接管、存活时间不少于 `NAVDP_STALE_MIN_AGE_SECONDS`，并且候选命令必须匹配至少一个运行入口：
 
 - `eval_pointgoal_wheeled.py`
 - `omni.kit`
@@ -110,7 +111,9 @@ bash scripts/autodl_self_check_repair.sh
 - PID 1
 - 不含目标路径的其他用户进程
 
-默认模式对候选进程按 PGID 去重，先发送 `SIGTERM`，等待最多 5 秒，再对仍存活 PID 发送 `SIGKILL`。仅向其成员全部属于候选集合的进程组发送组信号；否则逐 PID 发送，避免影响共享 shell。
+匹配后代通过 PPID 图加入同一残留树。默认模式逐 PID 重新验证进程身份，先发送 `SIGTERM`，等待最多 5 秒，再对仍存活且身份未变化的 PID 发送 `SIGKILL`。生产模式优先使用 Linux pidfd 将身份与信号目标绑定；无法安全验证时必须失败关闭。这里不对快照中的 PGID 发送组信号，避免共享进程组或 PGID/PID 重用造成扩大误杀。
+
+测试模式不得执行外部 `kill` 或任何真实 OS 信号后端，只能使用脚本内部的信号记录器和存活状态模拟器。
 
 `--check-only` 只记录候选，不发送信号。
 
@@ -151,7 +154,7 @@ VK_DRIVER_FILES=<candidate>
 $NAVDP_RUNTIME_ENV_FILE
 ```
 
-文件导出 `VK_ICD_FILENAMES`、`VK_DRIVER_FILES`、`CONDA_ENVS_PATH` 和已解析的运行目录。脚本使用带起止标记的幂等区块让 `~/.bashrc` source 该文件；修改前创建一次备份。`NAVDP_SKIP_BASHRC_UPDATE=1` 时跳过 bashrc。
+文件导出 `VK_ICD_FILENAMES`、`VK_DRIVER_FILES`、`CONDA_ENVS_PATH` 和已解析的运行目录。脚本使用带起止标记的幂等区块让 `~/.bashrc` source 该文件；修改前创建备份。更新流程必须使用独占锁，并在替换前重新验证原文件身份和内容摘要；检测到并发修改时拒绝覆盖。`NAVDP_SKIP_BASHRC_UPDATE=1` 时跳过 bashrc。
 
 脚本自身立即导出同样变量，使后续 Conda、Isaac 和 dry-run 检查使用修复后的环境。
 
@@ -231,6 +234,8 @@ python -m experiments run-suite \
 - server/eval 端口一致。
 
 dry-run 只生成配置和计划文件，不启动 NavDP 或 Isaac 进程。
+脚本对共享的计划路径持有独占锁，并在生成和验证前后比较内容摘要；
+检测到并发替换或无法确认本次生成的新鲜度时失败关闭。
 
 ### 8. 历史日志诊断
 
@@ -290,7 +295,7 @@ Shell 集成测试通过临时 PATH 注入伪命令，不依赖真实 GPU 或 Co
 5. 无可用 NVIDIA ICD 时明确失败。
 6. `--check-only` 不写文件、不改 bashrc、不发 kill。
 7. 默认模式原子写环境文件，bashrc 区块不重复。
-8. 默认模式清理严格匹配的残留进程，同时保留不相关进程。
+8. 默认模式清理严格匹配且达到最小年龄的孤儿残留进程树，同时保留活跃任务、年轻孤儿和不相关进程。
 9. PyTorch CUDA 不可用时失败。
 10. Isaac smoke 出现 `app ready` 时通过并清理 smoke 进程。
 11. Isaac smoke 出现 GPU Foundation 致命错误时失败。

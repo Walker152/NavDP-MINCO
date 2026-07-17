@@ -102,7 +102,7 @@ def analyze_suite(suite_dir):
     episodes = _read_all(suite_dir.glob("experiments/*/*/*/*/*/episode_metrics.csv")); plans = _read_all(suite_dir.glob("experiments/*/*/*/*/*/plan_metrics.csv")); cycles = _read_all(suite_dir.glob("experiments/*/*/*/*/*/planning_cycles.csv"))
     controls = _read_all(suite_dir.glob("experiments/*/*/*/*/*/control_samples.csv")); timings = _read_all(suite_dir.glob("experiments/*/*/*/*/*/timing_samples.csv")); candidates = _read_all(suite_dir.glob("experiments/*/*/*/*/*/candidate_metrics.csv"))
     field_coverage = summarize_suite_field_coverage(suite_dir)
-    generate_result_tables(suite_dir, len(episodes), len(plans)); select_representative_cases(suite_dir, episodes, plans, cycles); failures = generate_failure_report(suite_dir, episodes)
+    generate_result_tables(suite_dir, len(episodes), len(plans)); select_representative_cases(suite_dir, episodes, plans, cycles); failures = generate_failure_report(suite_dir, episodes, plans, cycles)
     paired_summaries = _generate_paired_reports(suite_dir)
     plot_rows = []
     for index, name in enumerate(EXPERIMENT_NAMES):

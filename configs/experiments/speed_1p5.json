@@ -1,12 +1,23 @@
 {
-  "suite_id": "navdp_minco_full_real",
+  "suite_id": "navdp_minco_speed_1p5",
   "backend": "isaac",
   "output_root": "../../results",
   "scenario_manifest": "../../experiments/configs/real_pointgoal_scenarios.json",
-  "video": {"enabled": true, "fps": 10},
-  "monitor": {"enabled": true, "planning_trace": true},
-  "analysis": {"enabled": true, "paired": true},
-  "retry": {"failed": false},
+  "video": {
+    "enabled": true,
+    "fps": 10
+  },
+  "monitor": {
+    "enabled": true,
+    "planning_trace": true
+  },
+  "analysis": {
+    "enabled": true,
+    "paired": true
+  },
+  "retry": {
+    "failed": false
+  },
   "resume": true,
   "parameters": {
     "minco": {
@@ -17,7 +28,7 @@
       "validation_safe_distance_m": 0.35,
       "start_validation_exemption_radius_m": 0.35,
       "sample_dt_s": 0.05,
-      "max_velocity_mps": 1.0,
+      "max_velocity_mps": 1.5,
       "max_acceleration_mps2": 1.0,
       "max_iterations": 64,
       "penalty_weight_pos": 10000.0,
@@ -30,7 +41,7 @@
     "esdf": {
       "resolution_m": 0.05,
       "padding_m": 1.0,
-      "cache_name": "esdf_2d_easy0_hard0_full60_v1.npz",
+      "cache_name": "esdf_2d_speed_1p5.npz",
       "force_rebuild": false,
       "obstacle_min_height_m": 0.08,
       "obstacle_max_height_m": 0.8,
@@ -38,23 +49,44 @@
       "footprint_inflate_cells": 1
     },
     "raw_mpc": {
-      "desired_v": 1.0,
-      "v_max": 1.0
+      "desired_v": 1.5,
+      "v_max": 1.5
     },
     "minco_mpc": {
-      "desired_v_mps": 1.0,
-      "v_max_mps": 1.0,
+      "desired_v_mps": 1.5,
+      "v_max_mps": 1.5,
       "w_max_radps": 0.5,
       "max_acceleration_mps2": 1.0,
       "max_yaw_acceleration_radps2": 1.0,
       "max_wheel_speed_radps": null
     },
-    "video": {"fps": 10, "crf": 23, "scale": 1.0},
-    "scene": {"scale": 1.0}
+    "video": {
+      "fps": 10,
+      "crf": 23,
+      "scale": 1.0
+    },
+    "scene": {
+      "scale": 1.0
+    }
   },
   "runs": [
-    {"experiment_id": "EXP-ALL_data_collection", "variant": "raw", "warm_start_mode": "cold", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]},
-    {"experiment_id": "EXP-ALL_data_collection", "variant": "minco-cold", "warm_start_mode": "cold", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]},
-    {"experiment_id": "EXP-ALL_data_collection", "variant": "minco-hot", "warm_start_mode": "gated", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]}
+    {
+      "experiment_id": "EXP-speed-1p5",
+      "variant": "raw",
+      "warm_start_mode": "cold",
+      "scene_ids": [
+        "cluttered_easy_0",
+        "cluttered_hard_0"
+      ]
+    },
+    {
+      "experiment_id": "EXP-speed-1p5",
+      "variant": "minco-hot",
+      "warm_start_mode": "gated",
+      "scene_ids": [
+        "cluttered_easy_0",
+        "cluttered_hard_0"
+      ]
+    }
   ]
 }
