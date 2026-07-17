@@ -22,7 +22,11 @@ import minco_processor
 import _minco_processor
 
 doc = minco_processor.MincoProcessor.configure.__doc__ or ""
-required = ("optimization_safe_dist", "validation_safe_dist")
+required = (
+    "optimization_safe_dist",
+    "validation_safe_dist",
+    "start_validation_exemption_radius",
+)
 missing = [name for name in required if name not in doc]
 if missing:
     raise RuntimeError(f"wrong MINCO extension loaded; missing arguments: {missing}")
@@ -33,6 +37,7 @@ processor.configure(
     max_acc=1.0,
     optimization_safe_dist=0.45,
     validation_safe_dist=0.35,
+    start_validation_exemption_radius=0.35,
     sample_dt=0.05,
     max_iterations=64,
     max_yaw_rate=0.5,

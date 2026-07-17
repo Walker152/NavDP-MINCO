@@ -7,9 +7,11 @@ from pathlib import Path
 
 from experiments.analyzers.artifact_manifest import generate_artifact_manifest
 from experiments.analyzers.case_selector import select_representative_cases
+from experiments.analyzers.data_quality import summarize_suite_field_coverage
 from experiments.analyzers.failure_cases import generate_failure_report
 from experiments.analyzers.result_tables import generate_result_tables
 from experiments.analyzers.paired import compare_runs
+from experiments.analyzers.timing_analysis import generate_timing_analysis
 from experiments.visualizers.common import save_data_figure
 
 
@@ -21,7 +23,7 @@ PLOTS = {
 4:("hot_accept_rate_bar.png","hot_reject_reason_bar.png","interplan_position_rmse_distribution.png","initial_tangent_jump_distribution.png","command_delta_w_distribution.png","optimizer_time_distribution.png","previous_vs_new_trajectory_mock.png","trajectory_jump_vs_time_mock.png"),
 5:("tracking_error_ecdf.png","tracking_rmse_distribution.png","tracking_p95_distribution.png","mpc_failure_rate_bar.png","command_saturation_rate_bar.png","reference_age_ecdf.png","tracking_error_vs_time_mock.png","actual_reference_xy_mock.png","actual_reference_speed_mock.png","command_vw_vs_time_mock.png"),
 6:("success_rate_with_ci.png","collision_rate_with_ci.png","failure_reason_stacked_bar.png","episode_duration_distribution.png","actual_path_length_distribution.png","spl_distribution.png","paired_episode_duration_scatter.png","paired_path_length_scatter.png"),
-7:("planning_stage_mean_bar.png","planning_stage_p95_bar.png","planning_total_ecdf.png","minco_stage_p95_bar.png","mpc_solve_ecdf.png","recording_overhead_bar.png","observation_to_command_ecdf.png","deadline_miss_rate_bar.png"),
+7:("planning_stage_mean_bar.png","planning_stage_p95_bar.png","planning_total_ecdf.png","minco_stage_p95_bar.png","candidate_screen_time_distribution.png","candidate_attempts_vs_minco_latency.png","minco_latency_by_outcome.png","mpc_solve_ecdf.png","recording_overhead_bar.png","observation_to_command_ecdf.png","deadline_miss_rate_bar.png"),
 8:("failure_reason_bar.png","failure_stage_stacked_bar.png","failure_timeline_mock.png"),
 }
 
@@ -99,6 +101,7 @@ def analyze_suite(suite_dir):
     data_source = suite_config.get("data_source", "UNKNOWN")
     episodes = _read_all(suite_dir.glob("experiments/*/*/*/*/*/episode_metrics.csv")); plans = _read_all(suite_dir.glob("experiments/*/*/*/*/*/plan_metrics.csv")); cycles = _read_all(suite_dir.glob("experiments/*/*/*/*/*/planning_cycles.csv"))
     controls = _read_all(suite_dir.glob("experiments/*/*/*/*/*/control_samples.csv")); timings = _read_all(suite_dir.glob("experiments/*/*/*/*/*/timing_samples.csv")); candidates = _read_all(suite_dir.glob("experiments/*/*/*/*/*/candidate_metrics.csv"))
+    field_coverage = summarize_suite_field_coverage(suite_dir)
     generate_result_tables(suite_dir, len(episodes), len(plans)); select_representative_cases(suite_dir, episodes, plans, cycles); failures = generate_failure_report(suite_dir, episodes)
     paired_summaries = _generate_paired_reports(suite_dir)
     plot_rows = []
@@ -109,7 +112,27 @@ def analyze_suite(suite_dir):
             fields = ["experiment","scene","seed","comparison","paired_count","data_source"]
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
             for summary in paired_summaries: writer.writerow({key:summary.get(key, "") for key in fields[:-1]} | {"data_source":data_source})
+        timing_results = (
+            generate_timing_analysis(
+                directory, timings, cycles, candidates, data_source
+            )
+            if index == 7 else {}
+        )
         for filename in PLOTS.get(index, ()):
+            if filename in timing_results:
+                metadata = timing_results[filename]
+                path_text = metadata.get("path", "")
+                path = Path(path_text) if path_text else None
+                plot_rows.append({
+                    "experiment_id": exp_id,
+                    "plot_path": (
+                        str(path.relative_to(suite_dir)) if path else ""
+                    ),
+                    "status": metadata["status"],
+                    "skip_reason": metadata.get("skip_reason", ""),
+                    "data_source": data_source,
+                })
+                continue
             values = _plot_values(filename, (episodes, plans, cycles, controls, timings, candidates))
             path = save_data_figure(directory / "plots" / filename, f"{exp_id}: {filename} (n={len(values)})", values=values, data_source=data_source)
             plot_rows.append({"experiment_id":exp_id, "plot_path":str(path.relative_to(suite_dir)) if path else "", "status":"generated" if path else "skipped", "skip_reason":"" if path else "no finite data", "data_source":data_source})
@@ -120,7 +143,7 @@ def analyze_suite(suite_dir):
     text = "# NavDP–MINCO Suite Report\n\n"
     if data_source == "SIMULATED": text += "> **SIMULATED DATA — 工具链验收数据，不代表算法科研结论。**\n\n"
     text += f"## Configuration and provenance\n\nData source: {data_source}; run files: {len(list(suite_dir.glob('experiments/*/*/*/*/*/run_config.json')))}.\n\n"
-    text += f"## Data quality and coverage\n\nEpisodes: {len(episodes)}; planning cycles: {len(cycles)}; valid plans: {len(plans)}; failures: {len(failures)}.\n\n"
+    text += f"## Data quality and coverage\n\nEpisodes: {len(episodes)}; planning cycles: {len(cycles)}; valid plans: {len(plans)}; failures: {len(failures)}. Field coverage rows: {len(field_coverage)}; see `data_quality/field_coverage.csv`.\n\n"
     text += "## Core results\n\nSeven CSV/Markdown result tables are under `core_tables/`; all values include sample count, interval fields, baseline delta and source.\n\n"
     text += "## EXP-00 through EXP-08\n\nEach experiment has an independent report, summary, paired table, plots and tables directory.\n\n"
     text += f"## Improvements, regressions and failures\n\nGenerated {len(paired_summaries)} paired run comparisons from shared episode UIDs. No performance claim is made automatically.\n\n"

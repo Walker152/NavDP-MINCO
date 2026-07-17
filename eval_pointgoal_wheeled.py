@@ -34,9 +34,7 @@ parser.add_argument("--minco_max_top_k", type=int, default=4)
 parser.add_argument("--minco_candidate_time_budget_ms", type=float, default=1500.0)
 parser.add_argument("--minco_optimization_safe_dist", type=float, default=0.45)
 parser.add_argument("--minco_validation_safe_dist", type=float, default=0.35)
-parser.add_argument("--minco_path_min_length", type=float, default=0.20)
-parser.add_argument("--minco_path_max_start_gap", type=float, default=0.50)
-parser.add_argument("--minco_path_max_reversal_angle", type=float, default=2.6179938779914944)
+parser.add_argument("--minco_start_validation_exemption_radius", type=float, default=0.35)
 parser.add_argument("--minco_sample_dt", type=float, default=0.05)
 parser.add_argument("--minco_max_vel", type=float, default=1.0)
 parser.add_argument("--minco_max_acc", type=float, default=1.0)
@@ -253,7 +251,8 @@ def is_minco_cache_valid(cache, episode_gen):
         episode_gen,
         time.monotonic(),
         args_cli.minco_validation_safe_dist,
-        minco_adapter._query_min_esdf if minco_adapter is not None else lambda _: np.nan,
+        minco_adapter._inspect_esdf if minco_adapter is not None else lambda _: np.nan,
+        args_cli.minco_start_validation_exemption_radius,
     )
 
 def mark_planning_idle():
@@ -593,45 +592,122 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     published = fallback_mode == "NONE" and batch_optimal_points_world[idx] is not None
                     cycle_uid = f"{experiment_hook.episode_uid}_g{int(input_episode_generation[idx])}_c{planning_iter}"
                     cycle_info = batch_minco_info[idx] if isinstance(batch_minco_info[idx], dict) else {}
+                    candidate_evaluations = list(cycle_info.get("candidate_evaluations", []))
+                    candidate_timings = list(cycle_info.get("candidate_timings", []))
+                    screened_count = sum(
+                        bool(item.get("screen_valid", False))
+                        for item in candidate_evaluations
+                    )
+                    attempted_count = int(cycle_info.get(
+                        "attempted_candidate_count",
+                        len(candidate_timings) if used_minco else 0,
+                    ))
+                    adapter_timing = (
+                        cycle_info.get("adapter_timing_ms", {})
+                        if used_minco else {}
+                    ) or {}
                     experiment_hook.record_planning_cycle(
                         cycle_uid, published=published, stale=False, fallback_mode=fallback_mode,
                         failure_reason=cycle_info.get("failure_reason", ""), planning_total_ms=planning_total_ms,
                         candidate_count=len(batch_all_points_world[idx]),
-                        attempted_candidate_count=len(batch_all_points_world[idx]) if used_minco else 0,
+                        screened_candidate_count=screened_count if used_minco else 0,
+                        rejected_candidate_count=(
+                            len(batch_all_points_world[idx]) - screened_count if used_minco else 0
+                        ),
+                        attempted_candidate_count=attempted_count,
+                        attempted_candidate_indices=cycle_info.get("attempted_candidate_indices", []),
                         selected_candidate_index=cycle_info.get("selected_index", 0 if not used_minco else ""),
-                        optimizer_success=cycle_info.get("success", "") if used_minco else "",
+                        optimizer_success=cycle_info.get("optimizer_success", "") if used_minco else "",
+                        optimizer_return_code=cycle_info.get("optimizer_return_code", "") if used_minco else "",
+                        optimizer_iteration_count=cycle_info.get("optimizer_iteration_count", "") if used_minco else "",
+                        objective=cycle_info.get("objective", "") if used_minco else "",
                         cpp_validation_success=cycle_info.get("cpp_validation_success", cycle_info.get("success", "")) if used_minco else "",
+                        cpp_validation_min_clearance_m=cycle_info.get("validation_min_clearance", "") if used_minco else "",
                         python_validation_success=cycle_info.get("python_validation_success", cycle_info.get("success", "")) if used_minco else "",
+                        python_validation_min_clearance_m=cycle_info.get("py_min_esdf", "") if used_minco else "",
+                        validation_start_exempt_count=cycle_info.get("validation_start_exempt_count", "") if used_minco else "",
+                        validation_oob_count=cycle_info.get("validation_oob_count", "") if used_minco else "",
+                        validation_failure_reason=cycle_info.get("validation_failure_reason", "") if used_minco else "",
+                        candidate_screen_ms=adapter_timing.get("candidate_screen_ms", ""),
+                        candidate_attempt_total_ms=adapter_timing.get("candidate_attempt_total_ms", ""),
+                        candidate_cpp_total_ms=adapter_timing.get("candidate_cpp_total_ms", ""),
+                        python_validation_total_ms=adapter_timing.get("python_validation_total_ms", ""),
+                        adapter_overhead_ms=adapter_timing.get("adapter_overhead_ms", ""),
                         navdp_ms=planning_timing.get("navdp_step_ms", ""),
                         minco_ms=cycle_info.get("adapter_total_ms", 0.0 if not used_minco else ""),
                         validation_ms=cycle_info.get("python_validation_ms", ""),
                         planning_state=cycle_info.get("planning_state", ""),
                         hot_start_accepted=cycle_info.get("hot_start_accepted", False),
                     )
+                    plan_uid = f"{cycle_uid}_plan" if published else ""
                     if published:
-                        plan_uid = f"{cycle_uid}_plan"
                         experiment_hook.record_plan(
                             plan_uid, published=True, stale=False, plan_status=status,
                             planning_state=cycle_info.get("planning_state", ""),
                             hot_start_accepted=cycle_info.get("hot_start_accepted", False),
                             hot_reject_reason=cycle_info.get("hot_reject_reason", ""),
                             optimizer_success=cycle_info.get("success", "") if used_minco else "",
+                            optimizer_return_code=cycle_info.get("optimizer_return_code", "") if used_minco else "",
+                            optimizer_iteration_count=cycle_info.get("optimizer_iteration_count", "") if used_minco else "",
+                            objective=cycle_info.get("objective", "") if used_minco else "",
+                            cpp_validation_success=cycle_info.get("cpp_validation_success", "") if used_minco else "",
+                            cpp_validation_min_clearance_m=cycle_info.get("validation_min_clearance", "") if used_minco else "",
                             python_validation_success=cycle_info.get("python_validation_success", cycle_info.get("success", "")) if used_minco else "",
+                            python_validation_min_clearance_m=cycle_info.get("py_min_esdf", "") if used_minco else "",
+                            validation_start_exempt_count=cycle_info.get("validation_start_exempt_count", "") if used_minco else "",
+                            validation_oob_count=cycle_info.get("validation_oob_count", "") if used_minco else "",
                             failure_reason=cycle_info.get("failure_reason", ""),
-                            optimizer_iteration_count=cycle_info.get("optimizer_iteration_count", ""),
                             planning_total_ms=planning_total_ms,
                             raw_min_clearance_m=cycle_info.get("raw_min_clearance_m", ""),
                             raw_unsafe_ratio=cycle_info.get("raw_unsafe_ratio", ""),
                             raw_esdf_oob_ratio=cycle_info.get("raw_esdf_oob_ratio", ""),
                             raw_path_length_m=cycle_info.get("raw_path_length_m", ""),
+                            raw_curvature_abs_p95_1pm=cycle_info.get("raw_curvature_abs_p95_1pm", ""),
+                            raw_curvature_tv_1pm=cycle_info.get("raw_curvature_tv_1pm", ""),
                             minco_min_clearance_m=cycle_info.get("minco_min_clearance_m", ""),
                             minco_unsafe_ratio=cycle_info.get("minco_unsafe_ratio", ""),
                             minco_path_length_m=cycle_info.get("minco_path_length_m", ""),
+                            actual_speed_mean_mps=cycle_info.get("actual_speed_mean_mps", ""),
+                            actual_acc_rms_mps2=cycle_info.get("actual_acc_rms_mps2", ""),
+                            actual_jerk_rms_mps3=cycle_info.get("actual_jerk_rms_mps3", ""),
+                            actual_yaw_rate_rms_radps=cycle_info.get("actual_yaw_rate_rms_radps", ""),
                         )
-                        info = batch_minco_info[idx] if isinstance(batch_minco_info[idx], dict) else {}
-                        selected_index = int(info.get("selected_index", 0 if not used_minco else -1))
-                        experiment_hook.record_candidates(plan_uid, all_values_camera[idx], selected_index=selected_index)
-                        experiment_hook.record_timing("planning_total_ms", planning_total_ms, plan_uid=plan_uid)
+                    selected_index = int(cycle_info.get("selected_index", 0 if not used_minco else -1))
+                    experiment_hook.record_candidates(
+                        cycle_uid,
+                        plan_uid,
+                        all_values_camera[idx],
+                        selected_index=selected_index,
+                        candidate_records=candidate_evaluations,
+                        attempted_records=candidate_timings,
+                    )
+                    timing_uid = plan_uid or cycle_uid
+                    experiment_hook.record_timing(
+                        "planning_total_ms",
+                        planning_total_ms,
+                        plan_uid=timing_uid,
+                        status="OK" if published else "FAILED",
+                        event_type="PLANNING",
+                    )
+                    for metric_name, duration_ms in adapter_timing.items():
+                        experiment_hook.record_timing(
+                            metric_name,
+                            duration_ms,
+                            plan_uid=timing_uid,
+                            status="OK" if published else "FAILED",
+                            event_type="MINCO_ADAPTER_STAGE",
+                        )
+                    for metric_name, duration_ms in cycle_info.get("timing_ms", {}).items():
+                        if metric_name in adapter_timing:
+                            continue
+                        experiment_hook.record_timing(
+                            metric_name,
+                            duration_ms,
+                            plan_uid=timing_uid,
+                            status="OK" if published else "FAILED",
+                            event_type="MINCO_CPP_STAGE",
+                        )
+                    if published:
                         if trace_writer is not None:
                             robot_state = np.concatenate((
                                 np.asarray(robot_pos_w[idx, :2], dtype=np.float64),
@@ -767,9 +843,7 @@ if args_cli.enable_minco:
         initial_top_k=args_cli.minco_initial_top_k,
         max_top_k=args_cli.minco_max_top_k,
         candidate_time_budget_ms=args_cli.minco_candidate_time_budget_ms,
-        path_min_length=args_cli.minco_path_min_length,
-        path_max_start_gap=args_cli.minco_path_max_start_gap,
-        path_max_reversal_angle=args_cli.minco_path_max_reversal_angle,
+        start_validation_exemption_radius=args_cli.minco_start_validation_exemption_radius,
         sample_dt=args_cli.minco_sample_dt,
         speed=args_cli.speed,
         max_vel=args_cli.minco_max_vel,

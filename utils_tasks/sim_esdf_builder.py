@@ -4,6 +4,8 @@ import time
 import numpy as np
 from scipy.ndimage import binary_closing, binary_dilation, binary_fill_holes, distance_transform_edt
 
+from utils_tasks.esdf_query_utils import EsdfGridView
+
 
 class SimEsdfBuilder:
     REQUIRED_FIELDS = (
@@ -177,16 +179,12 @@ class SimEsdfBuilder:
 
     def query_grid(self, esdf: dict, pos_xy: np.ndarray):
         pos_xy = np.asarray(pos_xy, dtype=np.float64).reshape(-1)
-        origin = np.asarray(esdf["origin"], dtype=np.float64)
-        resolution = float(esdf["resolution"])
-        distance = np.asarray(esdf["distance"])
         if pos_xy.size < 2 or not np.all(np.isfinite(pos_xy[:2])):
             return False, float("nan")
-        mx = int(np.floor((pos_xy[0] - origin[0]) / resolution))
-        my = int(np.floor((pos_xy[1] - origin[1]) / resolution))
-        if my < 0 or my >= distance.shape[0] or mx < 0 or mx >= distance.shape[1]:
+        values, valid = EsdfGridView.from_mapping(esdf).query_points(pos_xy[:2])
+        if not valid[0]:
             return False, float("nan")
-        return True, float(distance[my, mx])
+        return True, float(values[0])
 
     @staticmethod
     def sample_triangle(v0, v1, v2, spacing):

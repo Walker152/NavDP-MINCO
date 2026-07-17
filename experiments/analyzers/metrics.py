@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import numpy as np
 
+from utils_tasks.esdf_query_utils import EsdfGridView
+
 
 def sanitize_polyline(points: np.ndarray) -> np.ndarray:
     points = np.asarray(points, dtype=np.float64)
@@ -58,26 +60,11 @@ def compute_geometric_metrics(points: np.ndarray, sample_ds: float = 0.025):
 
 
 def query_esdf_bilinear(distance, origin, resolution, points_xy):
-    distance = np.asarray(distance, dtype=float)
-    points = np.asarray(points_xy, dtype=float)
-    origin = np.asarray(origin, dtype=float)
-    result = np.full(len(points), np.nan)
-    valid = np.zeros(len(points), dtype=bool)
-    if resolution <= 0 or distance.ndim != 2:
-        return result, valid
-    grid = (points - origin) / resolution
-    for index, (x, y) in enumerate(grid):
-        if not np.isfinite(x + y) or x < 0 or y < 0 or x > distance.shape[1] - 1 or y > distance.shape[0] - 1:
-            continue
-        x0, y0 = int(math.floor(x)), int(math.floor(y))
-        x1, y1 = min(x0 + 1, distance.shape[1] - 1), min(y0 + 1, distance.shape[0] - 1)
-        values = np.array([distance[y0, x0], distance[y0, x1], distance[y1, x0], distance[y1, x1]])
-        if not np.all(np.isfinite(values)):
-            continue
-        tx, ty = x - x0, y - y0
-        result[index] = (1-ty)*((1-tx)*values[0]+tx*values[1]) + ty*((1-tx)*values[2]+tx*values[3])
-        valid[index] = True
-    return result, valid
+    return EsdfGridView(
+        distance=np.asarray(distance, dtype=np.float64),
+        origin=np.asarray(origin, dtype=np.float64),
+        resolution=float(resolution),
+    ).query_points(points_xy)
 
 
 def compute_safety_metrics(points_xy, esdf, safe_dist, sample_ds):

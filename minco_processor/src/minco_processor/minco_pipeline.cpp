@@ -193,90 +193,10 @@ void appendSparsePoint(SparseWaypointBuild & build, const std::vector<Eigen::Vec
   }
 }
 
-SparseWaypointBuild limitSparseWaypoints(const SparseWaypointBuild & in,
-  const std::vector<Eigen::Vector3d> & dense_path,
-  int max_count,
-  const std::function<bool(const Eigen::Vector3d &, const Eigen::Vector3d &)> & is_line_free)
-{
-  const int n = static_cast<int>(in.waypoints.size());
-  const int limit = std::max(2, max_count);
-  if (n <= limit) {
-    return in;
-  }
-
-  std::vector<size_t> keep;
-  keep.reserve(static_cast<size_t>(limit));
-  keep.push_back(0U);
-  for (size_t i = 1U; i + 1U < in.waypoints.size(); ++i) {
-    if (in.mandatory[i]) {
-      keep.push_back(i);
-    }
-  }
-  keep.push_back(in.waypoints.size() - 1U);
-  std::sort(keep.begin(), keep.end());
-  keep.erase(std::unique(keep.begin(), keep.end()), keep.end());
-
-  if (static_cast<int>(keep.size()) < limit) {
-    for (int slot = 1; slot < limit - 1; ++slot) {
-      const size_t idx = static_cast<size_t>(std::lround(
-        static_cast<double>(slot) * static_cast<double>(n - 1) / static_cast<double>(limit - 1)));
-      if (std::find(keep.begin(), keep.end(), idx) == keep.end()) {
-        keep.push_back(idx);
-      }
-    }
-    std::sort(keep.begin(), keep.end());
-    keep.erase(std::unique(keep.begin(), keep.end()), keep.end());
-    while (static_cast<int>(keep.size()) > limit) {
-      auto removable = std::find_if(keep.rbegin(), keep.rend(), [&in](size_t idx) {
-        return idx != 0U && idx + 1U != in.waypoints.size() && !in.mandatory[idx];
-      });
-      if (removable == keep.rend()) {
-        break;
-      }
-      keep.erase(std::next(removable).base());
-    }
-  }
-
-  SparseWaypointBuild out;
-  for (size_t idx : keep) {
-    appendSparsePoint(out, in.waypoints, idx, in.mandatory[idx]);
-    out.source_indices.back() = in.source_indices[idx];
-  }
-  out.mandatory_corner_count = in.mandatory_corner_count;
-
-  if (is_line_free && dense_path.size() >= 2U) {
-    for (size_t i = 0U; i + 1U < out.waypoints.size();) {
-      if (is_line_free(out.waypoints[i], out.waypoints[i + 1U])) {
-        ++i;
-        continue;
-      }
-      const size_t start_idx = std::min(out.source_indices[i], out.source_indices[i + 1U]);
-      const size_t end_idx = std::max(out.source_indices[i], out.source_indices[i + 1U]);
-      size_t corner_idx = findCornerIndex(dense_path, start_idx, end_idx);
-      if (corner_idx <= start_idx || corner_idx >= end_idx) {
-        corner_idx = std::min(start_idx + 1U, end_idx);
-      }
-      if (corner_idx <= start_idx || corner_idx >= end_idx) {
-        ++i;
-        continue;
-      }
-      Eigen::Vector3d corner = dense_path[corner_idx];
-      corner.z() = 0.0;
-      out.waypoints.insert(out.waypoints.begin() + static_cast<std::ptrdiff_t>(i + 1U), corner);
-      out.source_indices.insert(out.source_indices.begin() + static_cast<std::ptrdiff_t>(i + 1U), corner_idx);
-      out.mandatory.insert(out.mandatory.begin() + static_cast<std::ptrdiff_t>(i + 1U), true);
-      ++out.mandatory_corner_count;
-      ++i;
-    }
-  }
-  return out;
-}
-
 SparseWaypointBuild getSparseWaypoints(const std::vector<Eigen::Vector3d> & path,
   double max_vel,
   double max_acc,
   bool goal_reached,
-  int max_count,
   const std::function<bool(const Eigen::Vector3d &, const Eigen::Vector3d &)> & is_line_free)
 {
   SparseWaypointBuild sparse;
@@ -396,7 +316,7 @@ SparseWaypointBuild getSparseWaypoints(const std::vector<Eigen::Vector3d> & path
   if ((path.back() - sparse.waypoints.back()).head<2>().norm() > 1e-6) {
     appendSparsePoint(sparse, path, path.size() - 1U, true);
   }
-  return limitSparseWaypoints(sparse, path, max_count, is_line_free);
+  return sparse;
 }
 
 }  // namespace
@@ -439,7 +359,10 @@ void MincoPipeline::setConfig(const Config & config)
   optimizer_ = std::make_unique<minco_planner::MincoOptimizer>(config_.optimizer);
   yaw_optimizer_ = std::make_unique<traj_opt::YawTrajOpt>(config_.max_yaw_rate);
   safety_checker_ = std::make_unique<minco_planner::TrajectorySafetyChecker>();
-  safety_checker_->configure(config_.validation_safe_dist, config_.safety_sample_dt);
+  safety_checker_->configure(
+    config_.validation_safe_dist,
+    config_.safety_sample_dt,
+    config_.start_validation_exemption_radius);
   setMap(map_);
 }
 
@@ -533,13 +456,6 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     prepareColdStart(request.current, result.start_state);
   }
   optimizer_->setInitPsAndTs(super_utils::vec_Vec3f{}, super_utils::VecDf{});
-
-  if (safety_checker_) {
-    Eigen::Vector3d start_pos = result.start_state.col(0);
-    if (safety_checker_->projectOutOfObstacle(start_pos, config_.start_projection_margin)) {
-      result.start_state.col(0) = start_pos;
-    }
-  }
 
   result.end_state.setZero();
   result.end_state.col(0) = result.sparse_waypoints.back();
@@ -712,15 +628,18 @@ std::vector<Eigen::Vector3d> MincoPipeline::sparsifyPath(
     config_.optimizer.max_vel,
     config_.optimizer.max_acc,
     local_end_is_goal,
-    config_.max_sparse_waypoints,
-    [this](const Eigen::Vector3d & a, const Eigen::Vector3d & b) { return isLineFree(a, b); });
+    [this, &dense_path](const Eigen::Vector3d & a, const Eigen::Vector3d & b) {
+      return isLineFree(a, b, dense_path.front());
+    });
   if (mandatory_corner_count) {
     *mandatory_corner_count = build.mandatory_corner_count;
   }
   return build.waypoints;
 }
 
-bool MincoPipeline::isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d & p2) const
+bool MincoPipeline::isLineFree(
+  const Eigen::Vector3d & p1, const Eigen::Vector3d & p2,
+  const Eigen::Vector3d & validation_start) const
 {
   if (!map_) {
     return true;
@@ -738,7 +657,17 @@ bool MincoPipeline::isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d
     p.z() = 0.0;
 
     const auto query = map_->query(p);
-    if (!query.ok || query.distance <= config_.validation_safe_dist) {
+    if (!query.ok || !std::isfinite(query.distance)) {
+      return false;
+    }
+    const bool start_exempt =
+      (p - validation_start).head<2>().norm() <=
+      config_.start_validation_exemption_radius + 1e-12;
+    if (start_exempt) {
+      if (query.distance < 0.0) {
+        return false;
+      }
+    } else if (query.distance <= config_.validation_safe_dist) {
       return false;
     }
   }
@@ -788,6 +717,8 @@ MincoPipeline::PlanningState MincoPipeline::determinePlanningState(
     const double step = std::max(0.02, config_.validation_sample_dt);
     const int sample_count = std::max(1, static_cast<int>(std::ceil(remaining / step)));
     double min_clearance = std::numeric_limits<double>::infinity();
+    Eigen::Vector3d history_start = last_traj_.getPos(t_dur);
+    history_start.z() = 0.0;
     for (int i = 0; i <= sample_count; ++i) {
       const double sample_t = std::min(
         total_duration, t_dur + remaining * static_cast<double>(i) / sample_count);
@@ -795,7 +726,13 @@ MincoPipeline::PlanningState MincoPipeline::determinePlanningState(
       sample_pos.z() = 0.0;
       const auto query = map_->query(sample_pos);
       if (query.ok) min_clearance = std::min(min_clearance, query.distance);
-      if (!query.ok || query.distance <= config_.validation_safe_dist) {
+      const bool start_exempt =
+        (sample_pos - history_start).head<2>().norm() <=
+        config_.start_validation_exemption_radius + 1e-12;
+      const bool unsafe =
+        !query.ok || !std::isfinite(query.distance) ||
+        (start_exempt ? query.distance < 0.0 : query.distance <= config_.validation_safe_dist);
+      if (unsafe) {
         if (diagnostics && std::isfinite(min_clearance)) diagnostics->history_min_clearance = min_clearance;
         return reject(query.ok ? "HOT_REJECT_HISTORY_UNSAFE" : "HOT_REJECT_HISTORY_OOB");
       }
@@ -976,6 +913,8 @@ bool MincoPipeline::validateTrajectory(
     if (diagnostics) {
       diagnostics->validation_min_clearance = report.min_clearance;
       diagnostics->validation_oob_count = report.out_of_bounds_count;
+      diagnostics->validation_start_exempt_count = report.start_exempt_sample_count;
+      diagnostics->validation_negative_esdf_count = report.negative_esdf_count;
     }
     if (!report.safe) {
       return reject(report.reason);

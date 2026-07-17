@@ -5,10 +5,13 @@
 
 namespace minco_planner {
 
-void TrajectorySafetyChecker::configure(double safe_dist, double sample_dt)
+void TrajectorySafetyChecker::configure(
+  double safe_dist, double sample_dt, double start_exemption_radius)
 {
   safe_dist_ = safe_dist;
   sample_dt_ = sample_dt > 1e-6 ? sample_dt : 0.05;
+  start_exemption_radius_ =
+    std::isfinite(start_exemption_radius) ? std::max(0.0, start_exemption_radius) : 0.0;
 }
 
 void TrajectorySafetyChecker::setQuery(std::shared_ptr<minco_processor::EsdfMapInterface> dynamic_query)
@@ -42,14 +45,33 @@ TrajectorySafetyReport TrajectorySafetyChecker::inspectTrajectory(
     return report;
   }
   const double dur = traj.getTotalDuration();
-  for (double t = 0.0; t <= dur; t += sample_dt_) {
-    const auto query = dynamic_query_->query(traj.getPos(t));
+  if (!(std::isfinite(dur) && dur >= 0.0)) {
+    report.reason = "VALIDATION_INVALID_DURATION";
+    return report;
+  }
+  const Eigen::Vector3d start = traj.getPos(0.0);
+  const int sample_count = std::max(1, static_cast<int>(std::ceil(dur / sample_dt_)));
+  for (int i = 0; i <= sample_count; ++i) {
+    const double t = std::min(dur, static_cast<double>(i) * dur / sample_count);
+    const Eigen::Vector3d position = traj.getPos(t);
+    const auto query = dynamic_query_->query(position);
     if (!query.ok || !std::isfinite(query.distance)) {
       ++report.out_of_bounds_count;
       report.reason = "VALIDATION_ESDF_OOB";
       return report;
     }
     report.min_clearance = std::min(report.min_clearance, query.distance);
+    const bool start_exempt =
+      (position - start).head<2>().norm() <= start_exemption_radius_ + 1e-12;
+    if (start_exempt) {
+      ++report.start_exempt_sample_count;
+      if (query.distance < 0.0) {
+        ++report.negative_esdf_count;
+        report.reason = "VALIDATION_NEGATIVE_ESDF";
+        return report;
+      }
+      continue;
+    }
     if (query.distance <= safe_dist_) {
       report.reason = "VALIDATION_CLEARANCE";
       return report;

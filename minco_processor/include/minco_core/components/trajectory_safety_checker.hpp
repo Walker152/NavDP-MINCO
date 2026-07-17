@@ -18,12 +18,14 @@ struct TrajectorySafetyReport
   std::string reason{"NO_MAP"};
   double min_clearance{std::numeric_limits<double>::infinity()};
   int out_of_bounds_count{0};
+  int start_exempt_sample_count{0};
+  int negative_esdf_count{0};
 };
 
 class TrajectorySafetyChecker
 {
 public:
-  void configure(double safe_dist, double sample_dt);
+  void configure(double safe_dist, double sample_dt, double start_exemption_radius = 0.0);
   void setQuery(std::shared_ptr<minco_processor::EsdfMapInterface> dynamic_query);
 
   bool checkPoint(const Eigen::Vector3d & pos) const;
@@ -36,6 +38,7 @@ private:
   std::shared_ptr<minco_processor::EsdfMapInterface> dynamic_query_;
   double safe_dist_{0.0};
   double sample_dt_{0.05};
+  double start_exemption_radius_{0.0};
 };
 
 }  // namespace minco_planner

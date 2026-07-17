@@ -6,6 +6,7 @@ from pathlib import Path
 
 from experiments.core.schemas import SCHEMAS
 from experiments.core.trace_schema import validate_trace
+from experiments.analyzers.data_quality import summarize_field_coverage
 from experiments.recorders.run_recorder import atomic_json
 
 
@@ -13,11 +14,73 @@ PRIMARY_KEYS = {
     "planning_cycles": ("episode_uid", "planning_cycle_uid"),
     "episode_metrics": ("episode_uid",),
     "plan_metrics": ("plan_uid",),
-    "candidate_metrics": ("plan_uid", "candidate_index"),
+    "candidate_metrics": ("episode_uid", "planning_cycle_uid", "candidate_index"),
     "control_samples": ("episode_uid", "frame_idx"),
     "timing_samples": ("episode_uid", "event_type", "plan_uid", "frame_idx", "metric_name"),
     "events": ("episode_uid", "timestamp_monotonic_s", "event_type"),
 }
+
+def _is_blank(value):
+    return str(value).strip().lower() in {
+        "", "nan", "+nan", "-nan", "inf", "+inf", "-inf",
+        "infinity", "+infinity", "-infinity",
+    }
+
+
+def required_diagnostic_errors(table_rows, variant, data_source):
+    if data_source != "REAL" or variant == "raw":
+        return []
+    errors = []
+    required_cycle_fields = (
+        "attempted_candidate_indices",
+        "optimizer_return_code",
+        "optimizer_iteration_count",
+        "objective",
+        "cpp_validation_min_clearance_m",
+        "python_validation_min_clearance_m",
+        "validation_start_exempt_count",
+        "validation_oob_count",
+    )
+    required_timing_fields = (
+        "candidate_screen_ms",
+        "candidate_attempt_total_ms",
+        "candidate_cpp_total_ms",
+        "python_validation_total_ms",
+        "adapter_overhead_ms",
+    )
+    for row in table_rows.get("planning_cycles", []):
+        stale = str(row.get("stale", "")).lower() == "true"
+        try:
+            candidate_count = int(float(row.get("candidate_count") or 0))
+        except (TypeError, ValueError):
+            candidate_count = 0
+        key = row.get("planning_cycle_uid", "")
+        if not stale and candidate_count > 0:
+            for field in required_timing_fields:
+                if _is_blank(row.get(field, "")):
+                    errors.append(
+                        f"missing required MINCO diagnostic: "
+                        f"planning_cycles.{field}: {key}"
+                    )
+        if str(row.get("published", "")).lower() != "true" or stale:
+            continue
+        for field in required_cycle_fields:
+            if _is_blank(row.get(field, "")):
+                errors.append(f"missing required MINCO diagnostic: planning_cycles.{field}: {key}")
+    required_candidate_fields = (
+        "critic_rank", "screen_rank", "screen_valid", "screen_safe",
+        "screen_reason", "attempted",
+    )
+    for row in table_rows.get("candidate_metrics", []):
+        key = f"{row.get('planning_cycle_uid', '')}/{row.get('candidate_index', '')}"
+        for field in required_candidate_fields:
+            if _is_blank(row.get(field, "")):
+                errors.append(f"missing required MINCO diagnostic: candidate_metrics.{field}: {key}")
+        if str(row.get("screen_valid", "")).lower() == "true":
+            for field in ("path_length_m", "min_clearance_m", "unsafe_ratio", "esdf_oob_ratio"):
+                if _is_blank(row.get(field, "")):
+                    errors.append(f"missing required MINCO diagnostic: candidate_metrics.{field}: {key}")
+    return errors
 
 
 def validate_run(run_dir: Path | str, write_report=True):
@@ -54,6 +117,11 @@ def validate_run(run_dir: Path | str, write_report=True):
     if config.get("variant") == "raw":
         if any(int(float(row.get("attempted_candidate_count") or 0)) != 0 for row in cycles): errors.append("raw variant attempted MINCO candidates")
         if any(float(row.get("minco_ms") or 0.0) != 0.0 for row in cycles): errors.append("raw variant recorded nonzero minco_ms")
+    errors.extend(required_diagnostic_errors(
+        table_rows,
+        config.get("variant", ""),
+        config.get("data_source", ""),
+    ))
     expected_uids = list(config.get("episode_uids", []))
     actual_uids = [row.get("episode_uid") for row in table_rows.get("episode_metrics", [])]
     if expected_uids and sorted(actual_uids) != sorted(expected_uids): errors.append("episode completion set does not match run_config")
@@ -93,6 +161,7 @@ def validate_run(run_dir: Path | str, write_report=True):
                 if not payload.get("complete") or int(payload.get("frame_count", 0)) <= 0: errors.append(f"incomplete video metadata: {uid}")
             except Exception as error: errors.append(f"unreadable video metadata: {uid}: {error}")
     result = {"valid": not errors, "errors": errors, "row_counts": counts}
+    summarize_field_coverage(run_dir, write_output=True)
     if write_report:
         atomic_json(run_dir / "validation_report.json", result)
         (run_dir / "validation_report.md").write_text("# Run Validation\n\n" + ("PASS" if result["valid"] else "FAIL") + "\n\n" + "\n".join(f"- {item}" for item in errors) + "\n", encoding="utf-8")

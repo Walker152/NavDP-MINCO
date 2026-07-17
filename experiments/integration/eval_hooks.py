@@ -2,6 +2,15 @@ from __future__ import annotations
 
 import time
 import math
+import json
+
+
+def _finite_or_blank(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return number if math.isfinite(number) else ""
 
 
 class ExperimentHookBridge:
@@ -18,7 +27,20 @@ class ExperimentHookBridge:
         self.sink.submit_csv("events", {**self._base(), "timestamp_monotonic_s":time.monotonic(), "frame_idx":0, "plan_uid":"", "event_type":"EPISODE_START", "severity":"INFO", "primary_reason":"", "secondary_reason":"", "message":f"generation={generation}"})
 
     def record_planning_cycle(self, cycle_uid, published, stale, fallback_mode, failure_reason="", **fields):
-        row = {**self._base(), "episode_generation":self.generation, "planning_cycle_uid":cycle_uid, "trigger_timestamp_s":time.monotonic(), "raw_available":fields.get("raw_available", True), "candidate_count":fields.get("candidate_count", 0), "screened_candidate_count":fields.get("screened_candidate_count", 0), "rejected_candidate_count":fields.get("rejected_candidate_count", 0), "attempted_candidate_count":fields.get("attempted_candidate_count", 0), "selected_candidate_index":fields.get("selected_candidate_index", ""), "optimizer_success":fields.get("optimizer_success", ""), "cpp_validation_success":fields.get("cpp_validation_success", ""), "python_validation_success":fields.get("python_validation_success", ""), "validation_failure_reason":fields.get("validation_failure_reason", ""), "stale":bool(stale), "published":bool(published), "fallback_mode":fallback_mode, "failure_reason":failure_reason, "navdp_ms":fields.get("navdp_ms", ""), "minco_ms":fields.get("minco_ms", ""), "validation_ms":fields.get("validation_ms", ""), "planning_total_ms":fields.get("planning_total_ms", ""), "plan_age_when_applied_ms":fields.get("plan_age_when_applied_ms", "")}
+        attempted_indices = fields.get("attempted_candidate_indices", [])
+        if not isinstance(attempted_indices, str):
+            attempted_indices = json.dumps([int(value) for value in attempted_indices])
+        row = {**self._base(), "episode_generation":self.generation, "planning_cycle_uid":cycle_uid, "trigger_timestamp_s":time.monotonic(), "raw_available":fields.get("raw_available", True), "candidate_count":fields.get("candidate_count", 0), "screened_candidate_count":fields.get("screened_candidate_count", 0), "rejected_candidate_count":fields.get("rejected_candidate_count", 0), "attempted_candidate_count":fields.get("attempted_candidate_count", 0), "attempted_candidate_indices":attempted_indices, "selected_candidate_index":fields.get("selected_candidate_index", ""), "optimizer_success":fields.get("optimizer_success", ""), "optimizer_return_code":fields.get("optimizer_return_code", ""), "optimizer_iteration_count":fields.get("optimizer_iteration_count", ""), "objective":fields.get("objective", ""), "cpp_validation_success":fields.get("cpp_validation_success", ""), "cpp_validation_min_clearance_m":fields.get("cpp_validation_min_clearance_m", ""), "python_validation_success":fields.get("python_validation_success", ""), "python_validation_min_clearance_m":fields.get("python_validation_min_clearance_m", ""), "validation_start_exempt_count":fields.get("validation_start_exempt_count", ""), "validation_oob_count":fields.get("validation_oob_count", ""), "validation_failure_reason":fields.get("validation_failure_reason", ""), "candidate_screen_ms":fields.get("candidate_screen_ms", ""), "candidate_attempt_total_ms":fields.get("candidate_attempt_total_ms", ""), "candidate_cpp_total_ms":fields.get("candidate_cpp_total_ms", ""), "python_validation_total_ms":fields.get("python_validation_total_ms", ""), "adapter_overhead_ms":fields.get("adapter_overhead_ms", ""), "stale":bool(stale), "published":bool(published), "fallback_mode":fallback_mode, "failure_reason":failure_reason, "navdp_ms":fields.get("navdp_ms", ""), "minco_ms":fields.get("minco_ms", ""), "validation_ms":fields.get("validation_ms", ""), "planning_total_ms":fields.get("planning_total_ms", ""), "plan_age_when_applied_ms":fields.get("plan_age_when_applied_ms", "")}
+        for field in (
+            "optimizer_return_code", "optimizer_iteration_count", "objective",
+            "cpp_validation_min_clearance_m", "python_validation_min_clearance_m",
+            "validation_start_exempt_count", "validation_oob_count", "navdp_ms",
+            "candidate_screen_ms", "candidate_attempt_total_ms",
+            "candidate_cpp_total_ms", "python_validation_total_ms",
+            "adapter_overhead_ms", "minco_ms", "validation_ms", "planning_total_ms",
+            "plan_age_when_applied_ms",
+        ):
+            row[field] = _finite_or_blank(row[field])
         self.sink.submit_csv("planning_cycles", row)
         self._cycle_rows.append({**row, "planning_state":fields.get("planning_state", ""), "hot_start_accepted":fields.get("hot_start_accepted", False)})
         self._cycle += 1
@@ -34,7 +56,10 @@ class ExperimentHookBridge:
             "actual_speed_mean_mps", "actual_acc_rms_mps2", "actual_jerk_rms_mps3",
             "actual_yaw_rate_rms_radps", "planning_state", "hot_start_accepted",
             "hot_reject_reason", "optimizer_success", "python_validation_success",
-            "failure_reason", "optimizer_iteration_count", "planning_total_ms",
+            "optimizer_return_code", "optimizer_iteration_count", "objective",
+            "cpp_validation_success", "cpp_validation_min_clearance_m",
+            "python_validation_min_clearance_m", "validation_start_exempt_count",
+            "validation_oob_count", "failure_reason", "planning_total_ms",
         )
         row = {
             **self._base(), "plan_uid":plan_uid,
@@ -43,14 +68,84 @@ class ExperimentHookBridge:
             "fallback_mode":fields.get("fallback_mode", "NONE"),
         }
         row.update({column: fields.get(column, "") for column in columns})
+        for column in (
+            "raw_min_clearance_m", "raw_unsafe_ratio", "raw_esdf_oob_ratio",
+            "raw_path_length_m", "raw_curvature_abs_p95_1pm", "raw_curvature_tv_1pm",
+            "raw_interplan_position_rmse_m", "raw_initial_tangent_jump_rad",
+            "minco_min_clearance_m", "minco_unsafe_ratio", "minco_path_length_m",
+            "actual_speed_mean_mps", "actual_acc_rms_mps2", "actual_jerk_rms_mps3",
+            "actual_yaw_rate_rms_radps", "optimizer_return_code",
+            "optimizer_iteration_count", "objective", "cpp_validation_min_clearance_m",
+            "python_validation_min_clearance_m", "validation_start_exempt_count",
+            "validation_oob_count", "planning_total_ms",
+        ):
+            row[column] = _finite_or_blank(row[column])
         self.sink.submit_csv("plan_metrics", row)
         return True
 
-    def record_candidates(self, plan_uid, critic_values, selected_index=-1):
+    def record_candidates(
+        self,
+        planning_cycle_uid,
+        plan_uid,
+        critic_values,
+        selected_index=-1,
+        candidate_records=None,
+        attempted_records=None,
+    ):
+        critic_values = list(critic_values)
+        critic_order = sorted(
+            range(len(critic_values)),
+            key=lambda index: (
+                -float(critic_values[index])
+                if math.isfinite(float(critic_values[index]))
+                else float("inf"),
+                index,
+            ),
+        )
+        critic_ranks = {index: rank for rank, index in enumerate(critic_order)}
+        candidate_by_index = {
+            int(record.get("candidate_index", index)): record
+            for index, record in enumerate(candidate_records or [])
+        }
+        attempt_by_index = {
+            int(record["selected_index"]): record
+            for record in (attempted_records or [])
+            if "selected_index" in record
+        }
         for index, value in enumerate(critic_values):
+            candidate = candidate_by_index.get(index, {})
+            attempt = attempt_by_index.get(index, {})
+            attempt_stages = attempt.get("timing_ms", {}) or {}
             self.sink.submit_csv("candidate_metrics", {
-                **self._base(), "plan_uid":plan_uid, "candidate_index":index,
-                "candidate_rank":index + 1, "critic_value":float(value),
+                **self._base(), "planning_cycle_uid":planning_cycle_uid,
+                "plan_uid":plan_uid, "candidate_index":index,
+                "candidate_rank":candidate.get("screen_rank", critic_ranks[index]),
+                "critic_rank":critic_ranks[index],
+                "screen_rank":candidate.get("screen_rank", ""),
+                "attempted_rank":attempt.get("candidate_rank", ""),
+                "critic_value":_finite_or_blank(value),
+                "screen_valid":candidate.get("screen_valid", ""),
+                "screen_safe":candidate.get("screen_safe", ""),
+                "screen_reason":candidate.get("screen_reason", ""),
+                "attempted":index in attempt_by_index,
+                "optimizer_success":attempt.get(
+                    "optimizer_success", attempt.get("success", "")
+                ),
+                "optimizer_return_code":attempt.get("optimizer_return_code", ""),
+                "optimizer_iteration_count":attempt.get("optimizer_iteration_count", ""),
+                "objective":_finite_or_blank(attempt.get("objective", "")),
+                "failure_reason":attempt.get("failure_reason", ""),
+                "candidate_call_ms":_finite_or_blank(attempt.get("python_call_ms", "")),
+                "cpp_pipeline_ms":_finite_or_blank(attempt.get("cpp_optimize_time_ms", "")),
+                "optimizer_ms":_finite_or_blank(attempt_stages.get("optimizer_ms", "")),
+                "cpp_validation_ms":_finite_or_blank(attempt_stages.get("validate_ms", "")),
+                "python_validation_ms":_finite_or_blank(attempt.get("python_validation_ms", "")),
+                "path_length_m":_finite_or_blank(candidate.get("path_length_m", "")),
+                "min_clearance_m":_finite_or_blank(candidate.get("min_esdf", "")),
+                "python_min_clearance_m":_finite_or_blank(attempt.get("python_min_esdf", "")),
+                "unsafe_ratio":_finite_or_blank(candidate.get("unsafe_ratio", "")),
+                "esdf_oob_ratio":_finite_or_blank(candidate.get("oob_ratio", "")),
+                "curvature_tv_1pm":_finite_or_blank(candidate.get("curvature_tv_1pm", "")),
                 "selected":index == int(selected_index),
             })
 

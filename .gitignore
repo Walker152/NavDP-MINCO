@@ -10,6 +10,7 @@ minco_processor/build/
 *.jpg
 *.usd
 *.png
+*.csv
 assets/scenes/Materials/*
 assets/scenes/SkyTexture/*
 assets/scenes/embodiedscan/*

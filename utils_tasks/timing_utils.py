@@ -64,11 +64,16 @@ def format_planning_summary(timing):
 
 def format_minco_summary(env_i, info):
     timing_ms = info.get("timing_ms", {}) or {}
+    adapter_timing = info.get("adapter_timing_ms", {}) or {}
     return (
         "[Timing][MINCO] "
         f"env={env_i} status={info.get('status', 'MINCO_OK' if info.get('success', False) else 'MINCO_STOP')} "
         f"adapter={info.get('adapter_total_ms', np.nan):.2f}ms "
         f"cpp={info.get('selected_cpp_optimize_time_ms', np.nan):.2f}ms "
+        f"screen={adapter_timing.get('candidate_screen_ms', np.nan):.2f}ms "
+        f"attempts={info.get('attempted_candidate_count', 0)}/{info.get('configured_top_k', 0)} "
+        f"cpp_total={adapter_timing.get('candidate_cpp_total_ms', np.nan):.2f}ms "
+        f"py_validate={adapter_timing.get('python_validation_total_ms', np.nan):.2f}ms "
         f"optimizer={timing_ms.get('optimizer_ms', np.nan):.2f}ms "
         f"validate={timing_ms.get('validate_ms', np.nan):.2f}ms "
         f"sparse_n={info.get('sparse_waypoint_size', 0)} "
@@ -139,6 +144,7 @@ def append_timing_panel(image, planning_timing, control_timing, env_index=0):
     planning_timing = planning_timing or {}
     control_timing = control_timing or {}
     minco_info = _minco_info_for_env(planning_timing, env_index)
+    adapter_timing = minco_info.get("adapter_timing_ms", {}) or {}
     transform_ms = _sum_optional(
         planning_timing.get("raw_transform_ms"),
         planning_timing.get("candidate_transform_ms"),
@@ -167,8 +173,19 @@ def append_timing_panel(image, planning_timing, control_timing, env_index=0):
             "MINCO",
             (
                 f"total {_fmt_ms(planning_timing.get('minco_total_ms'))} ms | "
-                f"selected C++ {_fmt_ms(minco_info.get('selected_cpp_optimize_time_ms'))} | "
-                f"adapter {_fmt_ms(minco_info.get('adapter_total_ms'))} | "
+                f"screen {_fmt_ms(adapter_timing.get('candidate_screen_ms'))} | "
+                f"attempts {_fmt_count(minco_info.get('attempted_candidate_count'))}/"
+                f"{_fmt_count(minco_info.get('configured_top_k'))} | "
+                f"calls {_fmt_ms(adapter_timing.get('candidate_attempt_total_ms'))}"
+            ),
+            COLOR_MINCO,
+        ),
+        (
+            "MINCO detail",
+            (
+                f"C++ total {_fmt_ms(adapter_timing.get('candidate_cpp_total_ms'))} ms | "
+                f"optimizer {_fmt_ms((minco_info.get('timing_ms') or {}).get('optimizer_ms'))} | "
+                f"Py validate {_fmt_ms(adapter_timing.get('python_validation_total_ms'))} | "
                 f"iter {_fmt_count(minco_info.get('optimizer_iteration_count'))}"
             ),
             COLOR_MINCO,

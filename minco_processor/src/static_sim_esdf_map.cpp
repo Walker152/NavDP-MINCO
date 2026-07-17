@@ -37,8 +37,16 @@ QueryResult StaticSimEsdfMap2D::query(const Eigen::Vector3d & pos) const
     result.status = QueryStatus::kUnavailable;
     return result;
   }
-  const double gx = (pos.x() - origin_x_) / resolution_;
-  const double gy = (pos.y() - origin_y_) / resolution_;
+  const double raw_x = (pos.x() - origin_x_) / resolution_;
+  const double raw_y = (pos.y() - origin_y_) / resolution_;
+  if (raw_x < 0.0 || raw_y < 0.0 ||
+      raw_x >= static_cast<double>(distance_.cols()) ||
+      raw_y >= static_cast<double>(distance_.rows())) {
+    result.status = QueryStatus::kOutOfMap;
+    return result;
+  }
+  const double gx = raw_x - 0.5;
+  const double gy = raw_y - 0.5;
   double dist = 0.0;
   if (!interpolate(gx, gy, dist)) {
     result.status = QueryStatus::kOutOfMap;
@@ -139,18 +147,21 @@ bool StaticSimEsdfMap2D::hasMap() const
 
 bool StaticSimEsdfMap2D::interpolate(double gx, double gy, double & distance) const
 {
-  if (!hasMap() || gx < 0.0 || gy < 0.0 || gx > static_cast<double>(distance_.cols() - 1) ||
-      gy > static_cast<double>(distance_.rows() - 1)) {
+  if (!hasMap() || gx < -0.5 || gy < -0.5 ||
+      gx >= static_cast<double>(distance_.cols()) - 0.5 ||
+      gy >= static_cast<double>(distance_.rows()) - 0.5) {
     return false;
   }
   const int cols = static_cast<int>(distance_.cols());
   const int rows = static_cast<int>(distance_.rows());
-  const int x0 = std::min(static_cast<int>(std::floor(gx)), cols - 1);
-  const int y0 = std::min(static_cast<int>(std::floor(gy)), rows - 1);
+  const double x = std::clamp(gx, 0.0, static_cast<double>(cols - 1));
+  const double y = std::clamp(gy, 0.0, static_cast<double>(rows - 1));
+  const int x0 = std::min(static_cast<int>(std::floor(x)), cols - 1);
+  const int y0 = std::min(static_cast<int>(std::floor(y)), rows - 1);
   const int x1 = std::min(x0 + 1, cols - 1);
   const int y1 = std::min(y0 + 1, rows - 1);
-  const double tx = gx - static_cast<double>(x0);
-  const double ty = gy - static_cast<double>(y0);
+  const double tx = x - static_cast<double>(x0);
+  const double ty = y - static_cast<double>(y0);
   const double d00 = distance_(y0, x0);
   const double d10 = distance_(y0, x1);
   const double d01 = distance_(y1, x0);

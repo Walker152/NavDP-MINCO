@@ -23,12 +23,14 @@ class MincoProcessorPy
 public:
   MincoProcessorPy()
   {
-    configure(2.0, 4.0, 0.45, 0.35, 0.05, 64, 0.5, 1000.0, 1000.0, 10000.0, 20.0, 0.01, 100.0);
+    configure(
+      2.0, 4.0, 0.45, 0.35, 0.35, 0.05, 64, 0.5,
+      1000.0, 1000.0, 10000.0, 20.0, 0.01, 100.0);
   }
 
   void configure(
     double max_vel, double max_acc, double optimization_safe_dist, double validation_safe_dist,
-    double sample_dt, int max_iterations,
+    double start_validation_exemption_radius, double sample_dt, int max_iterations,
     double max_yaw_rate, double penalty_weight_pos, double penalty_weight_vel,
     double penalty_weight_acc, double penalty_weight_attractor, double time_weight,
     double time_barrier_weight)
@@ -39,6 +41,7 @@ public:
     config.safety_sample_dt = sample_dt;
     config.optimizer.safe_dist = optimization_safe_dist;
     config.validation_safe_dist = validation_safe_dist;
+    config.start_validation_exemption_radius = start_validation_exemption_radius;
     config.optimizer.max_vel = max_vel;
     config.optimizer.max_acc = max_acc;
     config.optimizer.max_iterations = max_iterations;
@@ -213,6 +216,8 @@ private:
     out["validation_safe_dist"] = result.validation_safe_dist;
     out["validation_min_clearance"] = result.validation_min_clearance;
     out["validation_oob_count"] = result.validation_oob_count;
+    out["validation_start_exempt_count"] = result.validation_start_exempt_count;
+    out["validation_negative_esdf_count"] = result.validation_negative_esdf_count;
     out["validation_failure_reason"] = result.validation_failure_reason;
 
     Eigen::MatrixXd sparse_waypoints(static_cast<int>(result.sparse_waypoints.size()), 3);
@@ -242,6 +247,7 @@ PYBIND11_MODULE(_minco_processor, m)
       py::arg("max_acc"),
       py::arg("optimization_safe_dist"),
       py::arg("validation_safe_dist"),
+      py::arg("start_validation_exemption_radius"),
       py::arg("sample_dt"),
       py::arg("max_iterations"),
       py::arg("max_yaw_rate"),

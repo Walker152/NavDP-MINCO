@@ -38,8 +38,7 @@ public:
     double validation_sample_dt{0.05};
     double sample_dt{0.05};
     double validation_dynamic_scale{1.5};
-    double start_projection_margin{0.05};
-    int max_sparse_waypoints{8};
+    double start_validation_exemption_radius{0.35};
     bool enable_yaw_opt{true};
     double max_yaw_rate{0.5};
   };
@@ -113,6 +112,8 @@ public:
     double validation_safe_dist{std::numeric_limits<double>::quiet_NaN()};
     double validation_min_clearance{std::numeric_limits<double>::quiet_NaN()};
     int validation_oob_count{0};
+    int validation_start_exempt_count{0};
+    int validation_negative_esdf_count{0};
     std::string validation_failure_reason{"NOT_RUN"};
   };
 
@@ -131,7 +132,9 @@ private:
     const std::vector<Eigen::Vector3d> & guide_path, const Eigen::Vector3d & current_position) const;
   std::vector<Eigen::Vector3d> sparsifyPath(
     const std::vector<Eigen::Vector3d> & dense_path, bool local_end_is_goal, int * mandatory_corner_count) const;
-  bool isLineFree(const Eigen::Vector3d & p1, const Eigen::Vector3d & p2) const;
+  bool isLineFree(
+    const Eigen::Vector3d & p1, const Eigen::Vector3d & p2,
+    const Eigen::Vector3d & validation_start) const;
 
   PlanningState determinePlanningState(
     const State & current, const std::vector<Eigen::Vector3d> & sparse_path, double now,

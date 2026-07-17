@@ -1,0 +1,202 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "MINCO 失败机制与规避策略",
+    "description": "基于 navdp_minco_full_real 的终止失败周期与当前实现代码进行分阶段诊断。",
+    "generatedAt": "2026-07-17T00:00:00+08:00",
+    "sources": [
+      {
+        "id": "planning-cycles",
+        "label": "navdp_minco_full_real planning_cycles",
+        "path": "results/navdp_minco_full_real/experiments/*/*/*/*/*/planning_cycles.csv",
+        "query": {
+          "engine": "Python csv",
+          "language": "python",
+          "description": "排除 raw 与 stale 周期，按 published=false 定义 MINCO 终止失败；拆分聚合 failure_reason 中四个候选的阶段原因。",
+          "sql": "SELECT\n  COUNT(*) AS nonstale_cycles,\n  SUM(published = 'False') AS failed_cycles,\n  AVG(published = 'False') AS failure_rate,\n  SUM(published = 'False' AND fallback_mode = 'HOLD_LAST') AS hold_cycles,\n  SUM(published = 'False' AND fallback_mode = 'STOP') AS stop_cycles\nFROM planning_cycles\nWHERE variant IN ('minco-cold', 'minco-hot')\n  AND stale = 'False'",
+          "filters": [
+            "variant in {minco-cold, minco-hot}",
+            "stale = false",
+            "terminal failure: published = false"
+          ],
+          "metric_definitions": [
+            "终止失败率 = 未发布且非 stale 的 MINCO 周期数 / 全部非 stale MINCO 周期数",
+            "原因覆盖率 = 至少包含该原因的终止失败周期数 / 583 个终止失败周期；同一周期可包含多个原因"
+          ],
+          "tables_used": [
+            "planning_cycles.csv"
+          ]
+        }
+      },
+      {
+        "id": "reason-summary",
+        "label": "Terminal candidate failure reason summary",
+        "path": "results/navdp_minco_full_real/experiments/*/*/*/*/*/planning_cycles.csv",
+        "query": {
+          "engine": "SQLite over CSV staging",
+          "language": "sql",
+          "description": "Python 仅将每个聚合 failure_reason 拆成四条 candidate_failures 记录；SQL 完成原因计数和周期覆盖率聚合。",
+          "sql": "SELECT\n  reason, stage,\n  COUNT(*) AS candidate_fragments,\n  COUNT(DISTINCT cycle_key) AS failed_cycles,\n  COUNT(DISTINCT cycle_key) / 583.0 AS cycle_rate,\n  SUM(all_four_same) / 4 AS pure_cycles\nFROM candidate_failures\nGROUP BY reason, stage\nORDER BY failed_cycles DESC",
+          "filters": ["terminal non-stale MINCO failures only"],
+          "tables_used": ["candidate_failures"]
+        }
+      },
+      {
+        "id": "group-summary",
+        "label": "MINCO failure rates by variant and scene",
+        "path": "results/navdp_minco_full_real/experiments/*/*/*/*/*/planning_cycles.csv",
+        "query": {
+          "engine": "SQLite over CSV staging",
+          "language": "sql",
+          "description": "按 variant 和 scene 对非 stale MINCO 周期计算终止失败率。",
+          "sql": "SELECT\n  variant, scene_id,\n  COUNT(*) AS cycles,\n  SUM(published = 'False') AS failed_cycles,\n  AVG(published = 'False') AS failure_rate\nFROM planning_cycles\nWHERE variant IN ('minco-cold', 'minco-hot')\n  AND stale = 'False'\nGROUP BY variant, scene_id\nORDER BY failure_rate",
+          "filters": ["variant in {minco-cold, minco-hot}", "stale = false"],
+          "tables_used": ["planning_cycles"]
+        }
+      },
+      {
+        "id": "adapter-code",
+        "label": "NavDP MINCO adapter",
+        "path": "utils_tasks/navdp_minco_adapter.py"
+      },
+      {
+        "id": "pipeline-code",
+        "label": "MINCO pipeline and safety checker",
+        "query": {
+          "engine": "workspace source",
+          "language": "cpp",
+          "description": "MINCO 优化、动力学验证、ESDF 安全验证与失败原因定义。",
+          "tables_used": [
+            "minco_processor/src/minco_processor/minco_pipeline.cpp",
+            "minco_processor/src/minco_core/components/trajectory_safety_checker.cpp",
+            "minco_processor/src/traj_opt/minco_optimizer.cpp"
+          ]
+        }
+      },
+      {
+        "id": "esdf-query-code",
+        "label": "Python and C++ ESDF query implementations",
+        "query": {
+          "engine": "workspace source",
+          "language": "mixed",
+          "description": "Python 栅格 floor 查询与 C++ 双线性插值查询的实现差异。",
+          "tables_used": [
+            "utils_tasks/esdf_query_utils.py",
+            "minco_processor/src/static_sim_esdf_map.cpp"
+          ]
+        }
+      },
+      {
+        "id": "parameters",
+        "label": "Recorded and current MINCO parameters",
+        "query": {
+          "engine": "workspace configuration",
+          "language": "json+python",
+          "description": "结果 run_config 中的实际参数与当前 full_suite 配置。",
+          "tables_used": [
+            "results/navdp_minco_full_real/experiments/*/*/*/*/*/run_config.json",
+            "configs/experiments/full_suite.json",
+            "experiments/core/effective_parameters.py"
+          ]
+        }
+      }
+    ],
+    "charts": [
+      {
+        "id": "reason-coverage-chart",
+        "title": "终止失败周期中的原因覆盖率",
+        "subtitle": "583 个终止失败周期；同一周期可包含多个原因",
+        "showDescription": true,
+        "intent": "comparison",
+        "question": "哪些阶段最常参与最终 MINCO 失败？",
+        "rationale": "使用短标签单系列条形图，比较多标签原因覆盖率。",
+        "comparisonContext": {
+          "denominator": "583 terminal failed non-stale MINCO cycles",
+          "grain": "failure reason",
+          "unit": "fraction of failed cycles"
+        },
+        "type": "bar",
+        "dataset": "reason_coverage",
+        "sourceId": "reason-summary",
+        "encodings": {
+          "x": {"field": "reason_short", "type": "nominal", "label": "原因"},
+          "y": {"field": "cycle_rate", "type": "quantitative", "format": "percent", "label": "失败周期覆盖率"},
+          "tooltip": [
+            {"field": "reason", "type": "text", "label": "完整原因"},
+            {"field": "failed_cycles", "type": "quantitative", "label": "涉及周期"},
+            {"field": "candidate_fragments", "type": "quantitative", "label": "候选失败记录"}
+          ]
+        },
+        "valueFormat": "percent",
+        "layout": "half",
+        "maxRows": 10
+      }
+    ],
+    "blocks": [
+      {"id": "title", "type": "markdown", "body": "# MINCO 失败机制与规避策略", "layout": "full"},
+      {"id": "technical-summary", "type": "markdown", "body": "## 技术结论\n\n**MINCO 没有“总代价超过某个硬门限就失败”的逻辑。** 优化目标只要求返回有限值；随后再由动力学和 ESDF 安全检查进行硬拒绝。当前失败的直接含义是：按 NavDP critic 排序后只尝试的 4 个候选全部在路径预处理、优化器或后验证阶段失败。\n\n排除 23 个 stale 周期后，3563 个 MINCO 周期中 583 个未发布，终止失败率为 16.4%。失败周期中 411 个进入 HOLD_LAST，172 个因无可用旧轨迹而 STOP。最常参与失败的是 C++ clearance 验证、优化器非有限结果和加速度验证。", "layout": "full", "sourceId": "planning-cycles"},
+      {"id": "reason-intro", "type": "markdown", "body": "## Clearance 与优化器失败构成主干\n\nC++ clearance 失败涉及 53.5% 的终止失败周期，优化器失败涉及 41.7%，加速度超限涉及 23.7%。这些是多标签覆盖率：一个周期会依次尝试四个候选，因此同一周期可能同时出现多种原因。纯原因周期中，129 个周期的四个候选全部为 OPTIMIZER_FAILED，65 个全部为 VALIDATION_CLEARANCE。", "layout": "full", "sourceId": "reason-summary"},
+      {"id": "reason-chart", "type": "chart", "chartId": "reason-coverage-chart", "layout": "half"},
+      {"id": "group-intro", "type": "markdown", "body": "## hard 场景下的 MINCO-hot 最脆弱\n\nMINCO-hot 在 cluttered_hard_0 的终止失败率为 25.0%，高于另外三组的 13.8%–17.2%。这只能证明该运行分支的状态分布更困难，不能单独证明 warm start 是根因：失败候选的 planning_state 和 hot seed 诊断没有写入 CSV，而且不同模式执行后会进入不同机器人状态。", "layout": "full", "sourceId": "group-summary"},
+      {"id": "scope", "type": "markdown", "body": "## 统计口径与数据边界\n\n分析对象是四个 MINCO run 的 planning_cycles。`terminal failure` 定义为非 stale 且 `published=false` 的周期；成功周期中前几个被淘汰候选的 candidate_timings 没有写入表格，因此本报告统计的是导致整个周期失败的 2332 条候选失败记录，而不是所有优化调用的全量失败率。\n\n当前结果实际使用 optimization safe distance 0.45 m、validation distance 0.20 m、max_top_k=4、max_iterations=64、max velocity/acceleration 均为 1.0。当前工作区配置已把 validation distance 改为 0.35 m，因此不能把本报告的 16.4% 直接当成新配置预期。", "layout": "full", "sourceId": "parameters"},
+      {"id": "mechanisms-intro", "type": "markdown", "body": "## 根因在软优化与硬验证不一致\n\n位置、速度和加速度在优化器中都是软惩罚；只要优化目标有限，轨迹就进入后验证。后验证再用 1.5 倍动态上限和严格的 `distance <= validation_safe_dist` 进行硬拒绝。因此提高总代价权重可以增加推离或减小动态超限，但不能保证可行；固定起终点、ESDF 梯度不足或候选本身不合理时，优化器仍可能返回随后被拒绝的局部解。", "layout": "full", "sourceId": "pipeline-code"},
+      {"id": "esdf-mismatch", "type": "markdown", "body": "## Python 二次验证存在实现不一致\n\n53 条候选记录表现为 C++ 已通过但 Python 再次判定 PY_ESDF_UNSAFE。C++ 使用双线性插值查询 ESDF；Python 使用 `floor` 后读取单个栅格值，并且只要路径中存在任意有效点就忽略越界点。两者不是同一个距离定义，边界附近会产生不一致。应统一为同一查询实现和同一全路径有效性规则，而不是继续调两个阈值。", "layout": "full", "sourceId": "esdf-query-code"},
+      {"id": "limitations", "type": "markdown", "body": "## 不确定性与稳健性边界\n\n- 失败原因是一个周期四个候选的聚合字符串，不能识别成功周期内早先候选的失败。\n- `attempted_candidate_count` 在当前 CSV 中被错误写成 16；日志和失败字符串显示终止失败周期实际均尝试 4 个候选。\n- optimizer return code、失败候选 planning_state、每候选最小 clearance 和阶段耗时未落表，因此不能进一步区分数值发散、迭代上限与不可行初始化。\n- 当前配置的 validation distance 为 0.35 m，比本次结果的 0.20 m 更严格；若不先提高轨迹可行性，新配置可能增加而不是减少 clearance 拒绝。", "layout": "full"},
+      {"id": "recommendations", "type": "markdown", "body": "## 建议按可观测性、候选质量、约束一致性依次处理\n\n1. **先补记录再调参。** 每个候选记录真实 rank、预处理结果、optimizer return code、iteration、objective、C++/Python clearance、动力学峰值和阶段耗时。\n2. **把 max_top_k 从 4 分阶段提高到 6，再视耗时提高到 8。** 先对全部 16 个候选做廉价路径与 ESDF 筛选，再按 critic、安全余量和路径多样性联合排序；不要仅扩大随机尝试数。\n3. **修复候选路径而不是简单放宽 PATH_REVERSAL。** 从机器人最近点向前裁剪，去环；在首次大反向处截断并保留可行前缀。近目标短路径应进入到达/减速分支，非近目标短路径再向局部目标延长。\n4. **统一 Python/C++ ESDF 查询。** 使用相同双线性插值、越界策略、采样时刻和严格比较规则，保留一个权威验证器。\n5. **处理起点不可满足问题。** 当前只在 ESDF 为负时投影起点，但验证从 t=0 开始；若机器人中心 clearance 已小于阈值，所有轨迹必然失败。应增加受控 escape 规则：允许起始缺口但要求 clearance 单调增加，并限制短时速度。\n6. **提高动力学惩罚并保持控制器一致。** 将 acceleration penalty 从 1000 分阶段恢复到 5000/10000 做 A/B；不要直接提高 max_acc 掩盖超限。MINCO max velocity 1.0 m/s 高于实际 MPC 目标 0.5 m/s，可先测试 0.6–0.8 m/s。\n7. **最后再调整 validation distance。** 本次 0.20 m 已有大量 clearance 失败；直接使用当前 0.35 m 前，应确保 optimization distance 0.45 m 在固定端点和插值误差下能稳定产生至少 0.10 m 余量。", "layout": "full"},
+      {"id": "further-questions", "type": "markdown", "body": "## 下一轮实验需要回答的问题\n\n- CLEARANCE 失败是否主要发生在轨迹 t=0、固定局部终点，还是中间控制点？\n- OPTIMIZER_FAILED 的 return code 是迭代上限、线搜索失败还是非有限梯度？\n- hard/minco-hot 的高失败率来自 hot seed，还是来自此前执行造成的状态偏移？\n- max_top_k=6/8 后，新增候选的成功增益和 P95 规划耗时分别是多少？", "layout": "full"}
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-17T00:00:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "nonstale_cycles": 3563,
+          "failed_cycles": 583,
+          "failure_rate": 0.1636261577,
+          "hold_cycles": 411,
+          "hold_rate": 0.704974271,
+          "stop_cycles": 172,
+          "stop_rate": 0.295025729
+        }
+      ],
+      "reason_coverage": [
+        {"reason": "VALIDATION_CLEARANCE", "reason_short": "Clearance", "stage": "C++ ESDF validation", "failed_cycles": 312, "cycle_rate": 0.5351629503, "candidate_fragments": 743, "pure_cycles": 65},
+        {"reason": "OPTIMIZER_FAILED", "reason_short": "Optimizer", "stage": "MINCO optimization", "failed_cycles": 243, "cycle_rate": 0.4168096055, "candidate_fragments": 738, "pure_cycles": 129},
+        {"reason": "VALIDATION_ACCELERATION_LIMIT", "reason_short": "Acceleration", "stage": "C++ dynamics validation", "failed_cycles": 138, "cycle_rate": 0.2367066895, "candidate_fragments": 284, "pure_cycles": 19},
+        {"reason": "PATH_REVERSAL", "reason_short": "Reversal", "stage": "Python path preprocessing", "failed_cycles": 103, "cycle_rate": 0.1766723842, "candidate_fragments": 278, "pure_cycles": 40},
+        {"reason": "PATH_TOO_SHORT", "reason_short": "Short path", "stage": "Python path preprocessing", "failed_cycles": 57, "cycle_rate": 0.0977701544, "candidate_fragments": 221, "pure_cycles": 52},
+        {"reason": "PY_ESDF_UNSAFE", "reason_short": "Python ESDF", "stage": "Python ESDF revalidation", "failed_cycles": 29, "cycle_rate": 0.0497427101, "candidate_fragments": 53, "pure_cycles": 3},
+        {"reason": "VALIDATION_VELOCITY_LIMIT", "reason_short": "Velocity", "stage": "C++ dynamics validation", "failed_cycles": 13, "cycle_rate": 0.0222984563, "candidate_fragments": 15, "pure_cycles": 0}
+      ],
+      "group_rates": [
+        {"group": "cold / easy", "variant": "minco-cold", "scene": "cluttered_easy_0", "cycles": 1014, "failed_cycles": 140, "failure_rate": 0.1380670611},
+        {"group": "hot / easy", "variant": "minco-hot", "scene": "cluttered_easy_0", "cycles": 1193, "failed_cycles": 165, "failure_rate": 0.1383067896},
+        {"group": "cold / hard", "variant": "minco-cold", "scene": "cluttered_hard_0", "cycles": 789, "failed_cycles": 136, "failure_rate": 0.1723700887},
+        {"group": "hot / hard", "variant": "minco-hot", "scene": "cluttered_hard_0", "cycles": 567, "failed_cycles": 142, "failure_rate": 0.2504409171}
+      ],
+      "mechanisms": [
+        {"priority_order": 1, "priority": "P0", "failure": "All", "mechanism": "失败候选诊断没有完整落表，attempted count 还被写成 16", "avoidance": "先补 candidate-level 阶段、return code、clearance、动力学峰值与耗时"},
+        {"priority_order": 2, "priority": "P1", "failure": "VALIDATION_CLEARANCE", "mechanism": "优化 clearance 是软惩罚，验证 distance <= threshold 是硬拒绝；起点仅在负距离时投影", "avoidance": "联合安全排序、增强推离/走廊约束，并增加受控 escape 起步规则"},
+        {"priority_order": 3, "priority": "P1", "failure": "OPTIMIZER_FAILED", "mechanism": "objective 非有限即失败，当前缺少 return code，无法再细分", "avoidance": "记录 return code；改善初始化与候选可行性后，再测试 96 次迭代"},
+        {"priority_order": 4, "priority": "P1", "failure": "PATH_REVERSAL / PATH_TOO_SHORT", "mechanism": "NavDP 路径裁剪后出现大于 150 度反向，或总长小于 0.20 m", "avoidance": "去环、截断可行前缀、近目标专用分支，避免整体直接拒绝"},
+        {"priority_order": 5, "priority": "P1", "failure": "PY_ESDF_UNSAFE", "mechanism": "Python 单栅格 floor 查询与 C++ 双线性插值不一致", "avoidance": "统一为单一权威查询和全路径越界规则"},
+        {"priority_order": 6, "priority": "P2", "failure": "VALIDATION_ACCELERATION_LIMIT", "mechanism": "加速度为软惩罚，运行权重 1000；硬验证阈值为 1.5 × max_acc", "avoidance": "A/B 测试 acc weight 5000/10000，改进时间分配，不先提高 max_acc"},
+        {"priority_order": 7, "priority": "P2", "failure": "Candidate exhaustion", "mechanism": "16 个 NavDP 候选中只按 critic 尝试前 4 个", "avoidance": "全量廉价筛选后将 max_top_k 分阶段提高到 6/8"}
+      ]
+    }
+  },
+  "sources": [
+    {"id": "planning-cycles", "label": "navdp_minco_full_real planning_cycles", "path": "results/navdp_minco_full_real/experiments/*/*/*/*/*/planning_cycles.csv", "query": {"engine": "SQLite over CSV staging", "language": "sql", "sql": "SELECT\n  COUNT(*) AS nonstale_cycles,\n  SUM(published = 'False') AS failed_cycles,\n  AVG(published = 'False') AS failure_rate,\n  SUM(published = 'False' AND fallback_mode = 'HOLD_LAST') AS hold_cycles,\n  SUM(published = 'False' AND fallback_mode = 'STOP') AS stop_cycles\nFROM planning_cycles\nWHERE variant IN ('minco-cold', 'minco-hot')\n  AND stale = 'False'", "tables_used": ["planning_cycles"]}},
+    {"id": "reason-summary", "label": "Terminal candidate failure reason summary", "path": "results/navdp_minco_full_real/experiments/*/*/*/*/*/planning_cycles.csv", "query": {"engine": "SQLite over CSV staging", "language": "sql", "sql": "SELECT\n  reason, stage,\n  COUNT(*) AS candidate_fragments,\n  COUNT(DISTINCT cycle_key) AS failed_cycles,\n  COUNT(DISTINCT cycle_key) / 583.0 AS cycle_rate,\n  SUM(all_four_same) / 4 AS pure_cycles\nFROM candidate_failures\nGROUP BY reason, stage\nORDER BY failed_cycles DESC", "tables_used": ["candidate_failures"]}},
+    {"id": "group-summary", "label": "MINCO failure rates by variant and scene", "path": "results/navdp_minco_full_real/experiments/*/*/*/*/*/planning_cycles.csv", "query": {"engine": "SQLite over CSV staging", "language": "sql", "sql": "SELECT\n  variant, scene_id,\n  COUNT(*) AS cycles,\n  SUM(published = 'False') AS failed_cycles,\n  AVG(published = 'False') AS failure_rate\nFROM planning_cycles\nWHERE variant IN ('minco-cold', 'minco-hot')\n  AND stale = 'False'\nGROUP BY variant, scene_id\nORDER BY failure_rate", "tables_used": ["planning_cycles"]}},
+    {"id": "adapter-code", "label": "NavDP MINCO adapter", "path": "utils_tasks/navdp_minco_adapter.py"},
+    {"id": "pipeline-code", "label": "MINCO pipeline and safety checker", "path": "minco_processor/src/minco_processor/minco_pipeline.cpp"},
+    {"id": "esdf-query-code", "label": "Python and C++ ESDF query implementations", "path": "utils_tasks/esdf_query_utils.py"},
+    {"id": "parameters", "label": "Recorded and current MINCO parameters", "path": "configs/experiments/full_suite.json"}
+  ]
+}

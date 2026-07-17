@@ -32,5 +32,6 @@ ISAACLAB_PYTHON=/实际路径/bin/python ./deploy_remote.sh /root/NavDP
 
 - `optimization_safe_dist`
 - `validation_safe_dist`
+- `start_validation_exemption_radius`
 
 如果远端不是 CPython 3.10 或不是 x86_64，不要使用该二进制，应在远端从源码编译。

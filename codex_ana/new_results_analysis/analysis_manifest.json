@@ -1,0 +1,21 @@
+{
+  "suite": "results/navdp_minco_full_real",
+  "output": "codex_ana/new_results_analysis",
+  "counts": {
+    "episodes": 60,
+    "planning_cycles": 6084,
+    "plan_metrics": 5462,
+    "candidate_metrics": 87392,
+    "control_samples": 13478,
+    "trace_files_available": 7284,
+    "trace_files_current": 5462,
+    "trace_files_stale_excluded": 1822,
+    "geometry_rows": 98316,
+    "deformation_rows": 2980
+  },
+  "definitions": {
+    "expected_motion_zero": "CONTROL_ACTIVE and planned_v_mps > 0.05 and abs(cmd_v_mps) <= 0.01",
+    "candidate_failure_share": "candidate attempts within non-stale, unpublished MINCO cycles",
+    "deformation": "arc-length-normalized geometric comparison between selected NavDP candidate and published MINCO sample positions"
+  }
+}
