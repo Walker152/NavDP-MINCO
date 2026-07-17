@@ -546,9 +546,9 @@ class PointNavTerminationsCfg:
     arrive_goal = DoneTerm(func=arrival_terminal_check,
                            params={"robot_asset_cfg":SceneEntityCfg("robot")})
     stuck = DoneTerm(func=stuck_terminal_check,
-                      params={"robot_asset_cfg": SceneEntityCfg("robot"), 
-                              "window_size": 30, 
-                              "threshold": 0.1})
+                      params={"robot_asset_cfg": SceneEntityCfg("robot"),
+                              "window_size": 200,
+                              "threshold": 0.3})
     
 @configclass
 class ImageNavTerminationsCfg:
@@ -557,9 +557,9 @@ class ImageNavTerminationsCfg:
     arrive_goal = DoneTerm(func=arrival_terminal_check,
                            params={"robot_asset_cfg":SceneEntityCfg("robot")})
     stuck = DoneTerm(func=stuck_terminal_check,
-                      params={"robot_asset_cfg": SceneEntityCfg("robot"), 
-                              "window_size": 30, 
-                              "threshold": 0.1})
+                      params={"robot_asset_cfg": SceneEntityCfg("robot"),
+                              "window_size": 200,
+                              "threshold": 0.3})
 
 @configclass
 class PixelNavTerminationsCfg:
@@ -568,9 +568,9 @@ class PixelNavTerminationsCfg:
     arrive_goal = DoneTerm(func=arrival_terminal_check,
                            params={"robot_asset_cfg":SceneEntityCfg("robot")})
     stuck = DoneTerm(func=stuck_terminal_check,
-                      params={"robot_asset_cfg": SceneEntityCfg("robot"), 
-                              "window_size": 30, 
-                              "threshold": 0.1})
+                      params={"robot_asset_cfg": SceneEntityCfg("robot"),
+                              "window_size": 200,
+                              "threshold": 0.3})
     
 @configclass
 class DingoPointNavCfg(ManagerBasedRLEnvCfg):

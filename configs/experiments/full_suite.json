@@ -53,8 +53,16 @@
     "scene": {"scale": 1.0}
   },
   "runs": [
-    {"experiment_id": "EXP-ALL_data_collection", "variant": "raw", "warm_start_mode": "cold", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]},
-    {"experiment_id": "EXP-ALL_data_collection", "variant": "minco-cold", "warm_start_mode": "cold", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]},
-    {"experiment_id": "EXP-ALL_data_collection", "variant": "minco-hot", "warm_start_mode": "gated", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]}
+    {"experiment_id": "EXP-speed-0p5",  "variant": "raw",       "warm_start_mode": "cold",  "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"], "parameter_overrides": {"minco": {"max_velocity_mps": 0.5}, "raw_mpc": {"desired_v": 0.5, "v_max": 0.5}, "minco_mpc": {"desired_v_mps": 0.5, "v_max_mps": 0.5}}},
+    {"experiment_id": "EXP-speed-0p5",  "variant": "minco-cold","warm_start_mode": "cold",  "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"], "parameter_overrides": {"minco": {"max_velocity_mps": 0.5}, "raw_mpc": {"desired_v": 0.5, "v_max": 0.5}, "minco_mpc": {"desired_v_mps": 0.5, "v_max_mps": 0.5}}},
+    {"experiment_id": "EXP-speed-0p5",  "variant": "minco-hot",  "warm_start_mode": "gated", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"], "parameter_overrides": {"minco": {"max_velocity_mps": 0.5}, "raw_mpc": {"desired_v": 0.5, "v_max": 0.5}, "minco_mpc": {"desired_v_mps": 0.5, "v_max_mps": 0.5}}},
+
+    {"experiment_id": "EXP-speed-1p0",  "variant": "raw",       "warm_start_mode": "cold",  "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]},
+    {"experiment_id": "EXP-speed-1p0",  "variant": "minco-cold","warm_start_mode": "cold",  "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]},
+    {"experiment_id": "EXP-speed-1p0",  "variant": "minco-hot",  "warm_start_mode": "gated", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"]},
+
+    {"experiment_id": "EXP-speed-1p5",  "variant": "raw",       "warm_start_mode": "cold",  "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"], "parameter_overrides": {"minco": {"max_velocity_mps": 1.5}, "raw_mpc": {"desired_v": 1.5, "v_max": 1.5}, "minco_mpc": {"desired_v_mps": 1.5, "v_max_mps": 1.5}}},
+    {"experiment_id": "EXP-speed-1p5",  "variant": "minco-cold","warm_start_mode": "cold",  "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"], "parameter_overrides": {"minco": {"max_velocity_mps": 1.5}, "raw_mpc": {"desired_v": 1.5, "v_max": 1.5}, "minco_mpc": {"desired_v_mps": 1.5, "v_max_mps": 1.5}}},
+    {"experiment_id": "EXP-speed-1p5",  "variant": "minco-hot",  "warm_start_mode": "gated", "scene_ids": ["cluttered_easy_0", "cluttered_hard_0"], "parameter_overrides": {"minco": {"max_velocity_mps": 1.5}, "raw_mpc": {"desired_v": 1.5, "v_max": 1.5}, "minco_mpc": {"desired_v_mps": 1.5, "v_max_mps": 1.5}}}
   ]
 }

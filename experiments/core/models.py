@@ -69,6 +69,7 @@ class RunSpec:
     scene_id: str
     seed: int
     run_id: str
+    parameter_overrides: dict | None = None
 
 
 @dataclass(frozen=True)

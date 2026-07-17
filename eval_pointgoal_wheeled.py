@@ -166,7 +166,7 @@ if args_cli.eval_monitor:
         monitor_identity.update({key: run_identity[key] for key in monitor_identity if key in run_identity})
     experiment_hook = ExperimentHookBridge(experiment_writer, monitor_identity)
     initial_uid = args_cli.episode_uids[0] if args_cli.episode_uids else f"scene_{args_cli.scene_index}_episode_0"
-    experiment_hook.start_episode(initial_uid, generation=0, initial_goal_distance_m=float(euclidean[0]) if euclidean.size > 0 and np.isfinite(euclidean[0]) else None)
+    experiment_hook.start_episode(initial_uid, generation=0)
 if args_cli.save_planning_trace:
     if not args_cli.experiment_run_dir:
         raise ValueError("--experiment-run-dir is required when --save-planning-trace is enabled")

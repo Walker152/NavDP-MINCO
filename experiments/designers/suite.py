@@ -49,4 +49,5 @@ def expand_runs(config: SuiteConfig, manifest: Manifest):
             seeds = sorted({episode.seed for episode in scene.episodes})
             for seed in seeds:
                 payload = {"experiment": template["experiment_id"], "variant": template["variant"], "scene": scene.scene_id, "seed": seed}
-                yield RunSpec(config.suite_id, template["experiment_id"], template["variant"], template["warm_start_mode"], scene.scene_label, scene.scene_id, seed, stable_id("run", payload, 12))
+                run_overrides = template.get("parameter_overrides", None)
+                yield RunSpec(config.suite_id, template["experiment_id"], template["variant"], template["warm_start_mode"], scene.scene_label, scene.scene_id, seed, stable_id("run", payload, 12), parameter_overrides=run_overrides)

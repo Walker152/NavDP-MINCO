@@ -22,6 +22,16 @@ from experiments.simulators.isaac_navdp_backend import IsaacNavDPBackend
 from experiments.orchestrators.progress import SuiteProgressReporter
 
 
+def _merge_parameter_overrides(suite_overrides, run_overrides):
+    """Merge per-run parameter overrides on top of suite-level overrides."""
+    if not run_overrides:
+        return suite_overrides
+    merged = {section: dict(values) for section, values in suite_overrides.items()}
+    for section, values in (run_overrides or {}).items():
+        merged.setdefault(section, {}).update(values)
+    return merged
+
+
 def _run_config(run, scene, episodes, backend_name, data_source, manifest_id, video_required=None, trace_required=None, parameter_overrides=None):
     parameters = effective_parameters(video_required if video_required is not None else backend_name == "isaac", parameter_overrides)
     controller_parameters = parameters["raw_mpc"] if run.variant == "raw" else parameters["minco_mpc"]
@@ -69,7 +79,8 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
             episodes = [episode for episode in scenes[run.scene_id].episodes if episode.seed == run.seed]
             if backend_name == "isaac":
                 run_dir = layout.run_dir(run)
-                atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required, parameter_overrides))
+                merged_overrides = _merge_parameter_overrides(parameter_overrides, run.parameter_overrides)
+                atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required, merged_overrides))
                 run_configuration = json.loads((run_dir / "run_config.json").read_text())
                 commands.append(backend.build_command(run, run_dir, config.manifest_path, scenes[run.scene_id], episodes, save_video=video_required, save_trace=trace_required, effective=run_configuration["effective_parameters"]))
                 server_commands.append(backend.build_server_command(run_dir, run.run_id, run.seed))
@@ -100,7 +111,8 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
             lifecycle.status = "CREATED"; lifecycle._write(restarted=True)
         try:
             if lifecycle.status in {"CREATED", "INTERRUPTED"}:
-                atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required, parameter_overrides))
+                merged_overrides = _merge_parameter_overrides(parameter_overrides, run.parameter_overrides)
+                atomic_json(run_dir / "run_config.json", _run_config(run, scenes[run.scene_id], episodes, backend.name, data_source, manifest.manifest_id, video_required, trace_required, merged_overrides))
                 lifecycle.transition("RUNNING"); writer = AsyncRecordWriter(run_dir, SCHEMAS)
                 try:
                     if backend_name == "isaac":
