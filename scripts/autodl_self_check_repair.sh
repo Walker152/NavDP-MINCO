@@ -4,6 +4,14 @@ umask 077
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DETECTED_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+readonly AUTODL_STRICT_PROFILE=autodl-strict-history
+readonly AUTODL_EXPECTED_REPO_ROOT=/root/NavDP
+readonly AUTODL_EXPECTED_WORK_DIR=/root/autodl-tmp/navdp
+readonly AUTODL_EXPECTED_ISAACLAB_DIR=/root/autodl-tmp/navdp/IsaacLab
+readonly AUTODL_EXPECTED_CONDA_BIN=/root/miniconda3/bin/conda
+readonly AUTODL_EXPECTED_CONDA_ENVS_PATH=/root/autodl-tmp/navdp/conda/envs
+readonly AUTODL_EXPECTED_RUNTIME_ENV_FILE=/root/.config/navdp/autodl-runtime.env
+readonly AUTODL_EXPECTED_BASHRC=/root/.bashrc
 
 usage() {
   cat <<'EOF'
@@ -11,6 +19,11 @@ Usage: bash scripts/autodl_self_check_repair.sh [OPTIONS]
 
 Diagnose and safely repair the NavDP AutoDL runtime without starting a real
 experiment.
+
+Production profile:
+  autodl-strict-history   Requires the repository at /root/NavDP and uses the
+                          fixed 2026-07-17 AutoDL installation paths. It never
+                          falls back to local IsaacLab or Conda installations.
 
 Options:
   --check-only             Diagnose without writing configuration or killing processes
@@ -105,17 +118,31 @@ done
 
 NAVDP_ENV_NAME="${NAVDP_ENV_NAME:-navdp}"
 ISAACLAB_ENV_NAME="${ISAACLAB_ENV_NAME:-isaaclab}"
-if [[ -z "${AUTODL_WORK_DIR:-}" ]]; then
-  if [[ -d /root/autodl-tmp && -w /root/autodl-tmp ]]; then
-    AUTODL_WORK_DIR=/root/autodl-tmp/navdp
-  else
-    AUTODL_WORK_DIR="$HOME/.navdp-autodl"
-  fi
+REQUESTED_AUTODL_WORK_DIR="${AUTODL_WORK_DIR:-}"
+REQUESTED_ISAACLAB_DIR="${ISAACLAB_DIR:-}"
+REQUESTED_CONDA_BIN="${CONDA_BIN:-}"
+REQUESTED_CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-}"
+REQUESTED_RUNTIME_ENV_FILE="${NAVDP_RUNTIME_ENV_FILE:-}"
+
+if [[ "${AUTODL_REPAIR_TESTING:-0}" == 1 ]]; then
+  RUNTIME_PROFILE=testing
+  AUTODL_WORK_DIR="${AUTODL_WORK_DIR:-$HOME/.navdp-autodl}"
+  ISAACLAB_DIR="${ISAACLAB_DIR:-$AUTODL_WORK_DIR/IsaacLab}"
+  CONDA_BIN="${CONDA_BIN:-}"
+  CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-$AUTODL_WORK_DIR/conda/envs}"
+  NAVDP_RUNTIME_ENV_FILE="${NAVDP_RUNTIME_ENV_FILE:-$HOME/.config/navdp/autodl-runtime.env}"
+  NAVDP_BASHRC_FILE="$HOME/.bashrc"
+  NAVDP_VULKAN_ICD_DIRS="${NAVDP_VULKAN_ICD_DIRS:-/etc/vulkan/icd.d:/usr/share/vulkan/icd.d}"
+else
+  RUNTIME_PROFILE="$AUTODL_STRICT_PROFILE"
+  AUTODL_WORK_DIR="$AUTODL_EXPECTED_WORK_DIR"
+  ISAACLAB_DIR="$AUTODL_EXPECTED_ISAACLAB_DIR"
+  CONDA_BIN="$AUTODL_EXPECTED_CONDA_BIN"
+  CONDA_ENVS_PATH="$AUTODL_EXPECTED_CONDA_ENVS_PATH"
+  NAVDP_RUNTIME_ENV_FILE="$AUTODL_EXPECTED_RUNTIME_ENV_FILE"
+  NAVDP_BASHRC_FILE="$AUTODL_EXPECTED_BASHRC"
+  NAVDP_VULKAN_ICD_DIRS=/etc/vulkan/icd.d:/usr/share/vulkan/icd.d
 fi
-ISAACLAB_DIR="${ISAACLAB_DIR:-$AUTODL_WORK_DIR/IsaacLab}"
-CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-$AUTODL_WORK_DIR/conda/envs}"
-NAVDP_RUNTIME_ENV_FILE="${NAVDP_RUNTIME_ENV_FILE:-$HOME/.config/navdp/autodl-runtime.env}"
-NAVDP_VULKAN_ICD_DIRS="${NAVDP_VULKAN_ICD_DIRS:-/etc/vulkan/icd.d:/usr/share/vulkan/icd.d}"
 NAVDP_RESULTS_ROOT="${NAVDP_RESULTS_ROOT:-}"
 NAVDP_STALE_MIN_AGE_SECONDS="${NAVDP_STALE_MIN_AGE_SECONDS:-60}"
 
@@ -148,7 +175,6 @@ if [[ "${AUTODL_REPAIR_TESTING:-0}" == 1 ]]; then
 fi
 SLEEP_BIN="${SLEEP_BIN:-sleep}"
 TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
-CONDA_BIN="${CONDA_BIN:-}"
 
 PASS_COUNT=0
 REPAIR_COUNT=0
@@ -248,6 +274,7 @@ write_final_summary() {
   if ! {
     printf 'NavDP AutoDL self-check repair\n'
     printf 'UTC completed: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'Profile: %s\n' "$RUNTIME_PROFILE"
     printf 'Repository: %s\n' "$REPO_ROOT"
     printf 'Config: %s\n' "$CONFIG"
     printf 'Mode: %s\n' "$([[ "$CHECK_ONLY" == 1 ]] && printf check-only || printf repair)"
@@ -438,15 +465,54 @@ require_tool() {
 preflight() {
   local failed=0 tool
   {
+    printf 'Profile: %s\n' "$RUNTIME_PROFILE"
+    printf 'Expected repository: %s\n' "$AUTODL_EXPECTED_REPO_ROOT"
+    printf 'Actual repository: %s\n' "$REPO_ROOT"
     printf 'Repository: %s\n' "$REPO_ROOT"
     printf 'AutoDL work directory: %s\n' "$AUTODL_WORK_DIR"
     printf 'IsaacLab directory: %s\n' "$ISAACLAB_DIR"
+    printf 'Conda: %s\n' "$CONDA_BIN"
     printf 'Conda envs path: %s\n' "$CONDA_ENVS_PATH"
+    printf 'Runtime environment: %s\n' "$NAVDP_RUNTIME_ENV_FILE"
+    printf 'Bashrc: %s\n' "$NAVDP_BASHRC_FILE"
     printf 'Config: %s\n' "$CONFIG"
     printf 'CUDA_VISIBLE_DEVICES=%s\n' "${CUDA_VISIBLE_DEVICES:-<unset>}"
     printf 'NVIDIA_VISIBLE_DEVICES=%s\n' "${NVIDIA_VISIBLE_DEVICES:-<unset>}"
     printf 'NVIDIA_DRIVER_CAPABILITIES=%s\n' "${NVIDIA_DRIVER_CAPABILITIES:-<unset>}"
   } >>"$REPORT_DIR/environment.txt"
+
+  if [[ "$RUNTIME_PROFILE" == "$AUTODL_STRICT_PROFILE" ]]; then
+    if [[ "$REPO_ROOT" != "$AUTODL_EXPECTED_REPO_ROOT" ]]; then
+      fail_check \
+        "Strict AutoDL repository mismatch: expected $AUTODL_EXPECTED_REPO_ROOT, actual $REPO_ROOT"
+      failed=1
+    fi
+    if [[ -n "$REQUESTED_AUTODL_WORK_DIR" &&
+          "$REQUESTED_AUTODL_WORK_DIR" != "$AUTODL_EXPECTED_WORK_DIR" ]]; then
+      fail_check "Strict AutoDL path override rejected: AUTODL_WORK_DIR"
+      failed=1
+    fi
+    if [[ -n "$REQUESTED_ISAACLAB_DIR" &&
+          "$REQUESTED_ISAACLAB_DIR" != "$AUTODL_EXPECTED_ISAACLAB_DIR" ]]; then
+      fail_check "Strict AutoDL path override rejected: ISAACLAB_DIR"
+      failed=1
+    fi
+    if [[ -n "$REQUESTED_CONDA_BIN" &&
+          "$REQUESTED_CONDA_BIN" != "$AUTODL_EXPECTED_CONDA_BIN" ]]; then
+      fail_check "Strict AutoDL path override rejected: CONDA_BIN"
+      failed=1
+    fi
+    if [[ -n "$REQUESTED_CONDA_ENVS_PATH" &&
+          "$REQUESTED_CONDA_ENVS_PATH" != "$AUTODL_EXPECTED_CONDA_ENVS_PATH" ]]; then
+      fail_check "Strict AutoDL path override rejected: CONDA_ENVS_PATH"
+      failed=1
+    fi
+    if [[ -n "$REQUESTED_RUNTIME_ENV_FILE" &&
+          "$REQUESTED_RUNTIME_ENV_FILE" != "$AUTODL_EXPECTED_RUNTIME_ENV_FILE" ]]; then
+      fail_check "Strict AutoDL path override rejected: NAVDP_RUNTIME_ENV_FILE"
+      failed=1
+    fi
+  fi
 
   if [[ "$(uname -s 2>/dev/null || true)" != Linux ]]; then
     fail_check "This self-check supports Linux hosts only"
@@ -1151,6 +1217,7 @@ write_runtime_environment() {
     printf 'export VK_ICD_FILENAMES=%q\n' "$SELECTED_ICD"
     printf 'export VK_DRIVER_FILES=%q\n' "$SELECTED_ICD"
     printf 'export CONDA_ENVS_PATH=%q\n' "$CONDA_ENVS_PATH"
+    printf 'export CONDA_BIN=%q\n' "$CONDA_BIN"
     printf 'export AUTODL_WORK_DIR=%q\n' "$AUTODL_WORK_DIR"
     printf 'export ISAACLAB_DIR=%q\n' "$ISAACLAB_DIR"
     printf 'export NAVDP_REPO_ROOT=%q\n' "$REPO_ROOT"
@@ -1184,7 +1251,7 @@ write_runtime_environment() {
 
 validate_bashrc_runtime_markers() {
   [[ "${NAVDP_SKIP_BASHRC_UPDATE:-0}" == 1 ]] && return 0
-  local bashrc="$HOME/.bashrc"
+  local bashrc="$NAVDP_BASHRC_FILE"
   [[ ! -L "$bashrc" ]] || return 4
   [[ -e "$bashrc" ]] || return 0
   [[ -f "$bashrc" ]] || return 1
@@ -1214,12 +1281,12 @@ validate_bashrc_runtime_markers() {
 update_bashrc() {
   BASHRC_CHANGED=0
   [[ "${NAVDP_SKIP_BASHRC_UPDATE:-0}" == 1 ]] && return 0
-  local bashrc="$HOME/.bashrc"
-  local lock_file="$HOME/.bashrc.navdp.lock"
+  local bashrc="$NAVDP_BASHRC_FILE"
+  local lock_file="${NAVDP_BASHRC_FILE}.navdp.lock"
   local temp="" quoted backup_stamp canonical_backup
   local original_meta original_hash current_meta current_hash
   local lock_fd status=0
-  if ! mkdir -p "$HOME"; then
+  if ! mkdir -p "$(dirname "$bashrc")"; then
     return 1
   fi
   [[ ! -L "$lock_file" ]] || return 4
@@ -1252,7 +1319,7 @@ update_bashrc() {
       status=1
       break
     fi
-    if ! temp="$(mktemp "$HOME/.bashrc.navdp.XXXXXX")"; then
+    if ! temp="$(mktemp "$(dirname "$bashrc")/.bashrc.navdp.XXXXXX")"; then
       status=1
       break
     fi
@@ -1339,7 +1406,7 @@ update_bashrc() {
 
 bashrc_runtime_block_is_current() {
   [[ "${NAVDP_SKIP_BASHRC_UPDATE:-0}" == 1 ]] && return 0
-  local bashrc="$HOME/.bashrc" quoted
+  local bashrc="$NAVDP_BASHRC_FILE" quoted
   [[ ! -L "$bashrc" ]] || return 1
   [[ -f "$bashrc" ]] || return 1
   printf -v quoted '%q' "$NAVDP_RUNTIME_ENV_FILE"
@@ -1391,7 +1458,7 @@ select_nvidia_icd() {
   export VK_ICD_FILENAMES="$SELECTED_ICD"
   export VK_DRIVER_FILES="$SELECTED_ICD"
   NAVDP_REPO_ROOT="$REPO_ROOT"
-  export CONDA_ENVS_PATH AUTODL_WORK_DIR ISAACLAB_DIR NAVDP_REPO_ROOT
+  export CONDA_BIN CONDA_ENVS_PATH AUTODL_WORK_DIR ISAACLAB_DIR NAVDP_REPO_ROOT
   if [[ "$CHECK_ONLY" == 1 ]]; then
     pass "Selected NVIDIA Vulkan ICD for this check: $SELECTED_ICD"
     return 0
@@ -1425,9 +1492,9 @@ select_nvidia_icd() {
   fi
   if ((validation_status != 0)); then
     if ((validation_status == 4)); then
-      fail_check "Refusing symlinked NavDP runtime bashrc: $HOME/.bashrc"
+      fail_check "Refusing symlinked NavDP runtime bashrc: $NAVDP_BASHRC_FILE"
     else
-      fail_check "Malformed NavDP runtime block in $HOME/.bashrc; refusing to modify it"
+      fail_check "Malformed NavDP runtime block in $NAVDP_BASHRC_FILE; refusing to modify it"
     fi
     [[ -z "$runtime_rollback_copy" ]] || command rm -f "$runtime_rollback_copy"
     return 1
@@ -1467,13 +1534,13 @@ select_nvidia_icd() {
       fi
     fi
     if ((update_status == 2)); then
-      fail_check "Malformed NavDP runtime block in $HOME/.bashrc; refusing to modify it"
+      fail_check "Malformed NavDP runtime block in $NAVDP_BASHRC_FILE; refusing to modify it"
     elif ((update_status == 3)); then
       fail_check "NavDP runtime bashrc changed concurrently; refusing to overwrite it"
     elif ((update_status == 4)); then
-      fail_check "Refusing symlinked NavDP runtime bashrc: $HOME/.bashrc"
+      fail_check "Refusing symlinked NavDP runtime bashrc: $NAVDP_BASHRC_FILE"
     else
-      fail_check "Unable to update NavDP runtime block in $HOME/.bashrc"
+      fail_check "Unable to update NavDP runtime block in $NAVDP_BASHRC_FILE"
     fi
     [[ -z "$runtime_rollback_copy" ]] || command rm -f "$runtime_rollback_copy"
     return 1
@@ -2332,6 +2399,8 @@ classify_historical_file() {
     record_history_category ARGPARSE_MISMATCH "$file"
   grep -Eiq 'CUDA out of memory|CUDA OOM|OutOfMemoryError' "$file" &&
     record_history_category CUDA_OOM "$file"
+  grep -Eiq 'OmniGraphSettings::getCudaDeviceOrdinal:.*Defaulting to GPU0' "$file" &&
+    record_history_category OMNIGRAPH_GPU0_FALLBACK "$file"
   grep -Eiq 'Segmentation|(^|[^[:alpha:]])Fatal([^[:alpha:]]|$)' "$file" &&
     record_history_category SEGMENTATION_FATAL "$file"
   grep -Eiq 'app ready|Simulation App Startup Complete' "$file" &&

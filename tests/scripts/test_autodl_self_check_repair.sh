@@ -544,6 +544,8 @@ assert_contains "$TEST_TMP/help.out" "Usage:"
 assert_contains "$TEST_TMP/help.out" "--check-only"
 assert_contains "$TEST_TMP/help.out" "--skip-smoke"
 assert_contains "$TEST_TMP/help.out" "--skip-dry-run"
+assert_contains "$TEST_TMP/help.out" "autodl-strict-history"
+assert_contains "$TEST_TMP/help.out" "/root/NavDP"
 
 set +e
 bash "$SCRIPT" --unknown >"$TEST_TMP/unknown.out" 2>&1
@@ -587,6 +589,46 @@ set -e
 assert_contains "$TEST_TMP/forbidden-root-override.out" \
   "AUTODL_REPAIR_REPO_ROOT is only allowed with AUTODL_REPAIR_TESTING=1"
 
+strict_report_base="$TEST_TMP/strict-production-reports"
+mkdir -p "$TEST_TMP/strict-home"
+set +e
+env \
+  HOME="$TEST_TMP/strict-home" \
+  AUTODL_WORK_DIR="$TEST_TMP/local-autodl" \
+  ISAACLAB_DIR="$TEST_TMP/local-autodl/IsaacLab" \
+  CONDA_BIN="$TEST_TMP/local-conda" \
+  CONDA_ENVS_PATH="$TEST_TMP/local-conda-envs" \
+  NAVDP_RUNTIME_ENV_FILE="$TEST_TMP/local-runtime.env" \
+  bash "$SCRIPT" --check-only --skip-smoke --skip-dry-run \
+    --report-dir "$strict_report_base" \
+    >"$TEST_TMP/strict-production.out" 2>&1
+strict_status=$?
+set -e
+[[ "$strict_status" == 1 ]] || \
+  fail "non-AutoDL production execution should fail, got $strict_status"
+strict_report="$(sed -n 's/^Report: //p' "$TEST_TMP/strict-production.out" | tail -n 1)"
+[[ -n "$strict_report" ]] || fail "strict production failure did not create a report"
+assert_contains "$TEST_TMP/strict-production.out" \
+  "Strict AutoDL repository mismatch: expected /root/NavDP"
+assert_contains "$TEST_TMP/strict-production.out" \
+  "Strict AutoDL path override rejected: AUTODL_WORK_DIR"
+assert_contains "$strict_report/environment.txt" \
+  "Profile: autodl-strict-history"
+assert_contains "$strict_report/environment.txt" \
+  "Expected repository: /root/NavDP"
+assert_contains "$strict_report/environment.txt" \
+  "Actual repository: $REPO_ROOT"
+assert_contains "$strict_report/environment.txt" \
+  "AutoDL work directory: /root/autodl-tmp/navdp"
+assert_contains "$strict_report/environment.txt" \
+  "IsaacLab directory: /root/autodl-tmp/navdp/IsaacLab"
+assert_contains "$strict_report/environment.txt" \
+  "Conda: /root/miniconda3/bin/conda"
+assert_contains "$strict_report/environment.txt" \
+  "Conda envs path: /root/autodl-tmp/navdp/conda/envs"
+assert_contains "$strict_report/summary.txt" \
+  "Profile: autodl-strict-history"
+
 run_case healthy --skip-smoke --skip-dry-run
 [[ "$CASE_STATUS" == 0 ]] || {
   sed -n '1,300p' "$CASE_OUT" >&2
@@ -597,10 +639,16 @@ assert_contains "$CASE_OUT" "Report:"
 assert_contains "$CASE_ENV_FILE" "export VK_ICD_FILENAMES="
 assert_contains "$CASE_ENV_FILE" "export VK_DRIVER_FILES="
 assert_contains "$CASE_ENV_FILE" "export CONDA_ENVS_PATH="
+assert_contains "$CASE_ENV_FILE" "export CONDA_BIN=$CASE_BIN/conda"
 assert_contains "$CASE_ENV_FILE" "$CASE_ETC_ICD/nvidia_icd.json"
+assert_not_contains "$CASE_ENV_FILE" "CUDA_VISIBLE_DEVICES"
+assert_not_contains "$CASE_ENV_FILE" "NVIDIA_VISIBLE_DEVICES"
+assert_not_contains "$CASE_ENV_FILE" "NVIDIA_DRIVER_CAPABILITIES"
+assert_not_contains "$CASE_ENV_FILE" "CUDA_HOME"
 assert_count "$CASE_HOME/.bashrc" 1 "# >>> NavDP AutoDL runtime >>>"
 assert_count "$CASE_HOME/.bashrc" 1 "# <<< NavDP AutoDL runtime <<<"
 [[ -f "$CASE_REPORT/summary.txt" ]] || fail "summary report missing"
+assert_contains "$CASE_REPORT/summary.txt" "Profile: testing"
 for required_report in \
   environment.txt \
   process-scan.txt \
@@ -1020,6 +1068,7 @@ GPU2:
 GPU Foundation is not initialized!
 eval_pointgoal_wheeled.py: error: unrecognized arguments: --old-option
 CUDA out of memory
+OmniGraphSettings::getCudaDeviceOrdinal: unable to get a valid CUDA device id from the renderer. Defaulting to GPU0.
 LOG
 cat >"$history_dir/isaac_eval.stdout.log" <<'LOG'
 [3.557s] app ready
@@ -1054,6 +1103,7 @@ latest_report="$(sed -n 's/^Report: //p' "$CASE_DIR/history.out" | tail -n 1)"
 assert_contains "$latest_report/historical-diagnostics.txt" "DUPLICATE_VULKAN_ICD"
 assert_contains "$latest_report/historical-diagnostics.txt" "ARGPARSE_MISMATCH"
 assert_contains "$latest_report/historical-diagnostics.txt" "CUDA_OOM"
+assert_contains "$latest_report/historical-diagnostics.txt" "OMNIGRAPH_GPU0_FALLBACK"
 assert_contains "$latest_report/historical-diagnostics.txt" "EPISODE_DONE"
 assert_contains "$CASE_DIR/history.out" "--resume --retry-failed --allow-real-simulation"
 

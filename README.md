@@ -253,6 +253,14 @@ After setup, run the safe, one-command AutoDL diagnosis and repair:
 bash scripts/autodl_self_check_repair.sh
 ```
 
+This command uses the strict `autodl-strict-history` production profile derived
+from the 2026-07-17 AutoDL run. It requires the repository at `/root/NavDP`,
+IsaacLab at `/root/autodl-tmp/navdp/IsaacLab`, Conda at
+`/root/miniconda3/bin/conda`, and environments under
+`/root/autodl-tmp/navdp/conda/envs`. It deliberately does not fall back to a
+developer machine's `$HOME`, IsaacLab checkout, Conda installation, or GPU.
+Path mismatches fail during preflight and are recorded in the report.
+
 By default, the script applies reversible runtime fixes, checks CUDA and Vulkan,
 runs an Isaac headless smoke test and an experiment dry-run, and writes an
 auditable report. It also strictly matches old orphaned Isaac/Kit, evaluation,
@@ -283,18 +291,25 @@ bash scripts/autodl_self_check_repair.sh \
 `--config` defaults to `configs/experiments/full_suite.json`, and
 `--smoke-timeout` defaults to 180 seconds.
 
-In repair mode, the selected Vulkan ICD and resolved runtime paths are written
-to `${NAVDP_RUNTIME_ENV_FILE:-$HOME/.config/navdp/autodl-runtime.env}`. The
-script adds an idempotent `~/.bashrc` source block unless
+The repair persists only the dynamically validated single NVIDIA Vulkan ICD and
+the fixed AutoDL runtime paths. It does not write `CUDA_VISIBLE_DEVICES`,
+`NVIDIA_VISIBLE_DEVICES`, `NVIDIA_DRIVER_CAPABILITIES`, or `CUDA_HOME`.
+Container-level NVIDIA capability problems must be corrected when the AutoDL
+container is created; the script diagnoses them through CUDA, Vulkan, and Isaac
+smoke results.
+
+In repair mode, the selected Vulkan ICD and fixed runtime paths are written to
+`/root/.config/navdp/autodl-runtime.env`. The script adds an idempotent
+`/root/.bashrc` source block unless
 `NAVDP_SKIP_BASHRC_UPDATE=1` is set. To apply the repaired environment to the
 current shell immediately, run:
 
 ```bash
-source "${NAVDP_RUNTIME_ENV_FILE:-$HOME/.config/navdp/autodl-runtime.env}"
+source /root/.config/navdp/autodl-runtime.env
 ```
 
 Each run creates a timestamped report under
-`${REPO_ROOT}/results/autodl_self_check/` by default (or under `--report-dir`).
+`/root/NavDP/results/autodl_self_check/` by default (or under `--report-dir`).
 Start with `summary.txt`; the same run directory also retains environment,
 process, Vulkan, CUDA, runtime-contract, Isaac smoke, dry-run, and historical
 diagnostic details. Report directories are private to the current user, and
@@ -316,7 +331,7 @@ environment and explicitly resume and retry failed runs. This command starts
 real simulation and therefore remains a separate user action:
 
 ```bash
-source "${NAVDP_RUNTIME_ENV_FILE:-$HOME/.config/navdp/autodl-runtime.env}"
+source /root/.config/navdp/autodl-runtime.env
 bash scripts/run_all_experiments.sh configs/experiments/full_suite.json \
   --backend isaac --allow-real-simulation --resume --retry-failed
 ```
