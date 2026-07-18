@@ -20,6 +20,8 @@ class PlanningInput:
     robot_lin_vel_w: Optional[np.ndarray] = None
     robot_ang_vel_w: Optional[np.ndarray] = None
     episode_generation: Optional[np.ndarray] = None
+    observation_sequence: int = 0
+    observation_timestamp_s: Optional[float] = None
 
 @dataclass
 class PlanningOutput:
@@ -41,6 +43,10 @@ class PlanningOutput:
     stop_required: Optional[np.ndarray] = None
     minco_status: Optional[List[str]] = None
     planning_timing: Optional[dict] = None
+    observation_sequence: int = 0
+    observation_timestamp_s: Optional[float] = None
+    published_timestamp_s: Optional[float] = None
+    prev_raw_path: Optional[List[np.ndarray]] = None
 
     sub_pointgoal_pd: Optional[np.ndarray] = None
     is_planning: bool = False

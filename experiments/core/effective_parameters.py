@@ -55,6 +55,14 @@ EFFECTIVE_PARAMETERS = {
         "codec": "libx264", "pixel_format": "yuv420p", "macro_block_size": 16,
     },
     "scene": {"scale": 1.0},
+    "runtime_diagnostics": {
+        "threshold_profile_id": "full-real-v2",
+        "high_turn_curvature_p95_1pm": 2.0,
+        "high_turn_curvature_tv_1pm": 100.0,
+        "jump_position_rmse_m": 0.3,
+        "jump_tangent_rad": 0.3,
+        "planning_deadline_ms": 100.0,
+    },
 }
 
 

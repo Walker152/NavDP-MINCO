@@ -1,4 +1,5 @@
 import time
+import re
 
 
 def _env_flag(value, env_idx):
@@ -17,19 +18,38 @@ def _env_flag(value, env_idx):
         return False
 
 
-def infer_termination_reason(infos, env_idx):
-    """Return only a reason explicitly exposed by the environment."""
+def canonical_termination_reason(active_terms):
+    terms = [str(term) for term in active_terms if str(term)]
+    raw = "+".join(terms)
+    if not terms:
+        return "UNKNOWN", ""
+    normalized = [re.sub(r"[^a-z0-9]+", "_", term.lower()).strip("_") for term in terms]
+    if any("goal" in term or "success" in term for term in normalized):
+        return "GOAL_REACHED", raw
+    if any("collision" in term or "contact" in term for term in normalized):
+        return "COLLISION", raw
+    if any("time_out" in term or "timeout" in term or "time_limit" in term for term in normalized):
+        return "TIMEOUT", raw
+    return "+".join(term.upper() for term in normalized), raw
+
+
+def infer_termination_details(infos, env_idx):
+    """Return a canonical reason plus the explicit raw environment terms."""
     if not isinstance(infos, dict):
-        return "UNKNOWN"
+        return "UNKNOWN", ""
     for container_name in ("termination_terms", "terminations"):
         terms = infos.get(container_name)
         if isinstance(terms, dict):
             active = [name for name, values in terms.items() if _env_flag(values, env_idx)]
             if active:
-                return "+".join(active)
+                return canonical_termination_reason(active)
     if _env_flag(infos.get("time_outs", False), env_idx):
-        return "time_out"
-    return "UNKNOWN"
+        return canonical_termination_reason(["time_out"])
+    return "UNKNOWN", ""
+
+
+def infer_termination_reason(infos, env_idx):
+    return infer_termination_details(infos, env_idx)[0]
 
 
 class EpisodeStartupDiagnostics:

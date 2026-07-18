@@ -121,6 +121,18 @@ class EsdfGridView:
                 "start_exempt_count": 0,
             }
         values, valid = self.query_points(samples)
+        return self._summarize_polyline(
+            samples, values, valid, safe_dist, start_exemption_radius
+        )
+
+    @staticmethod
+    def _summarize_polyline(
+        samples,
+        values,
+        valid,
+        safe_dist,
+        start_exemption_radius,
+    ) -> dict:
         oob_count = int(np.sum(~valid))
         start_radius = max(0.0, float(start_exemption_radius))
         start_exempt = np.linalg.norm(samples - samples[0], axis=1) <= start_radius + 1e-12
@@ -146,6 +158,53 @@ class EsdfGridView:
             "sample_count": int(len(samples)),
             "start_exempt_count": int(np.sum(start_exempt & valid)),
         }
+
+    def inspect_polylines(
+        self,
+        paths,
+        safe_dist,
+        start_exemption_radius=0.0,
+        max_step=None,
+    ) -> list[dict]:
+        """Inspect candidates with one ESDF query while preserving scalar semantics."""
+        samples = [self.sample_polyline(path, max_step=max_step) for path in paths]
+        nonempty = [sample for sample in samples if len(sample)]
+        if nonempty:
+            all_samples = np.concatenate(nonempty, axis=0)
+            all_values, all_valid = self.query_points(all_samples)
+        else:
+            all_values = np.empty(0, dtype=np.float64)
+            all_valid = np.empty(0, dtype=bool)
+
+        reports = []
+        offset = 0
+        invalid = {
+            "valid": False,
+            "safe": False,
+            "reason": "INVALID_PATH",
+            "min_clearance": float("nan"),
+            "unsafe_ratio": 1.0,
+            "oob_ratio": 1.0,
+            "oob_count": 0,
+            "sample_count": 0,
+            "start_exempt_count": 0,
+        }
+        for sample in samples:
+            count = len(sample)
+            if not count:
+                reports.append(dict(invalid))
+                continue
+            reports.append(
+                self._summarize_polyline(
+                    sample,
+                    all_values[offset : offset + count],
+                    all_valid[offset : offset + count],
+                    safe_dist,
+                    start_exemption_radius,
+                )
+            )
+            offset += count
+        return reports
 
     def query_polyline(self, points) -> float:
         samples = self.sample_polyline(points)

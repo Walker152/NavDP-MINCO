@@ -5,6 +5,7 @@ import json
 import subprocess
 import hashlib
 import os
+import math
 import numpy as np
 
 from experiments.simulators.process_supervisor import ProcessSupervisor
@@ -87,6 +88,19 @@ class IsaacNavDPBackend:
         ]
         command.extend(["--raw-controller", "original-navdp-mpc" if run.variant == "raw" else "disabled"])
         minco = effective["minco"]; esdf = effective["esdf"]; video = effective["video"]
+        diagnostics = effective["runtime_diagnostics"]
+        if not str(diagnostics.get("threshold_profile_id", "")).strip():
+            raise ValueError("runtime_diagnostics.threshold_profile_id must be non-empty")
+        for key in (
+            "high_turn_curvature_p95_1pm",
+            "high_turn_curvature_tv_1pm",
+            "jump_position_rmse_m",
+            "jump_tangent_rad",
+            "planning_deadline_ms",
+        ):
+            value = float(diagnostics.get(key, float("nan")))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"runtime_diagnostics.{key} must be finite and positive")
         command.extend([
             "--minco_initial_top_k", str(minco["initial_top_k"]),
             "--minco_max_top_k", str(minco["max_top_k"]),
@@ -106,6 +120,12 @@ class IsaacNavDPBackend:
             "--mpc_max_yaw_acc", str(effective["minco_mpc"]["max_yaw_acceleration_radps2"]),
             "--mpc_max_wheel_speed", str(effective["minco_mpc"]["max_wheel_speed_radps"] or 0.0), "--scene_scale", str(effective["scene"]["scale"]),
             "--video-fps", str(video["fps"]), "--video-crf", str(video["crf"]), "--video-scale", str(video["scale"]),
+            "--threshold-profile-id", str(diagnostics["threshold_profile_id"]),
+            "--high-turn-curvature-p95", str(diagnostics["high_turn_curvature_p95_1pm"]),
+            "--high-turn-curvature-tv", str(diagnostics["high_turn_curvature_tv_1pm"]),
+            "--jump-position-rmse", str(diagnostics["jump_position_rmse_m"]),
+            "--jump-tangent-rad", str(diagnostics["jump_tangent_rad"]),
+            "--planning-deadline-ms", str(diagnostics["planning_deadline_ms"]),
         ])
         if esdf["force_rebuild"]: command.append("--esdf_force_rebuild")
         command.append("--no-enable_minco" if run.variant == "raw" else "--enable_minco")

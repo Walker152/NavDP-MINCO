@@ -32,7 +32,8 @@ class ExperimentHookBridge:
         attempted_indices = fields.get("attempted_candidate_indices", [])
         if not isinstance(attempted_indices, str):
             attempted_indices = json.dumps([int(value) for value in attempted_indices])
-        row = {**self._base(), "episode_generation":self.generation, "planning_cycle_uid":cycle_uid, "trigger_timestamp_s":time.monotonic(), "raw_available":fields.get("raw_available", True), "candidate_count":fields.get("candidate_count", 0), "screened_candidate_count":fields.get("screened_candidate_count", 0), "rejected_candidate_count":fields.get("rejected_candidate_count", 0), "attempted_candidate_count":fields.get("attempted_candidate_count", 0), "attempted_candidate_indices":attempted_indices, "selected_candidate_index":fields.get("selected_candidate_index", ""), "optimizer_success":fields.get("optimizer_success", ""), "optimizer_return_code":fields.get("optimizer_return_code", ""), "optimizer_iteration_count":fields.get("optimizer_iteration_count", ""), "objective":fields.get("objective", ""), "cpp_validation_success":fields.get("cpp_validation_success", ""), "cpp_validation_min_clearance_m":fields.get("cpp_validation_min_clearance_m", ""), "python_validation_success":fields.get("python_validation_success", ""), "python_validation_min_clearance_m":fields.get("python_validation_min_clearance_m", ""), "validation_start_exempt_count":fields.get("validation_start_exempt_count", ""), "validation_oob_count":fields.get("validation_oob_count", ""), "validation_failure_reason":fields.get("validation_failure_reason", ""), "candidate_screen_ms":fields.get("candidate_screen_ms", ""), "candidate_attempt_total_ms":fields.get("candidate_attempt_total_ms", ""), "candidate_cpp_total_ms":fields.get("candidate_cpp_total_ms", ""), "python_validation_total_ms":fields.get("python_validation_total_ms", ""), "adapter_overhead_ms":fields.get("adapter_overhead_ms", ""), "stale":bool(stale), "published":bool(published), "fallback_mode":fallback_mode, "failure_reason":failure_reason, "navdp_ms":fields.get("navdp_ms", ""), "minco_ms":fields.get("minco_ms", ""), "validation_ms":fields.get("validation_ms", ""), "planning_total_ms":fields.get("planning_total_ms", ""), "plan_age_when_applied_ms":fields.get("plan_age_when_applied_ms", "")}
+        observation_timestamp = fields.get("observation_timestamp_s", "")
+        row = {**self._base(), "episode_generation":self.generation, "planning_cycle_uid":cycle_uid, "trigger_timestamp_s":fields.get("trigger_timestamp_s", observation_timestamp if observation_timestamp != "" else time.monotonic()), "observation_sequence":fields.get("observation_sequence", ""), "observation_timestamp_s":observation_timestamp, "planning_started_timestamp_s":fields.get("planning_started_timestamp_s", ""), "published_timestamp_s":fields.get("published_timestamp_s", ""), "observation_to_plan_ms":fields.get("observation_to_plan_ms", ""), "planning_deadline_ms":fields.get("planning_deadline_ms", ""), "planning_deadline_miss":fields.get("planning_deadline_miss", ""), "input_snapshot_ms":fields.get("input_snapshot_ms", ""), "raw_diagnostics_ms":fields.get("raw_diagnostics_ms", ""), "candidate_transform_ms":fields.get("candidate_transform_ms", ""), "threshold_profile_id":fields.get("threshold_profile_id", ""), "raw_available":fields.get("raw_available", True), "candidate_count":fields.get("candidate_count", 0), "screened_candidate_count":fields.get("screened_candidate_count", 0), "rejected_candidate_count":fields.get("rejected_candidate_count", 0), "attempted_candidate_count":fields.get("attempted_candidate_count", 0), "attempted_candidate_indices":attempted_indices, "selected_candidate_index":fields.get("selected_candidate_index", ""), "optimizer_success":fields.get("optimizer_success", ""), "optimizer_return_code":fields.get("optimizer_return_code", ""), "optimizer_iteration_count":fields.get("optimizer_iteration_count", ""), "objective":fields.get("objective", ""), "cpp_validation_success":fields.get("cpp_validation_success", ""), "cpp_validation_min_clearance_m":fields.get("cpp_validation_min_clearance_m", ""), "python_validation_success":fields.get("python_validation_success", ""), "python_validation_min_clearance_m":fields.get("python_validation_min_clearance_m", ""), "validation_start_exempt_count":fields.get("validation_start_exempt_count", ""), "validation_oob_count":fields.get("validation_oob_count", ""), "validation_failure_reason":fields.get("validation_failure_reason", ""), "candidate_screen_ms":fields.get("candidate_screen_ms", ""), "candidate_attempt_total_ms":fields.get("candidate_attempt_total_ms", ""), "candidate_cpp_total_ms":fields.get("candidate_cpp_total_ms", ""), "python_validation_total_ms":fields.get("python_validation_total_ms", ""), "adapter_overhead_ms":fields.get("adapter_overhead_ms", ""), "stale":bool(stale), "published":bool(published), "fallback_mode":fallback_mode, "failure_reason":failure_reason, "navdp_ms":fields.get("navdp_ms", ""), "minco_ms":fields.get("minco_ms", ""), "validation_ms":fields.get("validation_ms", ""), "planning_total_ms":fields.get("planning_total_ms", ""), "plan_age_when_applied_ms":fields.get("plan_age_when_applied_ms", "")}
         for field in (
             "optimizer_return_code", "optimizer_iteration_count", "objective",
             "cpp_validation_min_clearance_m", "python_validation_min_clearance_m",
@@ -40,7 +41,11 @@ class ExperimentHookBridge:
             "candidate_screen_ms", "candidate_attempt_total_ms",
             "candidate_cpp_total_ms", "python_validation_total_ms",
             "adapter_overhead_ms", "minco_ms", "validation_ms", "planning_total_ms",
-            "plan_age_when_applied_ms",
+            "plan_age_when_applied_ms", "observation_sequence",
+            "observation_timestamp_s", "planning_started_timestamp_s",
+            "published_timestamp_s", "observation_to_plan_ms",
+            "planning_deadline_ms", "input_snapshot_ms", "raw_diagnostics_ms",
+            "candidate_transform_ms",
         ):
             row[field] = _finite_or_blank(row[field])
         self.sink.submit_csv("planning_cycles", row)
@@ -50,6 +55,7 @@ class ExperimentHookBridge:
     def record_plan(self, plan_uid, published, stale, **fields):
         if not published or stale: return False
         columns = (
+            "threshold_profile_id", "hot_wrong_accept",
             "raw_safety_class", "turn_class", "temporal_class",
             "raw_min_clearance_m", "raw_unsafe_ratio", "raw_esdf_oob_ratio",
             "raw_path_length_m", "raw_curvature_abs_p95_1pm", "raw_curvature_tv_1pm",
@@ -61,7 +67,10 @@ class ExperimentHookBridge:
             "actual_jerk_rms_mps3", "actual_jerk_p95_mps3", "actual_jerk_max_mps3",
             "actual_yaw_rate_rms_radps", "actual_yaw_rate_max_radps", "trajectory_duration_s",
             "planning_state", "hot_start_accepted",
-            "hot_reject_reason", "optimizer_success", "python_validation_success",
+            "hot_reject_reason", "history_age_s", "position_error_m",
+            "velocity_error_mps", "direction_dot", "remaining_duration_s",
+            "history_min_clearance_m", "shifted_seed_valid", "copied_waypoints",
+            "copied_durations", "optimizer_success", "python_validation_success",
             "optimizer_return_code", "optimizer_iteration_count", "objective",
             "cpp_validation_success", "cpp_validation_min_clearance_m",
             "python_validation_min_clearance_m", "validation_start_exempt_count",
@@ -88,6 +97,9 @@ class ExperimentHookBridge:
             "optimizer_iteration_count", "objective", "cpp_validation_min_clearance_m",
             "python_validation_min_clearance_m", "validation_start_exempt_count",
             "validation_oob_count", "planning_total_ms",
+            "history_age_s", "position_error_m", "velocity_error_mps",
+            "direction_dot", "remaining_duration_s", "history_min_clearance_m",
+            "copied_waypoints", "copied_durations",
         ):
             row[column] = _finite_or_blank(row[column])
         self.sink.submit_csv("plan_metrics", row)
@@ -183,6 +195,14 @@ class ExperimentHookBridge:
         self.sink.submit_csv("control_samples", {
             **self._base(), "frame_idx":frame_idx, "plan_uid":plan_uid,
             "timestamp_monotonic_s":time.monotonic(), "control_state":fields.get("control_state", "TRACK"),
+            "observation_sequence":fields.get("observation_sequence", ""),
+            "observation_timestamp_s":_finite_or_blank(fields.get("observation_timestamp_s", "")),
+            "plan_published_timestamp_s":_finite_or_blank(fields.get("plan_published_timestamp_s", "")),
+            "observation_to_command_ms":_finite_or_blank(fields.get("observation_to_command_ms", "")),
+            "control_loop_ms":_finite_or_blank(fields.get("control_loop_ms", "")),
+            "video_write_ms":_finite_or_blank(fields.get("video_write_ms", "")),
+            "control_deadline_ms":_finite_or_blank(fields.get("control_deadline_ms", "")),
+            "control_deadline_miss":fields.get("control_deadline_miss", ""),
             "robot_x_m":fields.get("robot_x_m", ""), "robot_y_m":fields.get("robot_y_m", ""),
             "robot_yaw_rad":fields.get("robot_yaw_rad", ""), "actual_v_mps":fields.get("actual_v_mps", ""),
             "actual_w_radps":fields.get("actual_w_radps", ""), "reference_x_m":fields.get("reference_x_m", ""),
@@ -205,6 +225,9 @@ class ExperimentHookBridge:
             **self._base(), "episode_index":fields.get("episode_index", 0), "success":bool(success),
             "collision":fields.get("collision", False), "timeout":fields.get("timeout", False),
             "done_reason":fields.get("done_reason", "GOAL_REACHED" if success else "UNKNOWN"),
+            "termination_term_raw":fields.get("termination_term_raw", ""),
+            "failure_stage":fields.get("failure_stage", ""),
+            "failure_reason":fields.get("failure_reason", ""),
             "episode_duration_s":duration, "actual_path_length_m":fields.get("actual_path_length_m", ""),
             "repository_spl":fields.get("repository_spl", ""),
             "tracking_error_rmse_m":tracking_rmse,

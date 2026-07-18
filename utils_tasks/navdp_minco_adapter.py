@@ -116,6 +116,7 @@ class NavDPMincoAdapter:
         states,
         raw_top1_world,
         terminal_goals_world=None,
+        raw_diagnostics=None,
     ):
         if self.warm_start_mode == "cold" and hasattr(self.processor, "reset_history"):
             self.processor.reset_history()
@@ -156,10 +157,9 @@ class NavDPMincoAdapter:
                 if rank >= self.initial_top_k and (time.perf_counter() - start_time) * 1000.0 >= self.candidate_time_budget_ms:
                     failures.append("CANDIDATE_TIME_BUDGET_EXHAUSTED")
                     break
-                screened = preprocess_guide_path(candidates_world[env_idx][selected_idx])
-                candidate = screened["path"]
-                if not screened["valid"]:
-                    reason = screened["reason"]
+                candidate = candidate_evaluations[selected_idx].get("prepared_path")
+                if candidate is None:
+                    reason = candidate_evaluations[selected_idx]["screen_reason"]
                     failures.append(f"idx={selected_idx}: {reason}")
                     candidate_timings.append({
                         "candidate_rank": int(rank),
@@ -310,12 +310,27 @@ class NavDPMincoAdapter:
                     raw_top1 = raw_top1[:, :2]
                 else:
                     raw_top1 = None
-                raw_geometry, _ = compute_geometric_metrics(raw_top1)
-                raw_safety = self._inspect_esdf(
-                    raw_top1,
-                    self.validation_safe_dist,
-                    self.start_validation_exemption_radius,
+                raw_metrics = (
+                    raw_diagnostics[env_idx]
+                    if raw_diagnostics is not None and env_idx < len(raw_diagnostics)
+                    else None
                 )
+                if raw_metrics is None:
+                    raw_geometry, _ = compute_geometric_metrics(raw_top1)
+                    raw_safety = self._inspect_esdf(
+                        raw_top1,
+                        self.validation_safe_dist,
+                        self.start_validation_exemption_radius,
+                    )
+                    raw_metrics = {
+                        "raw_min_clearance_m": raw_safety["min_clearance"],
+                        "raw_unsafe_ratio": raw_safety["unsafe_ratio"],
+                        "raw_esdf_oob_ratio": raw_safety["oob_ratio"],
+                        "raw_path_length_m": raw_geometry["path_length_m"],
+                        "raw_curvature_abs_p95_1pm": raw_geometry["curvature_abs_p95_1pm"],
+                        "raw_curvature_tv_1pm": raw_geometry["curvature_tv_1pm"],
+                        "raw_curvature_rate_rms_1pm2": raw_geometry["curvature_rate_rms_1pm2"],
+                    }
                 minco_waypoints = np.asarray(best["waypoints"], dtype=np.float64)[:, :2]
                 minco_geometry, _ = compute_geometric_metrics(minco_waypoints)
                 minco_safety = self._inspect_esdf(
@@ -371,13 +386,7 @@ class NavDPMincoAdapter:
                     "python_validation_ms": float(best.get("python_validation_ms", np.nan)),
                     "cpp_validation_success": True,
                     "python_validation_success": True,
-                    "raw_min_clearance_m": raw_safety["min_clearance"],
-                    "raw_unsafe_ratio": raw_safety["unsafe_ratio"],
-                    "raw_esdf_oob_ratio": raw_safety["oob_ratio"],
-                    "raw_path_length_m": raw_geometry["path_length_m"],
-                    "raw_curvature_abs_p95_1pm": raw_geometry["curvature_abs_p95_1pm"],
-                    "raw_curvature_tv_1pm": raw_geometry["curvature_tv_1pm"],
-                    "raw_curvature_rate_rms_1pm2": raw_geometry["curvature_rate_rms_1pm2"],
+                    **raw_metrics,
                     "minco_min_clearance_m": minco_safety["min_clearance"],
                     "minco_unsafe_ratio": minco_safety["unsafe_ratio"],
                     "minco_path_length_m": minco_geometry["path_length_m"],
@@ -445,6 +454,11 @@ class NavDPMincoAdapter:
                     candidate_timings,
                     candidate_evaluations,
                     candidate_screen_ms,
+                    raw_diagnostics=(
+                        raw_diagnostics[env_idx]
+                        if raw_diagnostics is not None and env_idx < len(raw_diagnostics)
+                        else None
+                    ),
                 )
             results.append(result)
         return results
@@ -475,16 +489,27 @@ class NavDPMincoAdapter:
         candidate_timings=None,
         candidate_evaluations=None,
         candidate_screen_ms=0.0,
+        raw_diagnostics=None,
     ):
         result_metrics_start = time.perf_counter()
         waypoints = np.asarray(raw_top1_world, dtype=np.float64)
         raw_xy = waypoints[:, :2] if waypoints.ndim == 2 and waypoints.shape[1] >= 2 else None
-        raw_geometry, _ = compute_geometric_metrics(raw_xy)
-        raw_safety = self._inspect_esdf(
-            raw_xy,
-            self.validation_safe_dist,
-            self.start_validation_exemption_radius,
-        )
+        if raw_diagnostics is None:
+            raw_geometry, _ = compute_geometric_metrics(raw_xy)
+            raw_safety = self._inspect_esdf(
+                raw_xy,
+                self.validation_safe_dist,
+                self.start_validation_exemption_radius,
+            )
+            raw_diagnostics = {
+                "raw_min_clearance_m": raw_safety["min_clearance"],
+                "raw_unsafe_ratio": raw_safety["unsafe_ratio"],
+                "raw_esdf_oob_ratio": raw_safety["oob_ratio"],
+                "raw_path_length_m": raw_geometry["path_length_m"],
+                "raw_curvature_abs_p95_1pm": raw_geometry["curvature_abs_p95_1pm"],
+                "raw_curvature_tv_1pm": raw_geometry["curvature_tv_1pm"],
+                "raw_curvature_rate_rms_1pm2": raw_geometry["curvature_rate_rms_1pm2"],
+            }
         attempted = list(candidate_timings or [])
         last_attempt = attempted[-1] if attempted else {}
         result_metrics_ms = (
@@ -554,13 +579,7 @@ class NavDPMincoAdapter:
             "python_validation_success": last_attempt.get(
                 "python_validation_success", False
             ),
-            "raw_min_clearance_m": raw_safety["min_clearance"],
-            "raw_unsafe_ratio": raw_safety["unsafe_ratio"],
-            "raw_esdf_oob_ratio": raw_safety["oob_ratio"],
-            "raw_path_length_m": raw_geometry["path_length_m"],
-            "raw_curvature_abs_p95_1pm": raw_geometry["curvature_abs_p95_1pm"],
-            "raw_curvature_tv_1pm": raw_geometry["curvature_tv_1pm"],
-            "raw_curvature_rate_rms_1pm2": raw_geometry["curvature_rate_rms_1pm2"],
+            **raw_diagnostics,
         }
         print(
             f"[NavDP-Minco] env={env_idx} status=MINCO_FAIL fallback_mode=HOLD_LAST_OR_STOP "
@@ -619,9 +638,28 @@ class NavDPMincoAdapter:
     ):
         candidates = list(candidates)
         critic_values = np.asarray(critic_values, dtype=np.float64).reshape(-1)
-        diagnostics = []
+        prepared_paths = []
+        screens = []
         for index, candidate in enumerate(candidates):
             screened = preprocess_guide_path(candidate)
+            screens.append(screened)
+            path = screened["path"]
+            if path is not None and start_position is not None:
+                start = np.asarray(start_position, dtype=np.float64).reshape(-1)
+                if start.size >= 2 and np.all(np.isfinite(start[:2])):
+                    start_xyz = np.array([start[0], start[1], 0.0], dtype=np.float64)
+                    if np.linalg.norm(path[0, :2] - start_xyz[:2]) > 1e-4:
+                        path = np.vstack((start_xyz, path))
+            prepared_paths.append(path)
+
+        valid_paths = [path[:, :2] for path in prepared_paths if path is not None]
+        reports = iter(esdf_grid.inspect_polylines(
+            valid_paths,
+            safe_dist=validation_safe_dist,
+            start_exemption_radius=start_exemption_radius,
+        ))
+        diagnostics = []
+        for index, screened in enumerate(screens):
             critic = (
                 float(critic_values[index])
                 if index < len(critic_values) and np.isfinite(critic_values[index])
@@ -639,20 +677,11 @@ class NavDPMincoAdapter:
                     "oob_ratio": 1.0,
                     "path_length_m": float("nan"),
                     "safety_tier": 4,
+                    "prepared_path": None,
                 })
                 continue
-            path = screened["path"]
-            if start_position is not None:
-                start = np.asarray(start_position, dtype=np.float64).reshape(-1)
-                if start.size >= 2 and np.all(np.isfinite(start[:2])):
-                    start_xyz = np.array([start[0], start[1], 0.0], dtype=np.float64)
-                    if np.linalg.norm(path[0, :2] - start_xyz[:2]) > 1e-4:
-                        path = np.vstack((start_xyz, path))
-            report = esdf_grid.inspect_polyline(
-                path[:, :2],
-                safe_dist=validation_safe_dist,
-                start_exemption_radius=start_exemption_radius,
-            )
+            path = prepared_paths[index]
+            report = next(reports)
             length = float(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1).sum())
             geometry, _ = compute_geometric_metrics(path[:, :2])
             min_esdf = float(report["min_clearance"])
@@ -676,6 +705,7 @@ class NavDPMincoAdapter:
                 "path_length_m": length,
                 "curvature_tv_1pm": geometry["curvature_tv_1pm"],
                 "safety_tier": tier,
+                "prepared_path": path,
             })
 
         def sort_key(index):

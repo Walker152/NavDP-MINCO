@@ -74,6 +74,12 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--navdp-seed", type=int, default=0)
 parser.add_argument("--navdp-seeds", nargs="*", type=int, default=None)
 parser.add_argument("--raw-controller", choices=("original-navdp-mpc", "disabled"), default="disabled")
+parser.add_argument("--threshold-profile-id", type=str, default="full-real-v2")
+parser.add_argument("--high-turn-curvature-p95", type=float, default=2.0)
+parser.add_argument("--high-turn-curvature-tv", type=float, default=100.0)
+parser.add_argument("--jump-position-rmse", type=float, default=0.3)
+parser.add_argument("--jump-tangent-rad", type=float, default=0.3)
+parser.add_argument("--planning-deadline-ms", type=float, default=100.0)
 args_cli = parser.parse_args()
 if args_cli.num_envs != 1:
     parser.error("num_envs must be 1 for experiment isolation")
@@ -109,8 +115,11 @@ import torchvision.transforms as F
 import time
 import threading
 
-from experiments.analyzers.situations import SituationThresholds, classify_plan_situation
-from experiments.analyzers.metrics import compare_trajectory_prefixes
+from experiments.integration.plan_diagnostics import (
+    ThresholdProfile,
+    compute_raw_plan_diagnostics,
+    write_threshold_profile,
+)
 
 from utils_tasks.basic_utils import (
     PlanningInput,
@@ -130,7 +139,8 @@ from utils_tasks.tracking_utils import MPC_Controller
 from experiments.baselines.raw_navdp.controller_factory import create_tracking_controller, update_tracking_reference
 from experiments.baselines.raw_navdp.trajectory_adapter import camera_top1_to_world
 from experiments.integration.episode_selection import materialize_episode_init
-from utils_tasks.esdf_query_utils import query_esdf_polyline
+from utils_tasks.esdf_query_utils import EsdfGridView, query_esdf_polyline
+from utils_tasks.navdp_interface import transform_local_paths
 from utils_tasks.timing_utils import (
     StageTimer,
     append_timing_panel,
@@ -139,7 +149,10 @@ from utils_tasks.timing_utils import (
     format_planning_summary,
     mean_timing,
 )
-from utils_tasks.episode_diagnostics import EpisodeStartupDiagnostics, infer_termination_reason
+from utils_tasks.episode_diagnostics import (
+    EpisodeStartupDiagnostics,
+    infer_termination_details,
+)
 from utils_tasks.mpc_diagnostics import ExpectedMotionZeroDetector
 from utils_tasks.minco_fallback import is_hold_trajectory_valid
 
@@ -186,6 +199,7 @@ input_lock = threading.Lock()
 output_lock = threading.Lock()
 navdp_http_lock = threading.Lock()
 stop_event = threading.Event()
+planning_input_event = threading.Event()
 reset_in_progress = threading.Event()
 need_visual_frame = args_cli.save_video or args_cli.save_debug_visuals
 vis_manager = [VisualizationManager(history_size=5, show_all_candidates=True) for i in range(args_cli.num_envs)] if need_visual_frame else [None for _ in range(args_cli.num_envs)]
@@ -208,6 +222,9 @@ wheel_constraint_enabled = (
 mpc_max_wheel_speed = (
     float(args_cli.mpc_max_wheel_speed) if wheel_constraint_enabled else None
 )
+threshold_profile = None
+esdf_grid = None
+previous_raw_paths = [None for _ in range(args_cli.num_envs)]
 
 def transform_navdp_local_point(point_xy, env_idx, camera_pos, camera_rot, robot_pos_w=None):
     if not use_robot_base_frame:
@@ -220,12 +237,11 @@ def transform_navdp_local_point(point_xy, env_idx, camera_pos, camera_rot, robot
     return point_world
 
 def transform_navdp_local_traj(traj_local, env_idx, camera_pos, camera_rot, robot_pos_w=None):
-    return np.array(
-        [
-            transform_navdp_local_point(point, env_idx, camera_pos, camera_rot, robot_pos_w)
-            for point in traj_local
-        ],
-        dtype=np.float64,
+    return transform_local_paths(
+        traj_local,
+        camera_pos[env_idx],
+        camera_rot[env_idx],
+        None if robot_pos_w is None else robot_pos_w[env_idx],
     )
 
 def minco_cache_entry(result, episode_gen):
@@ -300,6 +316,8 @@ def invalidate_planning_state_for_reset():
         planning_input.robot_lin_vel_w = None
         planning_input.robot_ang_vel_w = None
         planning_input.episode_generation = episode_generation.copy()
+        planning_input.observation_timestamp_s = None
+    planning_input_event.clear()
     with output_lock:
         planning_output.trajectory_points_world = None
         planning_output.all_trajectories_world = None
@@ -314,6 +332,8 @@ def invalidate_planning_state_for_reset():
         planning_output.stop_required = None
         planning_output.minco_status = None
         planning_output.planning_timing = None
+        planning_output.observation_timestamp_s = None
+        planning_output.published_timestamp_s = None
         planning_output.is_planning = False
         planning_output.planning_error = None
         planning_output.episode_generation = episode_generation.copy()
@@ -323,27 +343,32 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
     planning_iter = 0
     while not stop_event.is_set():
         try:
+            if not planning_input_event.wait(timeout=0.1):
+                continue
+            planning_input_event.clear()
             if reset_in_progress.is_set():
-                time.sleep(0.01)
                 continue
             # Get latest observations from shared state
             planning_timer = StageTimer()
             planning_total_start = planning_timer.now()
-            with planning_timer.section("input_copy_ms"):
+            planning_started_timestamp_s = time.monotonic()
+            with planning_timer.section("input_snapshot_ms"):
                 with input_lock:
                     if reset_in_progress.is_set():
                         continue
                     if planning_input.current_goal is None or planning_input.current_image is None or planning_input.current_depth is None or planning_input.camera_pos is None or planning_input.camera_rot is None:
                         continue
-                    goal = planning_input.current_goal.copy()
-                    image = planning_input.current_image.copy()
-                    depth = planning_input.current_depth.copy()
-                    camera_pos = planning_input.camera_pos.copy()
-                    camera_rot = planning_input.camera_rot.copy()
-                    robot_pos_w = None if planning_input.robot_pos_w is None else planning_input.robot_pos_w.copy()
-                    robot_yaw_w = None if planning_input.robot_yaw_w is None else planning_input.robot_yaw_w.copy()
-                    robot_lin_vel_w = None if planning_input.robot_lin_vel_w is None else planning_input.robot_lin_vel_w.copy()
-                    robot_ang_vel_w = None if planning_input.robot_ang_vel_w is None else planning_input.robot_ang_vel_w.copy()
+                    goal = planning_input.current_goal
+                    image = planning_input.current_image
+                    depth = planning_input.current_depth
+                    camera_pos = planning_input.camera_pos
+                    camera_rot = planning_input.camera_rot
+                    robot_pos_w = planning_input.robot_pos_w
+                    robot_yaw_w = planning_input.robot_yaw_w
+                    robot_lin_vel_w = planning_input.robot_lin_vel_w
+                    robot_ang_vel_w = planning_input.robot_ang_vel_w
+                    observation_sequence = planning_input.observation_sequence
+                    observation_timestamp_s = planning_input.observation_timestamp_s
                     input_episode_generation = (
                         planning_input.episode_generation.copy()
                         if planning_input.episode_generation is not None
@@ -377,15 +402,32 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                     terminal_goals_world.append(
                         transform_navdp_local_point(goal[idx], idx, camera_pos, camera_rot, robot_pos_w)
                     )
-                    # Transform all trajectories
-                    all_trajectories_world = []
-                    for traj_camera in all_trajectories_camera[idx]:
-                        all_trajectories_world.append(
-                            transform_navdp_local_traj(traj_camera, idx, camera_pos, camera_rot, robot_pos_w)
-                        )
+                    all_trajectories_world = transform_local_paths(
+                        all_trajectories_camera[idx],
+                        camera_pos[idx],
+                        camera_rot[idx],
+                        None if robot_pos_w is None else robot_pos_w[idx],
+                    )
                     batch_all_points_world.append(all_trajectories_world)
                 batch_all_points_world = np.array(batch_all_points_world, dtype=object)
                 terminal_goals_world = np.array(terminal_goals_world, dtype=object)
+
+            raw_diagnostics_start = time.perf_counter()
+            raw_diagnostics = (
+                [
+                    compute_raw_plan_diagnostics(
+                        raw_top1_world[idx],
+                        esdf_grid,
+                        threshold_profile,
+                        previous_path=previous_raw_paths[idx],
+                    )
+                    for idx in range(len(raw_top1_world))
+                ]
+                if esdf_grid is not None else [{} for _ in range(len(raw_top1_world))]
+            )
+            planning_timer.records["raw_diagnostics_ms"] = (
+                time.perf_counter() - raw_diagnostics_start
+            ) * 1000.0
 
             batch_optimal_points_world = []
             batch_raw_top1_world = []
@@ -431,6 +473,7 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         states=states,
                         raw_top1_world=raw_top1_world,
                         terminal_goals_world=terminal_goals_world,
+                        raw_diagnostics=raw_diagnostics,
                     )
                 if stop_event.is_set():
                     mark_planning_idle()
@@ -532,6 +575,7 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             "validation_safe_dist": args_cli.minco_validation_safe_dist,
                             "adapter_total_ms": 0.0,
                             "selected_cpp_optimize_time_ms": float("nan"),
+                            **raw_diagnostics[idx],
                         })
 
             planning_total_ms = planning_timer.elapsed_ms(planning_total_start)
@@ -549,6 +593,7 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                 continue
 
             # Update shared state
+            published_timestamp_s = time.monotonic()
             with output_lock:
                 if reset_in_progress.is_set() or not np.array_equal(input_episode_generation, episode_generation):
                     if minco_adapter is not None:
@@ -592,6 +637,9 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                 planning_output.stop_required = np.array(batch_stop_required, dtype=bool)
                 planning_output.minco_status = list(batch_minco_status)
                 planning_output.planning_timing = planning_timing
+                planning_output.observation_sequence = observation_sequence
+                planning_output.observation_timestamp_s = observation_timestamp_s
+                planning_output.published_timestamp_s = published_timestamp_s
                 planning_output.is_planning = False
                 planning_output.planning_error = None
 
@@ -615,6 +663,10 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         cycle_info.get("adapter_timing_ms", {})
                         if used_minco else {}
                     ) or {}
+                    observation_to_plan_ms = (
+                        (published_timestamp_s - observation_timestamp_s) * 1000.0
+                        if observation_timestamp_s is not None else float("nan")
+                    )
                     experiment_hook.record_planning_cycle(
                         cycle_uid, published=published, stale=False, fallback_mode=fallback_mode,
                         failure_reason=cycle_info.get("failure_reason", ""), planning_total_ms=planning_total_ms,
@@ -647,36 +699,25 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         validation_ms=cycle_info.get("python_validation_ms", ""),
                         planning_state=cycle_info.get("planning_state", ""),
                         hot_start_accepted=cycle_info.get("hot_start_accepted", False),
+                        trigger_timestamp_s=observation_timestamp_s,
+                        observation_sequence=observation_sequence,
+                        observation_timestamp_s=observation_timestamp_s,
+                        planning_started_timestamp_s=planning_started_timestamp_s,
+                        published_timestamp_s=published_timestamp_s,
+                        observation_to_plan_ms=observation_to_plan_ms,
+                        planning_deadline_ms=threshold_profile.planning_deadline_ms,
+                        planning_deadline_miss=(
+                            observation_to_plan_ms > threshold_profile.planning_deadline_ms
+                        ),
+                        input_snapshot_ms=planning_timing.get("input_snapshot_ms", ""),
+                        raw_diagnostics_ms=planning_timing.get("raw_diagnostics_ms", ""),
+                        candidate_transform_ms=planning_timing.get("candidate_transform_ms", ""),
+                        threshold_profile_id=threshold_profile.profile_id,
                     )
                     plan_uid = f"{cycle_uid}_plan" if published else ""
-                    # --- situation classification for EXP-01 ---
-                    sit_thresholds = SituationThresholds(
-                        safe_dist_m=args_cli.minco_validation_safe_dist,
-                        high_turn_curvature_p95_1pm=2.0,
-                        high_turn_curvature_tv_1pm=100.0,
-                        jump_position_rmse_m=0.3,
-                        jump_tangent_rad=0.3,
-                    )
-                    situation = classify_plan_situation({
-                        "raw_min_clearance_m": cycle_info.get("raw_min_clearance_m", float("nan")),
-                        "raw_unsafe_ratio": cycle_info.get("raw_unsafe_ratio", 0),
-                        "raw_esdf_oob_ratio": cycle_info.get("raw_esdf_oob_ratio", 0),
-                        "raw_curvature_abs_p95_1pm": cycle_info.get("raw_curvature_abs_p95_1pm", 0),
-                        "raw_curvature_tv_1pm": cycle_info.get("raw_curvature_tv_1pm", 0),
-                        "raw_interplan_position_rmse_m": cycle_info.get("raw_interplan_position_rmse_m", float("nan")),
-                        "raw_initial_tangent_jump_rad": cycle_info.get("raw_initial_tangent_jump_rad", float("nan")),
-                    }, sit_thresholds)
-                    # --- interplan comparison for EXP-04 ---
-                    interplan_metrics = {}
-                    prev_samples = planning_output.prev_minco_samples
-                    prev_published_time = planning_output.prev_published_time
-                    curr_samples = cycle_info.get("samples")
-                    if prev_samples is not None and curr_samples is not None and prev_published_time is not None:
-                        interplan_metrics, _ = compare_trajectory_prefixes(
-                            prev_samples, prev_published_time, curr_samples,
-                            time.monotonic(), args_cli.minco_sample_dt,
-                        )
                     if published:
+                        hot_accepted = bool(cycle_info.get("hot_start_accepted", False))
+                        temporal_class = cycle_info.get("temporal_class", "")
                         experiment_hook.record_plan(
                             plan_uid, published=True, stale=False, plan_status=status,
                             planning_state=cycle_info.get("planning_state", ""),
@@ -701,11 +742,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             raw_curvature_abs_p95_1pm=cycle_info.get("raw_curvature_abs_p95_1pm", ""),
                             raw_curvature_tv_1pm=cycle_info.get("raw_curvature_tv_1pm", ""),
                             raw_curvature_rate_rms_1pm2=cycle_info.get("raw_curvature_rate_rms_1pm2", ""),
-                            raw_safety_class=situation.get("raw_safety_class", ""),
-                            turn_class=situation.get("turn_class", ""),
-                            temporal_class=situation.get("temporal_class", ""),
-                            raw_interplan_position_rmse_m=interplan_metrics.get("interplan_position_rmse_m", ""),
-                            raw_initial_tangent_jump_rad=interplan_metrics.get("initial_tangent_jump_rad", ""),
+                            raw_interplan_position_rmse_m=cycle_info.get("raw_interplan_position_rmse_m", ""),
+                            raw_initial_tangent_jump_rad=cycle_info.get("raw_initial_tangent_jump_rad", ""),
                             minco_min_clearance_m=cycle_info.get("minco_min_clearance_m", ""),
                             minco_unsafe_ratio=cycle_info.get("minco_unsafe_ratio", ""),
                             minco_path_length_m=cycle_info.get("minco_path_length_m", ""),
@@ -721,12 +759,25 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             actual_yaw_rate_rms_radps=cycle_info.get("actual_yaw_rate_rms_radps", ""),
                             actual_yaw_rate_max_radps=cycle_info.get("actual_yaw_rate_max_radps", ""),
                             trajectory_duration_s=cycle_info.get("trajectory_duration_s", ""),
+                            threshold_profile_id=threshold_profile.profile_id,
+                            raw_safety_class=cycle_info.get("raw_safety_class", ""),
+                            turn_class=cycle_info.get("turn_class", ""),
+                            temporal_class=temporal_class,
+                            hot_wrong_accept=hot_accepted and temporal_class == "JUMP_INPUT",
+                            history_age_s=cycle_info.get("history_age_s", ""),
+                            position_error_m=cycle_info.get("position_error", ""),
+                            velocity_error_mps=cycle_info.get("velocity_error", ""),
+                            direction_dot=cycle_info.get("direction_dot", ""),
+                            remaining_duration_s=cycle_info.get("remaining_duration", ""),
+                            history_min_clearance_m=cycle_info.get("history_min_clearance", ""),
+                            shifted_seed_valid=cycle_info.get("shifted_seed_valid", ""),
+                            copied_waypoints=cycle_info.get("copied_waypoints", ""),
+                            copied_durations=cycle_info.get("copied_durations", ""),
                         )
-                    # Cache previous MINCO samples for interplan comparison
-                    curr_minco_samples = cycle_info.get("samples")
-                    if curr_minco_samples is not None:
-                        planning_output.prev_minco_samples = curr_minco_samples
-                        planning_output.prev_published_time = float(cycle_info.get("timestamp_monotonic_s", time.monotonic()))
+                        previous_raw_paths[idx] = np.asarray(
+                            batch_raw_top1_world[idx], dtype=np.float64
+                        ).copy()
+                        planning_output.prev_published_time = published_timestamp_s
                     selected_index = int(cycle_info.get("selected_index", 0 if not used_minco else -1))
                     experiment_hook.record_candidates(
                         cycle_uid,
@@ -800,8 +851,6 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
             with output_lock:
                 planning_output.is_planning = False
                 planning_output.planning_error = str(e)
-        # Small sleep to prevent CPU overload
-        time.sleep(0.1)
 
 if args_cli.scene_path:
     scene_path = os.path.abspath(args_cli.scene_path) + "/"
@@ -846,9 +895,8 @@ for _ in range(PREHEAT_STEPS):
 camera_intrinsic = env.unwrapped.scene.sensors['camera_sensor'].data.intrinsic_matrices[0]
 
 minco_adapter = None
-if args_cli.enable_minco:
+if args_cli.enable_minco or args_cli.eval_monitor:
     from utils_tasks.sim_esdf_builder import SimEsdfBuilder
-    from utils_tasks.navdp_minco_adapter import NavDPMincoAdapter
     import omni.usd
 
     stage = omni.usd.get_context().get_stage()
@@ -891,28 +939,48 @@ if args_cli.enable_minco:
     camera_pos_debug = env.unwrapped.scene.sensors['camera_sensor'].data.pos_w.cpu().numpy()
     ok, dist = esdf_builder.query_grid(esdf, camera_pos_debug[0, :2])
     print(f"[SimESDF] initial camera query ok={ok} dist={dist}")
-    minco_adapter = NavDPMincoAdapter(
-        esdf=esdf,
-        optimization_safe_dist=args_cli.minco_optimization_safe_dist,
-        validation_safe_dist=args_cli.minco_validation_safe_dist,
-        initial_top_k=args_cli.minco_initial_top_k,
-        max_top_k=args_cli.minco_max_top_k,
-        candidate_time_budget_ms=args_cli.minco_candidate_time_budget_ms,
-        start_validation_exemption_radius=args_cli.minco_start_validation_exemption_radius,
-        sample_dt=args_cli.minco_sample_dt,
-        speed=args_cli.speed,
-        max_vel=args_cli.minco_max_vel,
-        max_acc=args_cli.minco_max_acc,
-        max_iterations=args_cli.minco_max_iterations,
-        max_yaw_rate=args_cli.mpc_max_yaw_rate,
-        penalty_weight_pos=args_cli.minco_penalty_weight_pos,
-        penalty_weight_vel=args_cli.minco_penalty_weight_vel,
-        penalty_weight_acc=args_cli.minco_penalty_weight_acc,
-        penalty_weight_attractor=args_cli.minco_penalty_weight_attractor,
-        time_weight=args_cli.minco_time_weight,
-        time_barrier_weight=args_cli.minco_time_barrier_weight,
-        warm_start_mode=args_cli.warm_start_mode,
-        enable=True,
+    esdf_grid = EsdfGridView.from_mapping(esdf)
+    if args_cli.enable_minco:
+        from utils_tasks.navdp_minco_adapter import NavDPMincoAdapter
+        minco_adapter = NavDPMincoAdapter(
+            esdf=esdf,
+            optimization_safe_dist=args_cli.minco_optimization_safe_dist,
+            validation_safe_dist=args_cli.minco_validation_safe_dist,
+            initial_top_k=args_cli.minco_initial_top_k,
+            max_top_k=args_cli.minco_max_top_k,
+            candidate_time_budget_ms=args_cli.minco_candidate_time_budget_ms,
+            start_validation_exemption_radius=args_cli.minco_start_validation_exemption_radius,
+            sample_dt=args_cli.minco_sample_dt,
+            speed=args_cli.speed,
+            max_vel=args_cli.minco_max_vel,
+            max_acc=args_cli.minco_max_acc,
+            max_iterations=args_cli.minco_max_iterations,
+            max_yaw_rate=args_cli.mpc_max_yaw_rate,
+            penalty_weight_pos=args_cli.minco_penalty_weight_pos,
+            penalty_weight_vel=args_cli.minco_penalty_weight_vel,
+            penalty_weight_acc=args_cli.minco_penalty_weight_acc,
+            penalty_weight_attractor=args_cli.minco_penalty_weight_attractor,
+            time_weight=args_cli.minco_time_weight,
+            time_barrier_weight=args_cli.minco_time_barrier_weight,
+            warm_start_mode=args_cli.warm_start_mode,
+            enable=True,
+        )
+
+threshold_profile = ThresholdProfile(
+    profile_id=args_cli.threshold_profile_id,
+    safe_dist_m=args_cli.minco_validation_safe_dist,
+    high_turn_curvature_p95_1pm=args_cli.high_turn_curvature_p95,
+    high_turn_curvature_tv_1pm=args_cli.high_turn_curvature_tv,
+    jump_position_rmse_m=args_cli.jump_position_rmse,
+    jump_tangent_rad=args_cli.jump_tangent_rad,
+    planning_deadline_ms=args_cli.planning_deadline_ms,
+    control_deadline_ms=float(env.unwrapped.step_dt) * 1000.0,
+    start_exemption_radius_m=args_cli.minco_start_validation_exemption_radius,
+)
+if args_cli.experiment_run_dir:
+    write_threshold_profile(
+        Path(args_cli.experiment_run_dir) / "thresholds.json",
+        threshold_profile,
     )
 
 planning_thread_obj = threading.Thread(target=planning_thread, args=(env, camera_intrinsic, minco_adapter))
@@ -949,6 +1017,7 @@ frame_idx = 0
 try:
     while simulation_app.is_running() and not stop_event.is_set():
         with torch.inference_mode():
+            control_loop_started_s = time.monotonic()
             goals = infos['observations']['goal_pose'].cpu().numpy()[:,0:2]
             images = infos['observations']['rgb'].cpu().numpy()[:,:,:,0:3]
             depths = infos['observations']['depth'].cpu().numpy()[:,:,:]
@@ -994,17 +1063,21 @@ try:
                         )
 
             if not np.any(reset_pending):
+                observation_timestamp_s = time.monotonic()
                 with input_lock:
-                    planning_input.current_goal = goals.copy()
-                    planning_input.current_image = images.copy()
-                    planning_input.current_depth = depths.copy()
-                    planning_input.camera_pos = camera_pos.copy()
-                    planning_input.camera_rot = camera_rot.copy()
-                    planning_input.robot_pos_w = robot_pos_w.copy()
-                    planning_input.robot_yaw_w = robot_yaw_w.copy()
-                    planning_input.robot_lin_vel_w = robot_lin_vel_w_np.copy()
-                    planning_input.robot_ang_vel_w = robot_ang_vel_batch.copy()
+                    planning_input.current_goal = goals
+                    planning_input.current_image = images
+                    planning_input.current_depth = depths
+                    planning_input.camera_pos = camera_pos
+                    planning_input.camera_rot = camera_rot
+                    planning_input.robot_pos_w = robot_pos_w
+                    planning_input.robot_yaw_w = robot_yaw_w
+                    planning_input.robot_lin_vel_w = robot_lin_vel_w_np
+                    planning_input.robot_ang_vel_w = robot_ang_vel_batch
                     planning_input.episode_generation = episode_generation.copy()
+                    planning_input.observation_sequence += 1
+                    planning_input.observation_timestamp_s = observation_timestamp_s
+                planning_input_event.set()
                 if reset_in_progress.is_set():
                     reset_in_progress.clear()
 
@@ -1040,6 +1113,9 @@ try:
             current_planning_timing = None
             current_plan_id = -1
             current_episode_generation = None
+            current_observation_sequence = 0
+            current_observation_timestamp_s = None
+            current_published_timestamp_s = None
             with output_lock:
                 if planning_output.trajectory_points_world is not None:
                     current_plan_id = planning_output.plan_id
@@ -1061,6 +1137,9 @@ try:
                     current_stop_required = planning_output.stop_required
                     current_minco_status = planning_output.minco_status
                     current_planning_timing = planning_output.planning_timing
+                    current_observation_sequence = planning_output.observation_sequence
+                    current_observation_timestamp_s = planning_output.observation_timestamp_s
+                    current_published_timestamp_s = planning_output.published_timestamp_s
         
             action_list = []
             control_timing_records = []
@@ -1180,10 +1259,10 @@ try:
                                     joint_velocities = controller.forward(np.array([v, w])).joint_velocities
                                     control_states[i] = "CONTROL_ACTIVE"
                                     # --- ESDF min clearance tracking for EXP-02/06 ---
-                                    if minco_adapter is not None and hasattr(minco_adapter, '_esdf_grid') and minco_adapter._esdf_grid is not None:
+                                    if esdf_grid is not None:
                                         try:
                                             robot_xy = robot_pos_w[i, :2]
-                                            esdf_vals, esdf_valid = minco_adapter._esdf_grid.query_points(np.atleast_2d(robot_xy))
+                                            esdf_vals, esdf_valid = esdf_grid.query_points(np.atleast_2d(robot_xy))
                                             if np.any(esdf_valid) and np.any(np.isfinite(esdf_vals[esdf_valid])):
                                                 clearance = float(np.min(esdf_vals[esdf_valid]))
                                                 ep_min_clearance[i] = min(ep_min_clearance[i], clearance)
@@ -1363,6 +1442,17 @@ try:
 
             action = torch.as_tensor(np.stack(action_list, axis=0),device="cuda:0")
             if experiment_hook is not None:
+                command_timestamp_s = time.monotonic()
+                observation_to_command_ms = (
+                    (command_timestamp_s - current_observation_timestamp_s) * 1000.0
+                    if current_observation_timestamp_s is not None else float("nan")
+                )
+                control_loop_ms = (command_timestamp_s - control_loop_started_s) * 1000.0
+                video_write_ms = sum(
+                    float(timer.records.get("video_write_ms", 0.0))
+                    for timer in control_timers
+                )
+                control_deadline_ms = threshold_profile.control_deadline_ms
                 reference = mpc[0].get_current_reference() if mpc[0] is not None else None
                 reference_x = float(reference[0]) if reference is not None and np.isfinite(reference[0]) else ""
                 reference_y = float(reference[1]) if reference is not None and np.isfinite(reference[1]) else ""
@@ -1385,6 +1475,14 @@ try:
                     expected_motion_zero_streak=int(zero_streak_batch[0]),
                     mpc_solver_status=mpc_solver_status_batch[0],
                     mpc_recovery_action=mpc_recovery_action_batch[0],
+                    observation_sequence=current_observation_sequence,
+                    observation_timestamp_s=current_observation_timestamp_s,
+                    plan_published_timestamp_s=current_published_timestamp_s,
+                    observation_to_command_ms=observation_to_command_ms,
+                    control_loop_ms=control_loop_ms,
+                    video_write_ms=video_write_ms,
+                    control_deadline_ms=control_deadline_ms,
+                    control_deadline_miss=control_loop_ms > control_deadline_ms,
                 )
             env_step_timer = StageTimer()
             with env_step_timer.section("env_step_ms"):
@@ -1400,7 +1498,7 @@ try:
                 if stop_event.is_set():
                     break
                 if dones[i] == True:
-                    termination_reason = infer_termination_reason(infos, i)
+                    termination_reason, termination_term_raw = infer_termination_details(infos, i)
                     success_flag_bool = bool(np.sqrt(np.square(goals[i]).sum()) < 1.0)
                     executed_length = float(trajectory_length[i])
                     repository_spl = float(np.clip(euclidean[i] / executed_length, 0, 1)) if success_flag_bool and executed_length > 0 else 0.0
@@ -1417,6 +1515,9 @@ try:
                             collision=termination_reason == "COLLISION", timeout=termination_reason == "TIMEOUT",
                             actual_path_length_m=executed_length, repository_spl=repository_spl,
                             minimum_executed_clearance_m=min_clearance,
+                            termination_term_raw=termination_term_raw,
+                            failure_stage="" if success_flag_bool else "TASK_TERMINATION",
+                            failure_reason="" if success_flag_bool else termination_reason,
                         )
                     if episode_video_recorder is not None:
                         episode_video_recorder.end_episode()
@@ -1491,6 +1592,7 @@ except KeyboardInterrupt:
     print("[Shutdown] KeyboardInterrupt received.")
 finally:
     stop_event.set()
+    planning_input_event.set()
     try:
         planning_thread_obj.join(timeout=6.0)
     except Exception as exc:
