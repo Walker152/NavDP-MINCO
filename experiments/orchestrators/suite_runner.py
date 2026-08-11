@@ -58,7 +58,13 @@ def _run_config(run, scene, episodes, backend_name, data_source, manifest_id, vi
 
 
 def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, dry_run=False, analysis_only=False, allow_real_simulation=False, skip_video=False):
-    config = load_suite(config_path); backend_name = backend_name or config.backend
+    config = load_suite(config_path)
+    if analysis_only:
+        raise ValueError(
+            "run-suite --analysis-only is disabled because it can mutate suite "
+            "artifacts; use analyze-suite-readonly with an external --output"
+        )
+    backend_name = backend_name or config.backend
     if backend_name not in {"mock", "isaac"}: raise ValueError("backend must be mock or isaac")
     manifest = load_manifest(config.manifest_path); layout = ResultLayout(config.output_root); backend = MockBackend() if backend_name == "mock" else IsaacNavDPBackend(Path("."))
     video_required = backend_name == "isaac" and bool((config.video or {}).get("enabled", True)) and not skip_video
@@ -87,8 +93,6 @@ def run_suite(config_path, backend_name=None, resume=False, retry_failed=False, 
                 write_run_manifest(run_dir / "run_manifest.json", backend.repo_root, json.loads((run_dir / "run_config.json").read_text()), commands[-1], server_commands[-1], probe_external=False)
         atomic_json(suite_dir / "dry_run_plan.json", {"backend":backend_name, "run_count":len(list(expand_runs(config, manifest))), "commands":commands, "server_commands":server_commands, "started_processes":0})
         return SuiteResult(0, 0, 0)
-    if analysis_only:
-        analyze_suite(suite_dir); return SuiteResult(0, 0, 0)
     if backend_name == "isaac" and not allow_real_simulation: raise PermissionError("isaac backend requires --dry-run or --allow-real-simulation")
     completed = skipped = failed = 0
     scenes = {scene.scene_id: scene for scene in manifest.scenes}

@@ -24,6 +24,7 @@ set(TRAJ_OPT_SOURCES
 
 set(MINCO_ALGORITHM_SOURCES
   src/minco_processor/minco_pipeline.cpp
+  src/guide_corridor.cpp
   src/minco_core/components/trajectory_safety_checker.cpp
   src/static_sim_esdf_map.cpp
 )

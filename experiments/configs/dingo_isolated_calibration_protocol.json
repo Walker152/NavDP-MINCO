@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "protocol_id": "dingo_isolated_calibration_v1",
+  "status": "READY_FOR_CALIBRATION_RUN",
+  "real_run_authorized": false,
+  "environment": {
+    "kind": "minimal_empty_scene",
+    "navigation_server": false,
+    "full_navigation_episode": false,
+    "fixed_physics_dt_s": 0.02,
+    "required_receipts": ["robot_usd_sha256", "calibration_sha256", "scene_sha256", "command_clock", "observation_clock"]
+  },
+  "tests": [
+    {"kind": "straight", "wheel_commands_radps": [2.0, 4.0, 6.0], "duration_s": 4.0, "repetitions": 3, "measure": ["linear_speed", "displacement", "rise_time", "command_delay", "effective_wheel_radius"]},
+    {"kind": "rotation", "wheel_commands_radps": [2.0, 4.0, 6.0], "right_sign": -1, "duration_s": 4.0, "repetitions": 3, "measure": ["yaw_rate", "effective_wheel_base", "command_delay"]},
+    {"kind": "braking", "target_linear_speeds_mps": [0.25, 0.5, 0.75], "stop_hold_s": 3.0, "repetitions": 3, "measure": ["braking_time", "braking_distance", "peak_deceleration"]},
+    {"kind": "wall_clearance", "centre_distances_m": [0.24, 0.28, 0.32, 0.36], "speed_mps": 0.1, "repetitions": 2, "measure": ["esdf_centre_distance", "collision_min_distance", "contact_threshold"]}
+  ],
+  "outputs": ["straight_calibration.png", "rotation_calibration.png", "braking_distance.png", "wall_clearance.png", "dynamic_calibration_receipt.json"]
+}

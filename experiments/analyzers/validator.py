@@ -8,6 +8,7 @@ from experiments.core.schemas import SCHEMAS
 from experiments.core.trace_schema import validate_trace
 from experiments.analyzers.data_quality import summarize_field_coverage
 from experiments.recorders.run_recorder import atomic_json
+from experiments.core.failure_taxonomy import classify_reason
 
 
 PRIMARY_KEYS = {
@@ -94,7 +95,12 @@ def validate_run(run_dir: Path | str, write_report=True):
         if not path.exists(): errors.append(f"missing {path.name}"); continue
         with path.open(newline="", encoding="utf-8") as stream:
             reader = csv.DictReader(stream); rows = list(reader); counts[table] = len(rows); table_rows[table] = rows
-            if reader.fieldnames != schema: errors.append(f"schema mismatch: {table}")
+            actual_fields = list(reader.fieldnames or [])
+            if actual_fields != schema:
+                unknown = set(actual_fields) - set(schema)
+                identity_missing = set(SCHEMAS[table][:8]) - set(actual_fields)
+                if unknown or identity_missing:
+                    errors.append(f"schema mismatch: {table}")
             if any(row.get("data_source") not in {"SIMULATED", "REAL"} for row in rows): errors.append(f"invalid data_source: {table}")
             expected_source = config.get("data_source")
             if expected_source in {"SIMULATED", "REAL"} and any(row.get("data_source") != expected_source for row in rows): errors.append(f"data_source mismatch: {table}")
@@ -122,12 +128,49 @@ def validate_run(run_dir: Path | str, write_report=True):
         config.get("variant", ""),
         config.get("data_source", ""),
     ))
+    if config.get("data_source") == "REAL" and config.get("variant") != "raw":
+        for row in cycles:
+            published = str(row.get("published", "")).lower() == "true"
+            stale = str(row.get("stale", "")).lower() == "true"
+            fallback = str(row.get("fallback_mode", ""))
+            key = row.get("planning_cycle_uid", "")
+            if published and (
+                str(row.get("cpp_validation_success", "")).lower() != "true"
+                or str(row.get("python_validation_success", "")).lower() != "true"
+            ):
+                errors.append(
+                    f"published MINCO plan lacks hard validation success: {key}"
+                )
+            if published and (stale or fallback in {"HOLD_LAST", "STOP"}):
+                errors.append(
+                    f"published plan has stale/recovery semantics: {key}"
+                )
+            if fallback == "HOLD_LAST" and published:
+                errors.append(f"HOLD_LAST recorded as new publication: {key}")
+            try:
+                oob_count = int(float(row.get("validation_oob_count") or 0))
+            except (TypeError, ValueError):
+                oob_count = 0
+            if published and oob_count > 0:
+                errors.append(f"published plan contains ESDF OOB samples: {key}")
+            reason = str(row.get("failure_reason", "")).strip()
+            if reason and classify_reason(reason)["reason_source"] == "UNMAPPED":
+                errors.append(f"unmapped failure reason: {key}: {reason}")
     expected_uids = list(config.get("episode_uids", []))
     actual_uids = [row.get("episode_uid") for row in table_rows.get("episode_metrics", [])]
     if expected_uids and sorted(actual_uids) != sorted(expected_uids): errors.append("episode completion set does not match run_config")
     if config.get("data_source") == "REAL":
-        if len(expected_uids) != 10 or len(set(expected_uids)) != 10:
-            errors.append("REAL run requires exactly 10 distinct episode_uids")
+        is_dynamic_stress = str(config.get("suite_id", "")).startswith(
+            "task06_dynamic_"
+        )
+        expected_real_count = 1 if is_dynamic_stress else 10
+        if (
+            len(expected_uids) != expected_real_count
+            or len(set(expected_uids)) != expected_real_count
+        ):
+            errors.append(
+                f"REAL run requires exactly {expected_real_count} distinct episode_uids"
+            )
         manifest_path = run_dir / "run_manifest.json"
         if not manifest_path.exists(): errors.append("missing run_manifest.json")
         else:
@@ -151,6 +194,13 @@ def validate_run(run_dir: Path | str, write_report=True):
             except Exception as error: errors.append(f"unreadable resource_summary.json: {error}")
         if config.get("variant") != "raw" and not (run_dir / "esdf_runtime.json").exists():
             errors.append("missing esdf_runtime.json")
+        for row in table_rows.get("episode_metrics", []):
+            reason = str(row.get("done_reason", "")).strip()
+            raw = str(row.get("termination_term_raw", "")).strip()
+            if reason in {"", "UNKNOWN"} and not raw:
+                errors.append(
+                    f"missing machine termination truth: {row.get('episode_uid', '')}"
+                )
     if config.get("trace_required") and not list((run_dir / "traces").glob("*.npz")): errors.append("missing required planning traces")
     if config.get("video_required"):
         for uid in expected_uids:

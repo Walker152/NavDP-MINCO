@@ -44,6 +44,19 @@ class NavDPMincoAdapter:
         penalty_weight_attractor=20.0,
         time_weight=0.01,
         time_barrier_weight=100.0,
+        constraint_profile="legacy",
+        guide_corridor_weight=2000.0,
+        corridor_max_radius=0.45,
+        corridor_min_radius=0.04,
+        corridor_sample_step=0.025,
+        adaptive_max_spatial_step=0.025,
+        adaptive_near_clearance=0.05,
+        adaptive_max_depth=14,
+        adaptive_sample_budget=20000,
+        max_jerk=20.0,
+        wheel_radius=0.06125,
+        wheel_base=0.2261616,
+        max_wheel_speed=100.0,
         warm_start_mode="gated",
         enable=True,
     ):
@@ -70,6 +83,7 @@ class NavDPMincoAdapter:
              penalty_weight_attractor, time_barrier_weight], dtype=np.float64
         )
         self.time_weight = float(time_weight)
+        self.constraint_profile = str(constraint_profile)
         if not np.isfinite(self.max_yaw_rate) or self.max_yaw_rate <= 0.0:
             raise ValueError("max_yaw_rate must be finite and positive")
         if not np.all(np.isfinite(self.penalty_weights)) or np.any(self.penalty_weights < 0.0):
@@ -101,6 +115,26 @@ class NavDPMincoAdapter:
                     penalty_weight_attractor=float(self.penalty_weights[3]),
                     time_weight=self.time_weight,
                     time_barrier_weight=float(self.penalty_weights[4]),
+                )
+            if self.constraint_profile == "safe_corridor_v1":
+                if not hasattr(self.processor, "configure_safety_profile"):
+                    raise RuntimeError(
+                        "native MINCO extension lacks safe_corridor_v1 support"
+                    )
+                self.processor.configure_safety_profile(
+                    constraint_profile=self.constraint_profile,
+                    guide_corridor_weight=float(guide_corridor_weight),
+                    corridor_max_radius=float(corridor_max_radius),
+                    corridor_min_radius=float(corridor_min_radius),
+                    corridor_sample_step=float(corridor_sample_step),
+                    adaptive_max_spatial_step=float(adaptive_max_spatial_step),
+                    adaptive_near_clearance=float(adaptive_near_clearance),
+                    adaptive_max_depth=int(adaptive_max_depth),
+                    adaptive_sample_budget=int(adaptive_sample_budget),
+                    max_jerk=float(max_jerk),
+                    wheel_radius=float(wheel_radius),
+                    wheel_base=float(wheel_base),
+                    max_wheel_speed=float(max_wheel_speed),
                 )
             self.processor.set_static_esdf_2d(
                 distance=self._esdf_grid.distance,
@@ -229,6 +263,32 @@ class NavDPMincoAdapter:
                     "validation_oob_count": int(result.get("validation_oob_count", 0)),
                     "validation_start_exempt_count": int(result.get("validation_start_exempt_count", 0)),
                     "validation_failure_reason": str(result.get("validation_failure_reason", "")),
+                    "constraint_profile": str(
+                        result.get("constraint_profile", getattr(self, "constraint_profile", "legacy"))
+                    ),
+                    "corridor_failure_reason": str(result.get("corridor_failure_reason", "")),
+                    "corridor_segment_count": int(result.get("corridor_segment_count", 0)),
+                    "corridor_min_radius": float(result.get("corridor_min_radius", np.nan)),
+                    "corridor_min_clearance": float(result.get("corridor_min_clearance", np.nan)),
+                    "corridor_min_overlap": float(result.get("corridor_min_overlap", np.nan)),
+                    "validation_offending_sample_index": int(
+                        result.get("validation_offending_sample_index", -1)
+                    ),
+                    "validation_offending_time_s": float(
+                        result.get("validation_offending_time_s", np.nan)
+                    ),
+                    "validation_measured_value": float(
+                        result.get("validation_measured_value", np.nan)
+                    ),
+                    "validation_limit_value": float(
+                        result.get("validation_limit_value", np.nan)
+                    ),
+                    "adaptive_validation_sample_count": int(
+                        result.get("adaptive_validation_sample_count", 0)
+                    ),
+                    "adaptive_validation_subdivision_count": int(
+                        result.get("adaptive_validation_subdivision_count", 0)
+                    ),
                     "cpp_validation_success": bool(result.get("success", False)),
                     "python_validation_success": "",
                 })
@@ -357,6 +417,33 @@ class NavDPMincoAdapter:
                     "optimization_safe_dist": self.optimization_safe_dist,
                     "validation_safe_dist": self.validation_safe_dist,
                     "validation_failure_reason": str(best.get("validation_failure_reason", "NONE")),
+                    "constraint_profile": str(
+                        best.get("constraint_profile", getattr(self, "constraint_profile", "legacy"))
+                    ),
+                    "corridor_failure_reason": str(best.get("corridor_failure_reason", "")),
+                    "corridor_segment_count": int(best.get("corridor_segment_count", 0)),
+                    "corridor_segments": best.get("corridor_segments"),
+                    "corridor_min_radius": float(best.get("corridor_min_radius", np.nan)),
+                    "corridor_min_clearance": float(best.get("corridor_min_clearance", np.nan)),
+                    "corridor_min_overlap": float(best.get("corridor_min_overlap", np.nan)),
+                    "validation_offending_sample_index": int(
+                        best.get("validation_offending_sample_index", -1)
+                    ),
+                    "validation_offending_time_s": float(
+                        best.get("validation_offending_time_s", np.nan)
+                    ),
+                    "validation_measured_value": float(
+                        best.get("validation_measured_value", np.nan)
+                    ),
+                    "validation_limit_value": float(
+                        best.get("validation_limit_value", np.nan)
+                    ),
+                    "adaptive_validation_sample_count": int(
+                        best.get("adaptive_validation_sample_count", 0)
+                    ),
+                    "adaptive_validation_subdivision_count": int(
+                        best.get("adaptive_validation_subdivision_count", 0)
+                    ),
                     "failure_reason": best.get("failure_reason", "NONE"),
                     "fallback": False,
                     "fallback_mode": "NONE",

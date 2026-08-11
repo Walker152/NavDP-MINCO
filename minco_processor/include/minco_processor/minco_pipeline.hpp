@@ -11,6 +11,7 @@
 #include "data_structure/base/trajectory.h"
 #include "minco_core/components/trajectory_safety_checker.hpp"
 #include "minco_processor/esdf_map.hpp"
+#include "minco_processor/guide_corridor.hpp"
 #include "traj_opt/minco_optimizer.hpp"
 #include "traj_opt/yaw_traj_opt.h"
 #include "utils/header/eigen_alias.hpp"
@@ -41,6 +42,19 @@ public:
     double start_validation_exemption_radius{0.35};
     bool enable_yaw_opt{true};
     double max_yaw_rate{0.5};
+    std::string constraint_profile{"legacy"};
+    double guide_corridor_weight{0.0};
+    double corridor_max_radius{0.45};
+    double corridor_min_radius{0.04};
+    double corridor_sample_step{0.025};
+    double adaptive_max_spatial_step{0.025};
+    double adaptive_near_clearance{0.05};
+    int adaptive_max_depth{14};
+    int adaptive_sample_budget{20000};
+    double max_jerk{20.0};
+    double wheel_radius{0.06125};
+    double wheel_base{0.2261616};
+    double max_wheel_speed{100.0};
   };
 
   struct State
@@ -115,6 +129,22 @@ public:
     int validation_start_exempt_count{0};
     int validation_negative_esdf_count{0};
     std::string validation_failure_reason{"NOT_RUN"};
+    std::string constraint_profile{"legacy"};
+    std::string corridor_schema_version{"guide_capsule_v1"};
+    std::string corridor_failure_reason{"NOT_RUN"};
+    int corridor_segment_count{0};
+    double corridor_min_radius{std::numeric_limits<double>::quiet_NaN()};
+    double corridor_min_clearance{std::numeric_limits<double>::quiet_NaN()};
+    double corridor_min_overlap{std::numeric_limits<double>::quiet_NaN()};
+    std::vector<GuideCorridorSegment> corridor_segments;
+    int adaptive_validation_sample_count{0};
+    int adaptive_validation_subdivision_count{0};
+    int validation_offending_sample_index{-1};
+    double validation_offending_time_s{std::numeric_limits<double>::quiet_NaN()};
+    Eigen::Vector3d validation_offending_position{
+      Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN())};
+    double validation_measured_value{std::numeric_limits<double>::quiet_NaN()};
+    double validation_limit_value{std::numeric_limits<double>::quiet_NaN()};
   };
 
   MincoPipeline();
@@ -154,6 +184,10 @@ private:
   bool validateTrajectory(
     const geometry_utils::Trajectory & trajectory, const Eigen::Vector3d & expected_end_pos,
     Result * diagnostics) const;
+  bool validateYawAndWheels(
+    const geometry_utils::Trajectory & trajectory,
+    const geometry_utils::Trajectory & yaw_trajectory,
+    Result * diagnostics) const;
   bool optimizeYaw(const Eigen::Matrix3d & start_state,
     const geometry_utils::Trajectory & pos_traj,
     geometry_utils::Trajectory & out_yaw_traj,
@@ -172,6 +206,7 @@ private:
   std::unique_ptr<minco_planner::MincoOptimizer> optimizer_;
   std::unique_ptr<traj_opt::YawTrajOpt> yaw_optimizer_;
   std::unique_ptr<minco_planner::TrajectorySafetyChecker> safety_checker_;
+  GuideCorridor2D corridor_;
 
   geometry_utils::Trajectory last_traj_;
   geometry_utils::Trajectory last_yaw_traj_;

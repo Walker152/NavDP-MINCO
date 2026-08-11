@@ -1,4 +1,5 @@
 import argparse
+import json
 from omni.isaac.lab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="A script to run a car control simulation")
@@ -8,6 +9,7 @@ parser.add_argument(
     "--scene_index", type=int, default=0)
 parser.add_argument("--scene-path", type=str, default=None)
 parser.add_argument("--scene-id", type=str, default=None)
+parser.add_argument("--dynamic-case-spec", type=str, default=None)
 parser.add_argument(
     "--scene_scale", type=float, default=1.0)
 parser.add_argument(
@@ -45,6 +47,20 @@ parser.add_argument("--minco_penalty_weight_acc", type=float, default=1000.0)
 parser.add_argument("--minco_penalty_weight_attractor", type=float, default=20.0)
 parser.add_argument("--minco_time_weight", type=float, default=0.1)
 parser.add_argument("--minco_time_barrier_weight", type=float, default=10.0)
+parser.add_argument(
+    "--minco_constraint_profile",
+    choices=("legacy", "safe_corridor_v1"),
+    default="legacy",
+)
+parser.add_argument("--minco_guide_corridor_weight", type=float, default=2000.0)
+parser.add_argument("--minco_corridor_max_radius", type=float, default=0.45)
+parser.add_argument("--minco_corridor_min_radius", type=float, default=0.04)
+parser.add_argument("--minco_corridor_sample_step", type=float, default=0.025)
+parser.add_argument("--minco_adaptive_max_spatial_step", type=float, default=0.025)
+parser.add_argument("--minco_adaptive_near_clearance", type=float, default=0.05)
+parser.add_argument("--minco_adaptive_max_depth", type=int, default=14)
+parser.add_argument("--minco_adaptive_sample_budget", type=int, default=20000)
+parser.add_argument("--minco_max_jerk", type=float, default=20.0)
 parser.add_argument("--esdf_resolution", type=float, default=0.05)
 parser.add_argument("--esdf_padding", type=float, default=1.0)
 parser.add_argument("--esdf_force_rebuild", action="store_true")
@@ -54,6 +70,11 @@ parser.add_argument("--esdf_obstacle_max_height", type=float, default=1.50)
 parser.add_argument("--esdf_fill_footprint", type=int, default=1)
 parser.add_argument("--esdf_footprint_inflate_cells", type=int, default=1)
 parser.add_argument("--use_robot_base_frame", type=int, default=1)
+parser.add_argument(
+    "--robot-calibration",
+    type=str,
+    default="configs/robots/dingo_calibration_v1.json",
+)
 parser.add_argument("--timing_log_interval", type=int, default=1)
 parser.add_argument("--show_timing_overlay", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--experiment-config", type=str, default=None)
@@ -91,6 +112,21 @@ if args_cli.navdp_seeds is None:
     args_cli.navdp_seeds = [args_cli.navdp_seed for _ in range(args_cli.num_episodes)]
 if len(args_cli.navdp_seeds) != args_cli.num_episodes:
     parser.error("--navdp-seeds count must equal --num_episodes")
+from experiments.calibration.profile import load_robot_calibration
+robot_calibration = load_robot_calibration(args_cli.robot_calibration)
+if args_cli.experiment_config:
+    with open(args_cli.experiment_config, "r", encoding="utf-8") as stream:
+        experiment_receipt = __import__("json").load(stream)
+    expected_calibration_hash = (
+        experiment_receipt.get("effective_parameters", {})
+        .get("robot_calibration", {})
+        .get("sha256")
+    )
+    if (
+        expected_calibration_hash
+        and expected_calibration_hash != robot_calibration.calibration_sha256
+    ):
+        parser.error("robot calibration hash differs from experiment receipt")
 app_launcher = AppLauncher(headless=args_cli.headless, enable_cameras=True)
 simulation_app = app_launcher.app
 
@@ -231,8 +267,6 @@ def transform_navdp_local_point(point_xy, env_idx, camera_pos, camera_rot, robot
         return np.array([*camera_top1_to_world([point_xy], camera_pos[env_idx], camera_rot[env_idx])[0], 0.0])
     point_local = np.array([point_xy[0], point_xy[1], 0.0], dtype=np.float64)
     point_world = camera_pos[env_idx] + camera_rot[env_idx] @ point_local
-    if use_robot_base_frame and robot_pos_w is not None:
-        point_world[:2] += robot_pos_w[env_idx, :2] - camera_pos[env_idx, :2]
     point_world[2] = 0.0
     return point_world
 
@@ -713,6 +747,48 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         raw_diagnostics_ms=planning_timing.get("raw_diagnostics_ms", ""),
                         candidate_transform_ms=planning_timing.get("candidate_transform_ms", ""),
                         threshold_profile_id=threshold_profile.profile_id,
+                        constraint_profile=(
+                            cycle_info.get("constraint_profile", args_cli.minco_constraint_profile)
+                            if used_minco else "raw"
+                        ),
+                        constraint_profile_version="safe-corridor-v1",
+                        calibration_sha256=robot_calibration.calibration_sha256,
+                        static_selected_case_uid=(
+                            dynamic_case_spec.get("case_uid", "")
+                            if dynamic_case_spec else ""
+                        ),
+                        corridor_status=cycle_info.get("corridor_failure_reason", ""),
+                        corridor_segment_count=cycle_info.get("corridor_segment_count", ""),
+                        corridor_min_radius_m=cycle_info.get("corridor_min_radius", ""),
+                        corridor_min_clearance_m=cycle_info.get("corridor_min_clearance", ""),
+                        corridor_min_overlap_m=cycle_info.get("corridor_min_overlap", ""),
+                        corridor_generation_ms=cycle_info.get("timing_ms", {}).get(
+                            "corridor_generation_ms", ""
+                        ),
+                        adaptive_validation_sample_count=cycle_info.get(
+                            "adaptive_validation_sample_count", ""
+                        ),
+                        adaptive_validation_subdivision_count=cycle_info.get(
+                            "adaptive_validation_subdivision_count", ""
+                        ),
+                        adaptive_validation_ms=cycle_info.get("timing_ms", {}).get(
+                            "adaptive_validation_ms", ""
+                        ),
+                        offending_sample_index=cycle_info.get(
+                            "validation_offending_sample_index", ""
+                        ),
+                        offending_time_s=cycle_info.get(
+                            "validation_offending_time_s", ""
+                        ),
+                        measured_value=cycle_info.get(
+                            "validation_measured_value", ""
+                        ),
+                        limit_value=cycle_info.get("validation_limit_value", ""),
+                        recovery_action=(
+                            "HOLD_LAST" if fallback_mode == "HOLD_LAST"
+                            else "STOP" if fallback_mode == "STOP"
+                            else "PUBLISH"
+                        ),
                     )
                     plan_uid = f"{cycle_uid}_plan" if published else ""
                     if published:
@@ -734,6 +810,32 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             validation_start_exempt_count=cycle_info.get("validation_start_exempt_count", "") if used_minco else "",
                             validation_oob_count=cycle_info.get("validation_oob_count", "") if used_minco else "",
                             failure_reason=cycle_info.get("failure_reason", ""),
+                            constraint_profile=cycle_info.get(
+                                "constraint_profile", args_cli.minco_constraint_profile
+                            ),
+                            constraint_profile_version="safe-corridor-v1",
+                            calibration_sha256=robot_calibration.calibration_sha256,
+                            static_selected_case_uid=(
+                                dynamic_case_spec.get("case_uid", "")
+                                if dynamic_case_spec else ""
+                            ),
+                            corridor_status=cycle_info.get("corridor_failure_reason", ""),
+                            corridor_segment_count=cycle_info.get("corridor_segment_count", ""),
+                            corridor_min_radius_m=cycle_info.get("corridor_min_radius", ""),
+                            corridor_min_clearance_m=cycle_info.get("corridor_min_clearance", ""),
+                            corridor_min_overlap_m=cycle_info.get("corridor_min_overlap", ""),
+                            corridor_generation_ms=cycle_info.get("timing_ms", {}).get(
+                                "corridor_generation_ms", ""
+                            ),
+                            adaptive_validation_sample_count=cycle_info.get(
+                                "adaptive_validation_sample_count", ""
+                            ),
+                            adaptive_validation_subdivision_count=cycle_info.get(
+                                "adaptive_validation_subdivision_count", ""
+                            ),
+                            adaptive_validation_ms=cycle_info.get("timing_ms", {}).get(
+                                "adaptive_validation_ms", ""
+                            ),
                             planning_total_ms=planning_total_ms,
                             raw_min_clearance_m=cycle_info.get("raw_min_clearance_m", ""),
                             raw_unsafe_ratio=cycle_info.get("raw_unsafe_ratio", ""),
@@ -891,6 +993,64 @@ PREHEAT_STEPS = 10
 for _ in range(PREHEAT_STEPS):
     action = torch.zeros((args_cli.num_envs, 2), device="cuda:0")
     obs, rewards, dones, infos = env.step(action)
+
+dynamic_case_spec = None
+if args_cli.dynamic_case_spec:
+    with open(args_cli.dynamic_case_spec, "r", encoding="utf-8") as stream:
+        dynamic_case_spec = json.load(stream)
+    requested_acceleration = np.asarray(
+        dynamic_case_spec.get("initial_acceleration_xyz_mps2", [0.0, 0.0, 0.0]),
+        dtype=np.float64,
+    )
+    if requested_acceleration.shape != (3,) or not np.all(np.isfinite(requested_acceleration)):
+        raise ValueError("dynamic initial acceleration is invalid")
+    if np.linalg.norm(requested_acceleration) > 1e-9:
+        raise ValueError(
+            "nonzero initial acceleration is not faithfully injectable; refusing real run"
+        )
+    requested_linear = np.asarray(
+        dynamic_case_spec["initial_linear_velocity_xyz_mps"], dtype=np.float64
+    )
+    requested_angular = np.asarray(
+        dynamic_case_spec["initial_angular_velocity_xyz_radps"], dtype=np.float64
+    )
+    if (
+        requested_linear.shape != (3,)
+        or requested_angular.shape != (3,)
+        or not np.all(np.isfinite(requested_linear))
+        or not np.all(np.isfinite(requested_angular))
+    ):
+        raise ValueError("dynamic initial velocity is invalid")
+    robot_articulation = env.unwrapped.scene.articulations["robot"]
+    root_velocity = torch.zeros(
+        (args_cli.num_envs, 6),
+        dtype=robot_articulation.data.root_lin_vel_w.dtype,
+        device=robot_articulation.data.root_lin_vel_w.device,
+    )
+    root_velocity[:, :3] = torch.as_tensor(
+        requested_linear, dtype=root_velocity.dtype, device=root_velocity.device
+    )
+    root_velocity[:, 3:] = torch.as_tensor(
+        requested_angular, dtype=root_velocity.dtype, device=root_velocity.device
+    )
+    robot_articulation.write_root_velocity_to_sim(root_velocity)
+    observed_linear = robot_articulation.data.root_lin_vel_w[0, :3].cpu().numpy()
+    observed_angular = robot_articulation.data.root_ang_vel_w[0, :3].cpu().numpy()
+    requirements = dynamic_case_spec.get("frame_sanity_requirements", {})
+    linear_tolerance = float(
+        requirements.get("velocity_match_tolerance_mps", 0.02)
+    )
+    angular_tolerance = float(
+        requirements.get("yaw_rate_match_tolerance_radps", 0.02)
+    )
+    if not np.allclose(
+        observed_linear, requested_linear, rtol=0.0, atol=linear_tolerance
+    ) or not np.allclose(
+        observed_angular, requested_angular, rtol=0.0, atol=angular_tolerance
+    ):
+        raise RuntimeError(
+            "dynamic initial velocity injection sanity check failed"
+        )
     
 camera_intrinsic = env.unwrapped.scene.sensors['camera_sensor'].data.intrinsic_matrices[0]
 
@@ -904,6 +1064,7 @@ if args_cli.enable_minco or args_cli.eval_monitor:
         resolution=args_cli.esdf_resolution,
         padding=args_cli.esdf_padding,
         safe_dist=args_cli.minco_validation_safe_dist,
+        robot_radius=robot_calibration.circumscribed_radius_m,
         cache_name=args_cli.esdf_cache_name,
         force_rebuild=args_cli.esdf_force_rebuild,
         obstacle_min_height=args_cli.esdf_obstacle_min_height,
@@ -932,6 +1093,9 @@ if args_cli.enable_minco or args_cli.eval_monitor:
             "obstacle_height_bounds_m":[float(esdf["obstacle_min_height"]), float(esdf["obstacle_max_height"])],
             "fill_footprint":bool(esdf["fill_footprint"]),
             "footprint_inflate_cells":int(esdf["footprint_inflate_cells"]),
+            "robot_circumscribed_radius_m":robot_calibration.circumscribed_radius_m,
+            "robot_calibration_path":str(robot_calibration.path),
+            "robot_calibration_sha256":robot_calibration.calibration_sha256,
             "timing":dict(esdf.get("timing", {})),
         })
     esdf_timing = esdf.get("timing", {}) if isinstance(esdf, dict) else {}
@@ -962,6 +1126,19 @@ if args_cli.enable_minco or args_cli.eval_monitor:
             penalty_weight_attractor=args_cli.minco_penalty_weight_attractor,
             time_weight=args_cli.minco_time_weight,
             time_barrier_weight=args_cli.minco_time_barrier_weight,
+            constraint_profile=args_cli.minco_constraint_profile,
+            guide_corridor_weight=args_cli.minco_guide_corridor_weight,
+            corridor_max_radius=args_cli.minco_corridor_max_radius,
+            corridor_min_radius=args_cli.minco_corridor_min_radius,
+            corridor_sample_step=args_cli.minco_corridor_sample_step,
+            adaptive_max_spatial_step=args_cli.minco_adaptive_max_spatial_step,
+            adaptive_near_clearance=args_cli.minco_adaptive_near_clearance,
+            adaptive_max_depth=args_cli.minco_adaptive_max_depth,
+            adaptive_sample_budget=args_cli.minco_adaptive_sample_budget,
+            max_jerk=args_cli.minco_max_jerk,
+            wheel_radius=robot_calibration.wheel_radius_m,
+            wheel_base=robot_calibration.wheel_base_m,
+            max_wheel_speed=robot_calibration.max_wheel_speed_radps,
             warm_start_mode=args_cli.warm_start_mode,
             enable=True,
         )
@@ -989,8 +1166,8 @@ planning_thread_obj.start()
 
 controller_kwargs = {
     "name": "simple_control",
-    "wheel_radius": DINGO_WHEEL_RADIUS,
-    "wheel_base": DINGO_WHEEL_BASE,
+    "wheel_radius": robot_calibration.wheel_radius_m,
+    "wheel_base": robot_calibration.wheel_base_m,
 }
 if wheel_constraint_enabled:
     controller_kwargs["max_wheel_speed"] = mpc_max_wheel_speed
@@ -1216,8 +1393,8 @@ try:
                                             max_acc=args_cli.minco_max_acc,
                                             max_yaw_acc=args_cli.mpc_max_yaw_acc,
                                             T=control_dt,
-                                            wheel_radius=DINGO_WHEEL_RADIUS,
-                                            wheel_base=DINGO_WHEEL_BASE,
+                                            wheel_radius=robot_calibration.wheel_radius_m,
+                                            wheel_base=robot_calibration.wheel_base_m,
                                             max_wheel_speed=mpc_max_wheel_speed,
                                         )
                                     else:
@@ -1483,6 +1660,17 @@ try:
                     video_write_ms=video_write_ms,
                     control_deadline_ms=control_deadline_ms,
                     control_deadline_miss=control_loop_ms > control_deadline_ms,
+                    static_selected_case_uid=(
+                        dynamic_case_spec.get("case_uid", "")
+                        if dynamic_case_spec else ""
+                    ),
+                    constraint_profile=args_cli.minco_constraint_profile,
+                    executed_clearance_m=(
+                        float(ep_min_clearance[0])
+                        if ep_min_clearance[0] < float("inf") else ""
+                    ),
+                    wheel_speed_limit_radps=mpc_max_wheel_speed or "",
+                    reference_stale=control_states[0] == "STALE_PLAN",
                 )
             env_step_timer = StageTimer()
             with env_step_timer.section("env_step_ms"):
@@ -1516,8 +1704,15 @@ try:
                             actual_path_length_m=executed_length, repository_spl=repository_spl,
                             minimum_executed_clearance_m=min_clearance,
                             termination_term_raw=termination_term_raw,
-                            failure_stage="" if success_flag_bool else "TASK_TERMINATION",
+                            failure_stage="" if success_flag_bool else "SIMULATION",
                             failure_reason="" if success_flag_bool else termination_reason,
+                            static_selected_case_uid=(
+                                dynamic_case_spec.get("case_uid", "")
+                                if dynamic_case_spec else ""
+                            ),
+                            termination_frame_idx=frame_idx,
+                            termination_plan_uid=str(current_plan_id),
+                            contact_detected=termination_reason == "COLLISION",
                         )
                     if episode_video_recorder is not None:
                         episode_video_recorder.end_episode()

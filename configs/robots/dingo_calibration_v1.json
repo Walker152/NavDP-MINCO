@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "robot_model_id": "dingo_navdp_usd_v1",
+  "status": "STATIC_VERIFIED_DYNAMIC_READY_FOR_CALIBRATION_RUN",
+  "base_frame": "base_link",
+  "camera_frame": "front_cam_ros",
+  "transform_convention": "T_A_B maps coordinates expressed in B into A",
+  "T_base_camera": [
+    [0.0, 0.0, 1.0, 0.0],
+    [-1.0, 0.0, 0.0, 0.0],
+    [0.0, -1.0, 0.0, 0.3],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "T_camera_base": [
+    [0.0, -1.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0, 0.3],
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "footprint_polygon_xy_m": [
+    [-0.1570000006, -0.0350000000],
+    [-0.1377919912, -0.1292920709],
+    [0.0367919009, -0.1743308001],
+    [0.0621919010, -0.1743308001],
+    [0.1424568704, -0.0020250002],
+    [0.1424568704, 0.0020250002],
+    [0.1377919912, 0.1292920709],
+    [0.0621919010, 0.1743308001],
+    [0.0367919009, 0.1743308001],
+    [-0.1377919912, 0.1292920709],
+    [-0.1570000006, 0.0350000000]
+  ],
+  "inscribed_radius_m": 0.1299885354,
+  "circumscribed_radius_m": 0.1889525666,
+  "wheel_radius_m": 0.0612499984,
+  "wheel_base_m": 0.2261615992,
+  "max_wheel_speed_radps": 100.0,
+  "max_linear_speed_mps": 1.0,
+  "max_yaw_rate_radps": 0.5,
+  "max_linear_acc_mps2": 1.5,
+  "max_yaw_acc_radps2": 1.0,
+  "command_delay_s": null,
+  "braking_distance_model": {
+    "status": "READY_FOR_CALIBRATION_RUN",
+    "model": "v * command_delay_s + v^2 / (2 * peak_deceleration_mps2)",
+    "peak_deceleration_mps2": null
+  },
+  "safety_distance": {
+    "validation_components_m": {
+      "collision_requirement": 0.1889525666,
+      "esdf_half_cell_diagonal_at_0p05m": 0.0353553391,
+      "static_model_transform_uncertainty": 0.005,
+      "one_validation_step_tracking_margin_at_1mps": 0.05
+    },
+    "validation_safe_dist_m": 0.2793079057,
+    "optimization_buffer_m": 0.15,
+    "optimization_safe_dist_m": 0.4293079057
+  },
+  "source_sha256": {
+    "robot_usd": "43db9c54066d833e0bfc91d8d33eb1ff3345d4c8a3cd29f914649bafffbcce20",
+    "robot_config": "896917f5f100c99a8e1d70630fd432bcd2039ac76848b1ff719f68d245ae52e6"
+  },
+  "field_evidence": {
+    "T_base_camera": {"method": "CONFIG_DECLARED_CAMERA_OFFSET", "source": "configs/robots/dingo_config.py:DINGO_CAMERA_TRANS,DINGO_CAMERA_ROTS", "uncertainty": "not dynamically measured"},
+    "footprint_polygon_xy_m": {"method": "USD_COLLISION_AABB_CONVEX_HULL", "source": "assets/robots/dingo.usd PhysicsCollisionAPI prims with full parent transforms", "uncertainty_m": 0.005},
+    "wheel_radius_m": {"method": "USD_COLLISION_CYLINDER_WITH_PARENT_SCALE", "source": "/dingo/{left,right}_wheel_link/collisions", "uncertainty_m": 0.0021500016},
+    "wheel_base_m": {"method": "USD_WORLD_WHEEL_CENTRE_SEPARATION", "source": "/dingo/{left,right}_wheel_link xform chain", "uncertainty_m": 0.001},
+    "max_wheel_speed_radps": {"method": "ACTUATOR_CONFIG_LIMIT", "source": "configs/robots/dingo_config.py ImplicitActuatorCfg.velocity_limit", "uncertainty": "dynamic capability not measured"},
+    "max_linear_speed_mps": {"method": "CURRENT_OPERATIONAL_LIMIT", "source": "experiments effective MINCO limit", "uncertainty": "READY_FOR_CALIBRATION_RUN"},
+    "max_yaw_rate_radps": {"method": "CURRENT_OPERATIONAL_LIMIT", "source": "experiments effective MPC limit", "uncertainty": "READY_FOR_CALIBRATION_RUN"},
+    "command_delay_s": {"method": "UNMEASURED", "source": "isolated protocol", "uncertainty": "READY_FOR_CALIBRATION_RUN"}
+  },
+  "static_discrepancies": [
+    "DINGO_WHEEL_RADIUS=0.0591 differs from USD collision estimate 0.0612499984 m",
+    "USD physxJoint:maxJointVelocity is infinite while actuator config limits wheel speed to 100 rad/s",
+    "front_cam is spawned from CameraCfg and is not an authored prim in dingo.usd"
+  ]
+}

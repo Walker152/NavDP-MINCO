@@ -22,6 +22,7 @@ class SimEsdfBuilder:
         "ground_quantile",
         "fill_footprint",
         "footprint_inflate_cells",
+        "robot_radius",
     )
 
     def __init__(
@@ -151,6 +152,7 @@ class SimEsdfBuilder:
             "ground_quantile": self.ground_quantile,
             "fill_footprint": self.fill_footprint,
             "footprint_inflate_cells": self.footprint_inflate_cells,
+            "robot_radius": self.robot_radius,
         }
         cache_write_start = time.perf_counter()
         save_esdf = {k: v for k, v in esdf.items() if k != "timing"}
@@ -218,6 +220,7 @@ class SimEsdfBuilder:
                 "obstacle_max_height": self.obstacle_max_height,
                 "ground_quantile": self.ground_quantile,
                 "footprint_inflate_cells": self.footprint_inflate_cells,
+                "robot_radius": self.robot_radius,
             }
             for key, expected in cache_params.items():
                 if not np.isclose(float(np.asarray(data[key])), float(expected)):
@@ -243,6 +246,7 @@ class SimEsdfBuilder:
                 "ground_quantile": float(np.asarray(data["ground_quantile"])),
                 "fill_footprint": cached_fill_footprint,
                 "footprint_inflate_cells": int(np.asarray(data["footprint_inflate_cells"])),
+                "robot_radius": float(np.asarray(data["robot_radius"])),
             }
         except Exception as exc:
             print(f"[SimESDF] cache load failed: {exc}")

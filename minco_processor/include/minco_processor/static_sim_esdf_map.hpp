@@ -18,6 +18,7 @@ public:
     double origin_x,
     double origin_y,
     double resolution);
+  void setAnalyticGradient(bool enabled) { analytic_gradient_ = enabled; }
 
   QueryResult query(const Eigen::Vector3d & pos) const override;
   bool worldToMap(double wx, double wy, unsigned int & mx, unsigned int & my) const override;
@@ -36,6 +37,9 @@ public:
 private:
   bool hasMap() const;
   bool interpolate(double gx, double gy, double & distance) const;
+  bool interpolateWithGradient(
+    double gx, double gy, double & distance, double & gradient_x,
+    double & gradient_y) const;
 
   Eigen::MatrixXd distance_;
   Eigen::Matrix<uint8_t, Eigen::Dynamic, Eigen::Dynamic> free_;
@@ -43,6 +47,7 @@ private:
   double origin_x_{0.0};
   double origin_y_{0.0};
   double resolution_{0.0};
+  bool analytic_gradient_{false};
 };
 
 }  // namespace minco_processor

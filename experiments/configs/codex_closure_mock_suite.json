@@ -1,0 +1,15 @@
+{
+  "suite_id": "navdp_minco_codex_closure_mock_v1",
+  "backend": "mock",
+  "output_root": "../../results/navdp_minco_longterm_20260726/mock_closure",
+  "scenario_manifest": "mock_scenarios.json",
+  "video": {"enabled": false, "fps": 10},
+  "monitor": {"enabled": true, "planning_trace": false},
+  "analysis": {"enabled": true, "paired": true},
+  "resume": true,
+  "runs": [
+    {"experiment_id": "CLOSURE", "variant": "raw", "warm_start_mode": "cold"},
+    {"experiment_id": "CLOSURE", "variant": "minco-cold", "warm_start_mode": "cold"},
+    {"experiment_id": "CLOSURE", "variant": "minco-hot", "warm_start_mode": "gated"}
+  ]
+}

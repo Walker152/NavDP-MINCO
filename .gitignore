@@ -48,3 +48,9 @@ test_*.hpp
 
 # Editor-generated indexes and workspace state.
 .vscode/
+
+# Local JavaScript dependencies used by report/PPT generation.
+/node_modules/
+
+PPT/
+docs/

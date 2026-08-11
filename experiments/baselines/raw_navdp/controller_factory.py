@@ -43,8 +43,9 @@ def create_tracking_controller(
 def update_tracking_reference(controller, variant, geometric_path, trajectory_samples=None, desired_v=None):
     if variant == "raw":
         from .original_mpc import ORIGINAL_MPC_SPEC
-        speed = desired_v if desired_v is not None else ORIGINAL_MPC_SPEC["desired_v"]
-        return controller.update_reference(geometric_path, desired_v=speed)
+        return controller.update_reference(
+            geometric_path, desired_v=ORIGINAL_MPC_SPEC["desired_v"]
+        )
     if trajectory_samples is None:
         return False
     return controller.update_reference(geometric_path, trajectory_samples=trajectory_samples, desired_v=desired_v)

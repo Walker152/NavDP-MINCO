@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "suite_id": "static_boundary_selection_v1",
+  "base_case_config": "static_legacy_suite.json",
+  "profiles": {
+    "legacy": "static_legacy_suite.json",
+    "safe_corridor_v1": "static_safe_corridor_suite.json"
+  },
+  "state_variants": [
+    {"case_uid": "state_v_zero", "source_case_uid": "syn_straight", "velocity_xyz_mps": [0.0, 0.0, 0.0], "tags": ["velocity_zero"]},
+    {"case_uid": "state_v_low", "source_case_uid": "syn_straight", "velocity_xyz_mps": [0.25, 0.0, 0.0], "tags": ["velocity_low"]},
+    {"case_uid": "state_v_mid", "source_case_uid": "syn_straight", "velocity_xyz_mps": [0.5, 0.0, 0.0], "tags": ["velocity_mid"]},
+    {"case_uid": "state_v_high", "source_case_uid": "syn_straight", "velocity_xyz_mps": [0.8, 0.0, 0.0], "tags": ["velocity_high"]},
+    {"case_uid": "state_v_limit", "source_case_uid": "syn_straight", "velocity_xyz_mps": [0.95, 0.0, 0.0], "tags": ["velocity_near_limit"]},
+    {"case_uid": "state_v_reverse", "source_case_uid": "syn_straight", "velocity_xyz_mps": [-0.5, 0.0, 0.0], "tags": ["velocity_reverse"]},
+    {"case_uid": "state_v_lateral", "source_case_uid": "syn_straight", "velocity_xyz_mps": [0.0, 0.5, 0.0], "tags": ["velocity_lateral"]},
+    {"case_uid": "state_a_along", "source_case_uid": "syn_straight", "acceleration_xyz_mps2": [0.75, 0.0, 0.0], "tags": ["initial_acceleration_only"]},
+    {"case_uid": "state_a_reverse", "source_case_uid": "syn_straight", "acceleration_xyz_mps2": [-0.75, 0.0, 0.0], "tags": ["initial_acceleration_only"]},
+    {"case_uid": "state_a_lateral", "source_case_uid": "syn_straight", "acceleration_xyz_mps2": [0.0, 0.75, 0.0], "tags": ["initial_acceleration_only"]},
+    {"case_uid": "state_yaw_small", "source_case_uid": "syn_straight", "yaw_rad": 0.25, "tags": ["yaw_small"]},
+    {"case_uid": "state_yaw_mid", "source_case_uid": "syn_straight", "yaw_rad": 1.2, "tags": ["yaw_mid"]},
+    {"case_uid": "state_yaw_large", "source_case_uid": "syn_straight", "yaw_rad": 2.6, "tags": ["yaw_large"]},
+    {"case_uid": "state_yaw_reverse", "source_case_uid": "syn_straight", "yaw_rad": 3.1, "tags": ["yaw_near_reverse"]},
+    {"case_uid": "state_yawrate_normal", "source_case_uid": "syn_straight", "yaw_rate_radps": 0.25, "tags": ["yaw_rate_normal"]},
+    {"case_uid": "state_yawrate_limit", "source_case_uid": "syn_straight", "yaw_rate_radps": 0.48, "tags": ["yaw_rate_near_limit"]},
+    {"case_uid": "state_yawrate_over", "source_case_uid": "syn_straight", "yaw_rate_radps": 0.6, "tags": ["yaw_rate_over_limit"]},
+    {"case_uid": "state_offset_small", "source_case_uid": "syn_straight", "position_xyz_m": [1.0, 1.15, 0.0], "tags": ["guide_offset_small"]},
+    {"case_uid": "state_offset_large", "source_case_uid": "syn_straight", "position_xyz_m": [1.0, 1.35, 0.0], "tags": ["guide_offset_large"]}
+  ]
+}

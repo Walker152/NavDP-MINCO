@@ -9,7 +9,13 @@ def transform_local_paths(
     camera_rotation,
     robot_position=None,
 ) -> np.ndarray:
-    """Transform all NavDP candidates in one vectorized camera-to-world pass."""
+    """Transform candidates through the declared local-frame world pose.
+
+    ``robot_position`` is accepted only as a compatibility argument. It is
+    intentionally not used: translating the rotated points a second time
+    breaks the homogeneous transform chain whenever sensor and base origins
+    differ.
+    """
     local_xy = np.asarray(points, dtype=np.float64)
     if local_xy.ndim < 2 or local_xy.shape[-1] < 2:
         raise ValueError("points must have shape (..., points, >=2)")
@@ -20,8 +26,5 @@ def transform_local_paths(
     local_xyz[..., :2] = local_xy[..., :2]
     world = np.einsum("ij,...j->...i", camera_rotation, local_xyz)
     world += camera_position
-    if robot_position is not None:
-        robot_position = np.asarray(robot_position, dtype=np.float64)
-        world[..., :2] += robot_position[:2] - camera_position[:2]
     world[..., 2] = 0.0
     return world

@@ -48,35 +48,43 @@ QueryResult StaticSimEsdfMap2D::query(const Eigen::Vector3d & pos) const
   const double gx = raw_x - 0.5;
   const double gy = raw_y - 0.5;
   double dist = 0.0;
-  if (!interpolate(gx, gy, dist)) {
+  double dx_grid = 0.0;
+  double dy_grid = 0.0;
+  if (!interpolateWithGradient(gx, gy, dist, dx_grid, dy_grid)) {
     result.status = QueryStatus::kOutOfMap;
     return result;
-  }
-
-  const auto sample = [this](double x, double y, double & out) { return interpolate(x, y, out); };
-  double dx = 0.0;
-  double dy = 0.0;
-  double lp = 0.0;
-  double rp = 0.0;
-  if (sample(gx - 1.0, gy, lp) && sample(gx + 1.0, gy, rp)) {
-    dx = (rp - lp) / (2.0 * resolution_);
-  } else if (sample(gx, gy, lp) && sample(gx + 1.0, gy, rp)) {
-    dx = (rp - lp) / resolution_;
-  } else if (sample(gx - 1.0, gy, lp) && sample(gx, gy, rp)) {
-    dx = (rp - lp) / resolution_;
-  }
-  if (sample(gx, gy - 1.0, lp) && sample(gx, gy + 1.0, rp)) {
-    dy = (rp - lp) / (2.0 * resolution_);
-  } else if (sample(gx, gy, lp) && sample(gx, gy + 1.0, rp)) {
-    dy = (rp - lp) / resolution_;
-  } else if (sample(gx, gy - 1.0, lp) && sample(gx, gy, rp)) {
-    dy = (rp - lp) / resolution_;
   }
 
   result.ok = true;
   result.status = QueryStatus::kOk;
   result.distance = dist;
-  result.gradient = Eigen::Vector3d(dx, dy, 0.0);
+  if (analytic_gradient_) {
+    result.gradient =
+      Eigen::Vector3d(dx_grid / resolution_, dy_grid / resolution_, 0.0);
+  } else {
+    const auto sample = [this](double x, double y, double & out) {
+        return interpolate(x, y, out);
+      };
+    double dx = 0.0;
+    double dy = 0.0;
+    double left = 0.0;
+    double right = 0.0;
+    if (sample(gx - 1.0, gy, left) && sample(gx + 1.0, gy, right)) {
+      dx = (right - left) / (2.0 * resolution_);
+    } else if (sample(gx, gy, left) && sample(gx + 1.0, gy, right)) {
+      dx = (right - left) / resolution_;
+    } else if (sample(gx - 1.0, gy, left) && sample(gx, gy, right)) {
+      dx = (right - left) / resolution_;
+    }
+    if (sample(gx, gy - 1.0, left) && sample(gx, gy + 1.0, right)) {
+      dy = (right - left) / (2.0 * resolution_);
+    } else if (sample(gx, gy, left) && sample(gx, gy + 1.0, right)) {
+      dy = (right - left) / resolution_;
+    } else if (sample(gx, gy - 1.0, left) && sample(gx, gy, right)) {
+      dy = (right - left) / resolution_;
+    }
+    result.gradient = Eigen::Vector3d(dx, dy, 0.0);
+  }
   return result;
 }
 
@@ -147,6 +155,16 @@ bool StaticSimEsdfMap2D::hasMap() const
 
 bool StaticSimEsdfMap2D::interpolate(double gx, double gy, double & distance) const
 {
+  double gradient_x = 0.0;
+  double gradient_y = 0.0;
+  return interpolateWithGradient(
+    gx, gy, distance, gradient_x, gradient_y);
+}
+
+bool StaticSimEsdfMap2D::interpolateWithGradient(
+  double gx, double gy, double & distance, double & gradient_x,
+  double & gradient_y) const
+{
   if (!hasMap() || gx < -0.5 || gy < -0.5 ||
       gx >= static_cast<double>(distance_.cols()) - 0.5 ||
       gy >= static_cast<double>(distance_.rows()) - 0.5) {
@@ -167,7 +185,12 @@ bool StaticSimEsdfMap2D::interpolate(double gx, double gy, double & distance) co
   const double d01 = distance_(y1, x0);
   const double d11 = distance_(y1, x1);
   distance = (1.0 - tx) * (1.0 - ty) * d00 + tx * (1.0 - ty) * d10 + (1.0 - tx) * ty * d01 + tx * ty * d11;
-  return std::isfinite(distance);
+  gradient_x =
+    (1.0 - ty) * (d10 - d00) + ty * (d11 - d01);
+  gradient_y =
+    (1.0 - tx) * (d01 - d00) + tx * (d11 - d10);
+  return std::isfinite(distance) && std::isfinite(gradient_x) &&
+         std::isfinite(gradient_y);
 }
 
 }  // namespace minco_processor

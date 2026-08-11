@@ -35,23 +35,64 @@ public:
     double penalty_weight_acc, double penalty_weight_attractor, double time_weight,
     double time_barrier_weight)
   {
-    minco_processor::MincoPipeline::Config config;
-    config.sample_dt = sample_dt;
-    config.validation_sample_dt = sample_dt;
-    config.safety_sample_dt = sample_dt;
-    config.optimizer.safe_dist = optimization_safe_dist;
-    config.validation_safe_dist = validation_safe_dist;
-    config.start_validation_exemption_radius = start_validation_exemption_radius;
-    config.optimizer.max_vel = max_vel;
-    config.optimizer.max_acc = max_acc;
-    config.optimizer.max_iterations = max_iterations;
-    config.optimizer.rho = time_weight;
-    config.optimizer.penaltyWeights.resize(5);
-    config.optimizer.penaltyWeights << penalty_weight_pos, penalty_weight_vel, penalty_weight_acc,
+    config_ = minco_processor::MincoPipeline::Config{};
+    config_.sample_dt = sample_dt;
+    config_.validation_sample_dt = sample_dt;
+    config_.safety_sample_dt = sample_dt;
+    config_.optimizer.safe_dist = optimization_safe_dist;
+    config_.validation_safe_dist = validation_safe_dist;
+    config_.start_validation_exemption_radius = start_validation_exemption_radius;
+    config_.optimizer.max_vel = max_vel;
+    config_.optimizer.max_acc = max_acc;
+    config_.optimizer.max_iterations = max_iterations;
+    config_.optimizer.rho = time_weight;
+    config_.optimizer.penaltyWeights.resize(5);
+    config_.optimizer.penaltyWeights << penalty_weight_pos, penalty_weight_vel, penalty_weight_acc,
       penalty_weight_attractor, time_barrier_weight;
-    config.optimizer.print_optimizer_log = false;
-    config.max_yaw_rate = max_yaw_rate;
-    pipeline_.setConfig(config);
+    config_.optimizer.print_optimizer_log = false;
+    config_.max_yaw_rate = max_yaw_rate;
+    pipeline_.setConfig(config_);
+  }
+
+  void configureSafetyProfile(
+    const std::string & constraint_profile,
+    double guide_corridor_weight,
+    double corridor_max_radius,
+    double corridor_min_radius,
+    double corridor_sample_step,
+    double adaptive_max_spatial_step,
+    double adaptive_near_clearance,
+    int adaptive_max_depth,
+    int adaptive_sample_budget,
+    double max_jerk,
+    double wheel_radius,
+    double wheel_base,
+    double max_wheel_speed)
+  {
+    if (constraint_profile != "legacy" &&
+      constraint_profile != "safe_corridor_v1")
+    {
+      throw std::invalid_argument("unsupported constraint_profile");
+    }
+    config_.constraint_profile = constraint_profile;
+    config_.guide_corridor_weight = guide_corridor_weight;
+    config_.corridor_max_radius = corridor_max_radius;
+    config_.corridor_min_radius = corridor_min_radius;
+    config_.corridor_sample_step = corridor_sample_step;
+    config_.adaptive_max_spatial_step = adaptive_max_spatial_step;
+    config_.adaptive_near_clearance = adaptive_near_clearance;
+    config_.adaptive_max_depth = adaptive_max_depth;
+    config_.adaptive_sample_budget = adaptive_sample_budget;
+    config_.max_jerk = max_jerk;
+    config_.wheel_radius = wheel_radius;
+    config_.wheel_base = wheel_base;
+    config_.max_wheel_speed = max_wheel_speed;
+    pipeline_.setConfig(config_);
+    if (map_) {
+      map_->setAnalyticGradient(
+        config_.constraint_profile == "safe_corridor_v1");
+    }
+    pipeline_.setMap(map_);
   }
 
   void set_static_esdf_2d(
@@ -62,6 +103,8 @@ public:
   {
     map_ = std::make_shared<minco_processor::StaticSimEsdfMap2D>();
     map_->setMap(distance, free, origin.x(), origin.y(), resolution);
+    map_->setAnalyticGradient(
+      config_.constraint_profile == "safe_corridor_v1");
     pipeline_.setMap(map_);
   }
 
@@ -219,6 +262,36 @@ private:
     out["validation_start_exempt_count"] = result.validation_start_exempt_count;
     out["validation_negative_esdf_count"] = result.validation_negative_esdf_count;
     out["validation_failure_reason"] = result.validation_failure_reason;
+    out["constraint_profile"] = result.constraint_profile;
+    out["corridor_schema_version"] = result.corridor_schema_version;
+    out["corridor_failure_reason"] = result.corridor_failure_reason;
+    out["corridor_segment_count"] = result.corridor_segment_count;
+    out["corridor_min_radius"] = result.corridor_min_radius;
+    out["corridor_min_clearance"] = result.corridor_min_clearance;
+    out["corridor_min_overlap"] = result.corridor_min_overlap;
+    Eigen::MatrixXd corridor_segments(
+      static_cast<int>(result.corridor_segments.size()), 8);
+    for (int i = 0; i < corridor_segments.rows(); ++i) {
+      const auto & segment = result.corridor_segments[static_cast<size_t>(i)];
+      corridor_segments(i, 0) = segment.start.x();
+      corridor_segments(i, 1) = segment.start.y();
+      corridor_segments(i, 2) = segment.start.z();
+      corridor_segments(i, 3) = segment.end.x();
+      corridor_segments(i, 4) = segment.end.y();
+      corridor_segments(i, 5) = segment.end.z();
+      corridor_segments(i, 6) = segment.radius;
+      corridor_segments(i, 7) = segment.min_clearance;
+    }
+    out["corridor_segments"] = corridor_segments;
+    out["adaptive_validation_sample_count"] = result.adaptive_validation_sample_count;
+    out["adaptive_validation_subdivision_count"] =
+      result.adaptive_validation_subdivision_count;
+    out["validation_offending_sample_index"] =
+      result.validation_offending_sample_index;
+    out["validation_offending_time_s"] = result.validation_offending_time_s;
+    out["validation_offending_position"] = result.validation_offending_position;
+    out["validation_measured_value"] = result.validation_measured_value;
+    out["validation_limit_value"] = result.validation_limit_value;
 
     Eigen::MatrixXd sparse_waypoints(static_cast<int>(result.sparse_waypoints.size()), 3);
     for (int i = 0; i < sparse_waypoints.rows(); ++i) {
@@ -229,6 +302,7 @@ private:
   }
 
   minco_processor::MincoPipeline pipeline_;
+  minco_processor::MincoPipeline::Config config_;
   std::shared_ptr<minco_processor::StaticSimEsdfMap2D> map_;
   minco_processor::MincoPipeline::Result last_result_;
   std::map<int, minco_processor::MincoPipeline::Result> proposals_;
@@ -257,6 +331,20 @@ PYBIND11_MODULE(_minco_processor, m)
       py::arg("penalty_weight_attractor") = 20.0,
       py::arg("time_weight") = 0.01,
       py::arg("time_barrier_weight") = 100.0)
+    .def("configure_safety_profile", &MincoProcessorPy::configureSafetyProfile,
+      py::arg("constraint_profile"),
+      py::arg("guide_corridor_weight"),
+      py::arg("corridor_max_radius"),
+      py::arg("corridor_min_radius"),
+      py::arg("corridor_sample_step"),
+      py::arg("adaptive_max_spatial_step"),
+      py::arg("adaptive_near_clearance"),
+      py::arg("adaptive_max_depth"),
+      py::arg("adaptive_sample_budget"),
+      py::arg("max_jerk"),
+      py::arg("wheel_radius"),
+      py::arg("wheel_base"),
+      py::arg("max_wheel_speed"))
     .def("set_static_esdf_2d", &MincoProcessorPy::set_static_esdf_2d,
       py::arg("distance"), py::arg("free"), py::arg("origin"), py::arg("resolution"))
     .def("optimize", &MincoProcessorPy::optimize,

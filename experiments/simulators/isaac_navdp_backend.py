@@ -72,6 +72,12 @@ class IsaacNavDPBackend:
         if errors: raise ValueError("; ".join(errors))
         effective = effective or EFFECTIVE_PARAMETERS
         controller = effective["raw_mpc"] if run.variant == "raw" else effective["minco_mpc"]
+        calibration = effective.get("robot_calibration", {})
+        calibration_path = Path(str(calibration.get("path", "")))
+        if not calibration_path.is_file():
+            raise ValueError(
+                f"effective robot calibration is missing: {calibration_path}"
+            )
         episode_uids = [episode.episode_uid for episode in episodes]
         navdp_seeds = [episode.navdp_seed for episode in episodes]
         command = [
@@ -83,9 +89,14 @@ class IsaacNavDPBackend:
             "--episode-uids", *list(episode_uids), "--headless", "--save-video" if save_video else "--no-save-video", "--save-debug-visuals", "--eval-monitor", "--save-planning-trace" if save_trace else "--no-save-planning-trace",
             "--warm-start-mode", run.warm_start_mode, "--seed", str(run.seed), "--navdp-seed", str(navdp_seeds[0]),
             "--navdp-seeds", *[str(value) for value in navdp_seeds], "--num_envs", "1", "--num_episodes", str(len(episodes)),
-            "--speed", str(controller.get("desired_v_mps", controller.get("desired_v"))), "--mpc_max_yaw_rate", str(controller.get("w_max_radps", controller.get("w_max"))),
-            "--use_robot_base_frame", "0", "--port", str(self.navdp_port),
+            "--speed", str(controller.get("desired_v_mps", controller.get("desired_v"))), "--mpc_max_yaw_rate", str(effective["minco"].get("max_yaw_rate_radps", controller.get("w_max_radps", controller.get("w_max")))),
+            "--use_robot_base_frame", "0",
+            "--robot-calibration", str(calibration_path),
+            "--port", str(self.navdp_port),
         ]
+        dynamic_case_path = Path(scene.scene_path) / "dynamic_case.json"
+        if dynamic_case_path.is_file():
+            command.extend(["--dynamic-case-spec", str(dynamic_case_path.resolve())])
         command.extend(["--raw-controller", "original-navdp-mpc" if run.variant == "raw" else "disabled"])
         minco = effective["minco"]; esdf = effective["esdf"]; video = effective["video"]
         diagnostics = effective["runtime_diagnostics"]
@@ -113,6 +124,16 @@ class IsaacNavDPBackend:
             "--minco_penalty_weight_pos", str(minco["penalty_weight_pos"]), "--minco_penalty_weight_vel", str(minco["penalty_weight_vel"]),
             "--minco_penalty_weight_acc", str(minco["penalty_weight_acc"]), "--minco_penalty_weight_attractor", str(minco["penalty_weight_attractor"]),
             "--minco_time_weight", str(minco["time_weight"]), "--minco_time_barrier_weight", str(minco["time_barrier_weight"]),
+            "--minco_constraint_profile", str(minco["constraint_profile"]),
+            "--minco_guide_corridor_weight", str(minco["guide_corridor_weight"]),
+            "--minco_corridor_max_radius", str(minco["corridor_max_radius_m"]),
+            "--minco_corridor_min_radius", str(minco["corridor_min_radius_m"]),
+            "--minco_corridor_sample_step", str(minco["corridor_sample_step_m"]),
+            "--minco_adaptive_max_spatial_step", str(minco["adaptive_max_spatial_step_m"]),
+            "--minco_adaptive_near_clearance", str(minco["adaptive_near_clearance_m"]),
+            "--minco_adaptive_max_depth", str(minco["adaptive_max_depth"]),
+            "--minco_adaptive_sample_budget", str(minco["adaptive_sample_budget"]),
+            "--minco_max_jerk", str(minco["max_jerk_mps3"]),
             "--esdf_resolution", str(esdf["resolution_m"]), "--esdf_padding", str(esdf["padding_m"]),
             "--esdf_cache_name", str(esdf["cache_name"]), "--esdf_obstacle_min_height", str(esdf["obstacle_min_height_m"]),
             "--esdf_obstacle_max_height", str(esdf["obstacle_max_height_m"]), "--esdf_fill_footprint", str(int(esdf["fill_footprint"])),

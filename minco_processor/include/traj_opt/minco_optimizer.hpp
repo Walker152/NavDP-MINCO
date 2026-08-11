@@ -11,6 +11,7 @@
 
 #include "data_structure/base/trajectory.h"
 #include "minco_processor/esdf_map.hpp"
+#include "minco_processor/guide_corridor.hpp"
 #include "traj_opt/minco.h"
 #include "utils/header/color_text.hpp"
 #include "utils/header/eigen_alias.hpp"
@@ -82,6 +83,12 @@ public:
   void setInitPsAndTs(const vec_Vec3f & init_ps, const VecDf & init_ts);
 
   void setMap(const std::shared_ptr<minco_processor::EsdfMapInterface> & map) { opt_vars_.map = map; }
+  void setGuideCorridor(
+    const std::vector<Eigen::Vector3d> & guide, double radius)
+  {
+    opt_vars_.guide_path = guide;
+    opt_vars_.guide_corridor_radius = radius;
+  }
 
   int lastIterationCount() const { return last_iteration_count_; }
   int lastReturnCode() const { return last_return_code_; }
@@ -119,6 +126,8 @@ private:
     Eigen::Matrix3d headPVA;
     Eigen::Matrix3d tailPVA;
     Mat3Df waypoint_attractor;
+    std::vector<Eigen::Vector3d> guide_path;
+    double guide_corridor_radius{0.0};
 
     // Optimization cache for warm-start initialization from previous solution.
     VecDf init_ts;
@@ -158,6 +167,8 @@ private:
   static void constraintsFunctional(const VecDf & T,
     const MatD3f & coeffs,
     const Mat3Df & waypoint_attractor,
+    const std::vector<Eigen::Vector3d> & guide_path,
+    double guide_corridor_radius,
     const std::shared_ptr<minco_processor::EsdfMapInterface> & map,
     const double & smooth_eps,
     const int & integral_res,

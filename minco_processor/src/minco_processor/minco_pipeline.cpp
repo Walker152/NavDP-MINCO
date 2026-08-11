@@ -352,7 +352,17 @@ void MincoPipeline::setConfig(const Config & config)
   }
   config_.optimizer.magnitudeBounds << config_.optimizer.safe_dist, config_.optimizer.max_vel,
     config_.optimizer.max_acc;
-  if (config_.optimizer.penaltyWeights.size() != 5) {
+  const bool safe_corridor = config_.constraint_profile == "safe_corridor_v1";
+  if (safe_corridor) {
+    if (config_.optimizer.penaltyWeights.size() < 5) {
+      config_.optimizer.penaltyWeights.resize(6);
+      config_.optimizer.penaltyWeights.head(5) <<
+        1000.0, 1000.0, 10000.0, 1000.0, 100.0;
+    } else {
+      config_.optimizer.penaltyWeights.conservativeResize(6);
+    }
+    config_.optimizer.penaltyWeights(5) = std::max(0.0, config_.guide_corridor_weight);
+  } else if (config_.optimizer.penaltyWeights.size() != 5) {
     config_.optimizer.penaltyWeights.resize(5);
     config_.optimizer.penaltyWeights << 1000.0, 1000.0, 10000.0, 1000.0, 100.0;
   }
@@ -407,6 +417,7 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   using Clock = std::chrono::steady_clock;
 
   Result result;
+  result.constraint_profile = config_.constraint_profile;
   result.optimization_safe_dist = config_.optimizer.safe_dist;
   result.validation_safe_dist = config_.validation_safe_dist;
   const auto pipeline_start = Clock::now();
@@ -439,6 +450,49 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     request.has_terminal_goal && request.terminal_goal.allFinite() &&
     (request.terminal_goal - result.dense_path.back()).head<2>().norm() <= config_.traj_goal_tolerance;
   result.local_end_is_goal = local_end_is_goal;
+  if (config_.constraint_profile == "safe_corridor_v1") {
+    stage_start = Clock::now();
+    const auto corridor_report = corridor_.generate(
+      result.dense_path,
+      map_,
+      config_.validation_safe_dist,
+      config_.corridor_max_radius,
+      config_.corridor_min_radius,
+      config_.corridor_sample_step);
+    result.timing_ms["corridor_generation_ms"] = elapsedMs(stage_start);
+    result.corridor_failure_reason = corridor_report.reason;
+    result.corridor_segment_count = static_cast<int>(corridor_.segments().size());
+    result.corridor_segments = corridor_.segments();
+    result.corridor_min_radius = corridor_report.min_radius;
+    result.corridor_min_clearance = corridor_report.min_clearance;
+    if (!corridor_report.valid) {
+      result.failure_reason = corridor_report.reason;
+      return finish();
+    }
+    result.corridor_min_overlap = std::numeric_limits<double>::infinity();
+    const auto & segments = corridor_.segments();
+    for (size_t index = 0; index + 1U < segments.size(); ++index) {
+      const double gap =
+        (segments[index].end - segments[index + 1U].start).head<2>().norm();
+      result.corridor_min_overlap = std::min(
+        result.corridor_min_overlap,
+        segments[index].radius + segments[index + 1U].radius - gap);
+    }
+    if (segments.size() == 1U) {
+      result.corridor_min_overlap = segments.front().radius;
+    }
+    if (!(std::isfinite(result.corridor_min_overlap) &&
+      result.corridor_min_overlap >= 0.0))
+    {
+      result.corridor_failure_reason = "CORRIDOR_DISCONNECTED";
+      result.failure_reason = result.corridor_failure_reason;
+      return finish();
+    }
+    optimizer_->setGuideCorridor(result.dense_path, corridor_.minRadius());
+  } else {
+    optimizer_->setGuideCorridor({}, 0.0);
+    result.corridor_failure_reason = "DISABLED";
+  }
   stage_start = Clock::now();
   result.sparse_waypoints = sparsifyPath(result.dense_path, local_end_is_goal, &result.mandatory_corner_count);
   result.timing_ms["sparsify_path_ms"] = elapsedMs(stage_start);
@@ -550,10 +604,16 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   stage_start = Clock::now();
   if (!validateTrajectory(result.trajectory, result.end_state.col(0), &result)) {
     result.timing_ms["validate_ms"] = elapsedMs(stage_start);
+    if (config_.constraint_profile == "safe_corridor_v1") {
+      result.timing_ms["adaptive_validation_ms"] = result.timing_ms["validate_ms"];
+    }
     result.failure_reason = result.validation_failure_reason;
     return finish();
   }
   result.timing_ms["validate_ms"] = elapsedMs(stage_start);
+  if (config_.constraint_profile == "safe_corridor_v1") {
+    result.timing_ms["adaptive_validation_ms"] = result.timing_ms["validate_ms"];
+  }
 
   const double goal_yaw = std::isfinite(request.goal_yaw) ? request.goal_yaw : request.current.yaw;
   stage_start = Clock::now();
@@ -572,6 +632,12 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     result.yaw_trajectory.emplace_back(std::max(0.02, result.trajectory.getTotalDuration()), cMat);
   }
   result.timing_ms["yaw_ms"] = elapsedMs(stage_start);
+  if (config_.constraint_profile == "safe_corridor_v1" &&
+    !validateYawAndWheels(result.trajectory, result.yaw_trajectory, &result))
+  {
+    result.failure_reason = result.validation_failure_reason;
+    return finish();
+  }
 
   result.trajectory.start_WT = request.now;
   result.yaw_trajectory.start_WT = request.now;
@@ -876,6 +942,196 @@ bool MincoPipeline::validateTrajectory(
   const geometry_utils::Trajectory & trajectory, const Eigen::Vector3d & expected_end_pos,
   Result * diagnostics) const
 {
+  if (config_.constraint_profile == "safe_corridor_v1") {
+    auto reject = [diagnostics](
+      const std::string & reason, int index, double t, const Eigen::Vector3d & position,
+      double measured, double limit)
+    {
+      if (diagnostics) {
+        diagnostics->validation_failure_reason = reason;
+        diagnostics->validation_offending_sample_index = index;
+        diagnostics->validation_offending_time_s = t;
+        diagnostics->validation_offending_position = position;
+        diagnostics->validation_measured_value = measured;
+        diagnostics->validation_limit_value = limit;
+      }
+      return false;
+    };
+    const double duration = trajectory.getTotalDuration();
+    if (!(std::isfinite(duration) && duration > 1e-6)) {
+      return reject(
+        "VALIDATION_INVALID_DURATION", 0, 0.0, Eigen::Vector3d::Zero(), duration, 0.0);
+    }
+    if (!map_ || corridor_.segments().empty()) {
+      return reject(
+        "VALIDATION_CORRIDOR", 0, 0.0, trajectory.getPos(0.0), -1.0, 0.0);
+    }
+
+    struct Node {
+      double t;
+      Eigen::Vector3d pos;
+      Eigen::Vector3d vel;
+      Eigen::Vector3d acc;
+      Eigen::Vector3d jerk;
+      double clearance;
+      bool query_ok;
+    };
+    auto sample = [&](double t) {
+      Node node;
+      node.t = t;
+      node.pos = trajectory.getPos(t);
+      node.vel = trajectory.getVel(t);
+      node.acc = trajectory.getAcc(t);
+      node.jerk = trajectory.getJer(t);
+      const auto query = map_->query(node.pos);
+      node.query_ok = query.ok && std::isfinite(query.distance);
+      node.clearance = node.query_ok ?
+        query.distance : -std::numeric_limits<double>::infinity();
+      return node;
+    };
+
+    std::vector<Node> ordered;
+    ordered.reserve(static_cast<size_t>(std::max(2, config_.adaptive_sample_budget)));
+    int subdivisions = 0;
+    bool budget_exhausted = false;
+    std::function<void(const Node &, const Node &, int)> refine;
+    refine = [&](const Node & left, const Node & right, int depth) {
+      if (budget_exhausted) {
+        return;
+      }
+      const double dt = right.t - left.t;
+      const double displacement = (right.pos - left.pos).head<2>().norm();
+      const double derivative_change =
+        (right.vel - left.vel).head<2>().norm() * std::max(0.0, dt);
+      const double near_limit =
+        config_.validation_safe_dist + std::max(0.0, config_.adaptive_near_clearance);
+      const bool near_clearance =
+        !left.query_ok || !right.query_ok ||
+        left.clearance <= near_limit || right.clearance <= near_limit;
+      const bool split =
+        depth < config_.adaptive_max_depth && dt > 1e-6 &&
+        (displacement > config_.adaptive_max_spatial_step ||
+        derivative_change > config_.adaptive_max_spatial_step ||
+        near_clearance);
+      if (split) {
+        if (static_cast<int>(ordered.size()) + subdivisions + 3 >
+          config_.adaptive_sample_budget)
+        {
+          budget_exhausted = true;
+          return;
+        }
+        const Node middle = sample(0.5 * (left.t + right.t));
+        ++subdivisions;
+        refine(left, middle, depth + 1);
+        refine(middle, right, depth + 1);
+      } else {
+        ordered.push_back(left);
+      }
+    };
+    const Node start = sample(0.0);
+    const Node end = sample(duration);
+    refine(start, end, 0);
+    ordered.push_back(end);
+    if (diagnostics) {
+      diagnostics->adaptive_validation_sample_count = static_cast<int>(ordered.size());
+      diagnostics->adaptive_validation_subdivision_count = subdivisions;
+    }
+    if (budget_exhausted) {
+      return reject(
+        "VALIDATION_BUDGET_EXHAUSTED", static_cast<int>(ordered.size()), duration,
+        end.pos, static_cast<double>(ordered.size()), config_.adaptive_sample_budget);
+    }
+
+    double min_clearance = std::numeric_limits<double>::infinity();
+    int corridor_segment = 0;
+    double prior_clearance = start.clearance;
+    for (size_t index = 0; index < ordered.size(); ++index) {
+      const auto & node = ordered[index];
+      const int sample_index = static_cast<int>(index);
+      if (!(node.pos.allFinite() && node.vel.allFinite() &&
+        node.acc.allFinite() && node.jerk.allFinite()))
+      {
+        return reject(
+          "VALIDATION_NONFINITE_DYNAMICS", sample_index, node.t, node.pos,
+          std::numeric_limits<double>::quiet_NaN(), 0.0);
+      }
+      if (!node.query_ok) {
+        if (diagnostics) {
+          ++diagnostics->validation_oob_count;
+        }
+        return reject("VALIDATION_ESDF_OOB", sample_index, node.t, node.pos, -1.0, 0.0);
+      }
+      min_clearance = std::min(min_clearance, node.clearance);
+      if (node.clearance < 0.0) {
+        if (diagnostics) {
+          ++diagnostics->validation_negative_esdf_count;
+        }
+        return reject(
+          "VALIDATION_NEGATIVE_ESDF", sample_index, node.t, node.pos,
+          node.clearance, 0.0);
+      }
+      const double start_distance = (node.pos - start.pos).head<2>().norm();
+      const bool in_start_exemption =
+        start_distance <= config_.start_validation_exemption_radius &&
+        node.clearance > 0.0 &&
+        node.clearance <= config_.validation_safe_dist &&
+        node.clearance + 1e-9 >= prior_clearance;
+      if (node.clearance <= config_.validation_safe_dist && !in_start_exemption) {
+        return reject(
+          "VALIDATION_CLEARANCE", sample_index, node.t, node.pos,
+          node.clearance, config_.validation_safe_dist);
+      }
+      if (in_start_exemption && diagnostics) {
+        ++diagnostics->validation_start_exempt_count;
+      }
+      prior_clearance = node.clearance;
+      int matched_segment = corridor_segment;
+      double corridor_margin = 0.0;
+      if (!corridor_.contains(
+          node.pos, corridor_segment, &matched_segment, &corridor_margin))
+      {
+        return reject(
+          "VALIDATION_CORRIDOR", sample_index, node.t, node.pos, corridor_margin, 0.0);
+      }
+      corridor_segment = matched_segment;
+      const double speed = node.vel.head<2>().norm();
+      const double acceleration = node.acc.head<2>().norm();
+      const double jerk = node.jerk.head<2>().norm();
+      const double speed_tolerance =
+        std::max(1e-6, 1e-3 * config_.optimizer.max_vel);
+      const double acceleration_tolerance =
+        std::max(1e-6, 1e-3 * config_.optimizer.max_acc);
+      const double jerk_tolerance = std::max(1e-6, 1e-3 * config_.max_jerk);
+      if (speed > config_.optimizer.max_vel + speed_tolerance) {
+        return reject(
+          "VALIDATION_VELOCITY", sample_index, node.t, node.pos,
+          speed, config_.optimizer.max_vel);
+      }
+      if (acceleration > config_.optimizer.max_acc + acceleration_tolerance) {
+        return reject(
+          "VALIDATION_ACCELERATION", sample_index, node.t, node.pos,
+          acceleration, config_.optimizer.max_acc);
+      }
+      if (jerk > config_.max_jerk + jerk_tolerance) {
+        return reject(
+          "VALIDATION_JERK", sample_index, node.t, node.pos, jerk, config_.max_jerk);
+      }
+    }
+    const Eigen::Vector3d end_pos = trajectory.getPos(duration);
+    if (!end_pos.allFinite() ||
+      (end_pos - expected_end_pos).norm() > config_.traj_goal_tolerance)
+    {
+      return reject(
+        end_pos.allFinite() ? "VALIDATION_GOAL_TOLERANCE" : "VALIDATION_NONFINITE_END",
+        static_cast<int>(ordered.size()) - 1, duration, end_pos,
+        (end_pos - expected_end_pos).norm(), config_.traj_goal_tolerance);
+    }
+    if (diagnostics) {
+      diagnostics->validation_min_clearance = min_clearance;
+      diagnostics->validation_failure_reason = "NONE";
+    }
+    return true;
+  }
   auto reject = [diagnostics](const std::string & reason) {
     if (diagnostics) {
       diagnostics->validation_failure_reason = reason;
@@ -922,6 +1178,68 @@ bool MincoPipeline::validateTrajectory(
   }
   if (diagnostics) {
     diagnostics->validation_failure_reason = "NONE";
+  }
+  return true;
+}
+
+bool MincoPipeline::validateYawAndWheels(
+  const geometry_utils::Trajectory & trajectory,
+  const geometry_utils::Trajectory & yaw_trajectory,
+  Result * diagnostics) const
+{
+  const double duration = trajectory.getTotalDuration();
+  const double yaw_duration = yaw_trajectory.getTotalDuration();
+  if (!(std::isfinite(duration) && duration > 0.0 &&
+    std::isfinite(yaw_duration) && yaw_duration > 0.0))
+  {
+    if (diagnostics) {
+      diagnostics->validation_failure_reason = "VALIDATION_YAW_RATE";
+    }
+    return false;
+  }
+  const double dt = std::max(
+    1e-3, std::min(config_.validation_sample_dt,
+    config_.adaptive_max_spatial_step / std::max(1e-3, config_.optimizer.max_vel)));
+  int index = 0;
+  for (double t = 0.0; t <= duration + 1e-9; t += dt, ++index) {
+    const double sample_t = std::min(t, duration);
+    const Eigen::Vector3d position = trajectory.getPos(sample_t);
+    const double speed = trajectory.getVel(sample_t).head<2>().norm();
+    const double yaw_rate = yaw_trajectory.getVel(std::min(sample_t, yaw_duration))(0);
+    auto reject = [&](const std::string & reason, double measured, double limit) {
+      if (diagnostics) {
+        diagnostics->validation_failure_reason = reason;
+        diagnostics->validation_offending_sample_index = index;
+        diagnostics->validation_offending_time_s = sample_t;
+        diagnostics->validation_offending_position = position;
+        diagnostics->validation_measured_value = measured;
+        diagnostics->validation_limit_value = limit;
+      }
+      return false;
+    };
+    const double yaw_tolerance =
+      std::max(1e-6, 1e-3 * config_.max_yaw_rate);
+    if (!std::isfinite(yaw_rate) ||
+      std::abs(yaw_rate) > config_.max_yaw_rate + yaw_tolerance)
+    {
+      return reject(
+        "VALIDATION_YAW_RATE", std::abs(yaw_rate), config_.max_yaw_rate);
+    }
+    const double left =
+      (2.0 * speed - config_.wheel_base * yaw_rate) /
+      (2.0 * config_.wheel_radius);
+    const double right =
+      (2.0 * speed + config_.wheel_base * yaw_rate) /
+      (2.0 * config_.wheel_radius);
+    const double measured = std::max(std::abs(left), std::abs(right));
+    const double wheel_tolerance =
+      std::max(1e-6, 1e-3 * config_.max_wheel_speed);
+    if (!std::isfinite(measured) ||
+      measured > config_.max_wheel_speed + wheel_tolerance)
+    {
+      return reject(
+        "VALIDATION_WHEEL_SPEED", measured, config_.max_wheel_speed);
+    }
   }
   return true;
 }
