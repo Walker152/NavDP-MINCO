@@ -8,6 +8,7 @@ import numpy as np
 
 from experiments.static.case_schema import StaticCase
 from experiments.static.esdf import signed_distance_from_occupancy
+from experiments.static.pathfinding import astar_path
 
 
 def _load_config(path: Path | str) -> dict[str, Any]:
@@ -79,6 +80,35 @@ def generate_catalogue(path: Path | str) -> list[StaticCase]:
         )
         esdf = signed_distance_from_occupancy(occupancy, resolution)
         guide = np.asarray(specification["guide_path_xyz_m"], dtype=np.float64)
+
+        # If guide path crosses obstacles, use A* to find a safe path
+        obstacles = specification.get("obstacle_rectangles_xyxy_m", [])
+        if obstacles:
+            guide_crosses = False
+            for i in range(len(guide) - 1):
+                samples = np.linspace(0.0, 1.0, max(2, int(
+                    np.linalg.norm(guide[i + 1, :2] - guide[i, :2]) / resolution
+                )))
+                for t in samples:
+                    pt = guide[i] + t * (guide[i + 1] - guide[i])
+                    col = int((pt[0] - origin[0]) / resolution)
+                    row = int((pt[1] - origin[1]) / resolution)
+                    if 0 <= row < shape[0] and 0 <= col < shape[1]:
+                        if occupancy[row, col]:
+                            guide_crosses = True
+                            break
+                if guide_crosses:
+                    break
+            if guide_crosses:
+                try:
+                    safe_guide = astar_path(
+                        occupancy, origin, resolution,
+                        guide[0, :2], guide[-1, :2],
+                    )
+                    if len(safe_guide) >= 2:
+                        guide = safe_guide
+                except Exception:
+                    pass  # keep original guide if A* fails
         state = specification.get("start_state", {})
         terminal = specification.get("terminal_goal_xyz_m", guide[-1].tolist())
         cases.append(
