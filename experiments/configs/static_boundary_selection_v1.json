@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "suite_id": "static_boundary_selection_v1",
+  "suite_id": "static_boundary_selection_v2",
   "base_case_config": "static_legacy_suite.json",
   "profiles": {
     "legacy": "static_legacy_suite.json",
@@ -25,16 +25,83 @@
     {"case_uid":"state_yawrate_limit","source_case_uid":"syn_straight","yaw_rate_radps":0.48,"factor_name":"initial_yaw_rate_radps","factor_level":0.48,"tags":["yaw_rate_near_limit"]},
     {"case_uid":"state_yawrate_over","source_case_uid":"syn_straight","yaw_rate_radps":0.6,"factor_name":"initial_yaw_rate_radps","factor_level":0.6,"tags":["yaw_rate_over_limit"]},
     {"case_uid":"state_offset_small","source_case_uid":"syn_straight","position_xyz_m":[1.0,1.15,0.0],"factor_name":"initial_lateral_offset_m","factor_level":0.15,"tags":["guide_offset_small"]},
-    {"case_uid":"state_offset_large","source_case_uid":"syn_straight","position_xyz_m":[1.0,1.35,0.0],"factor_name":"initial_lateral_offset_m","factor_level":0.35,"tags":["guide_offset_large"]}
+    {"case_uid":"state_offset_large","source_case_uid":"syn_straight","position_xyz_m":[1.0,1.35,0.0],"factor_name":"initial_lateral_offset_m","factor_level":0.35,"tags":["guide_offset_large"]},
+
+    {"case_uid":"extreme_v_high_yaw_large_l90","source_case_uid":"syn_l90","velocity_xyz_mps":[0.8,0.0,0.0],"yaw_rad":2.6,"factor_name":"extreme_combo","factor_level":0,"tags":["extreme","speed_high","yaw_large","l90"]},
+    {"case_uid":"extreme_v_limit_yaw_mid_l90","source_case_uid":"syn_l90","velocity_xyz_mps":[0.95,0.0,0.0],"yaw_rad":1.2,"factor_name":"extreme_combo","factor_level":1,"tags":["extreme","speed_limit","yaw_mid","l90"]},
+    {"case_uid":"extreme_v_reverse_yaw_l90","source_case_uid":"syn_l90","velocity_xyz_mps":[-0.3,0.0,0.0],"yaw_rad":1.5,"factor_name":"extreme_combo","factor_level":2,"tags":["extreme","speed_reverse","yaw_mid","l90"]},
+    {"case_uid":"extreme_v_lateral_narrow","source_case_uid":"syn_narrow_channel","velocity_xyz_mps":[0.5,0.3,0.0],"factor_name":"extreme_combo","factor_level":3,"tags":["extreme","lateral_speed","narrow"]},
+    {"case_uid":"extreme_v_high_yaw_narrow","source_case_uid":"syn_narrow_channel","velocity_xyz_mps":[0.7,0.0,0.0],"yaw_rad":1.0,"factor_name":"extreme_combo","factor_level":4,"tags":["extreme","speed_high","yaw_mid","narrow"]},
+    {"case_uid":"extreme_a_high_yaw_large_l90","source_case_uid":"syn_l90","acceleration_xyz_mps2":[0.75,0.0,0.0],"yaw_rad":2.0,"factor_name":"extreme_combo","factor_level":5,"tags":["extreme","accel_high","yaw_large","l90"]},
+    {"case_uid":"extreme_a_reverse_yaw_l90","source_case_uid":"syn_l90","acceleration_xyz_mps2":[-0.75,0.0,0.0],"yaw_rad":0.5,"factor_name":"extreme_combo","factor_level":6,"tags":["extreme","accel_reverse","yaw_small","l90"]},
+    {"case_uid":"extreme_yawrate_limit_speed_high_l90","source_case_uid":"syn_l90","yaw_rate_radps":0.48,"velocity_xyz_mps":[0.8,0.0,0.0],"factor_name":"extreme_combo","factor_level":7,"tags":["extreme","yawrate_limit","speed_high","l90"]},
+    {"case_uid":"extreme_yaw_reverse_narrow","source_case_uid":"syn_narrow_channel","yaw_rad":3.0,"factor_name":"extreme_combo","factor_level":8,"tags":["extreme","yaw_near_reverse","narrow"]},
+    {"case_uid":"extreme_v_high_yaw_large_s_curve","source_case_uid":"syn_s_curve","velocity_xyz_mps":[0.8,0.0,0.0],"yaw_rad":2.0,"factor_name":"extreme_combo","factor_level":9,"tags":["extreme","speed_high","yaw_large","s_curve"]}
   ],
   "factor_grids": [
     {
-      "grid_uid": "grid_speed_yaw",
+      "grid_uid": "grid_speed_yaw_on_s_curve",
       "source_case_uid": "syn_s_curve",
       "x_factor": {
         "name": "initial_speed_mps",
         "field": "velocity_x_mps",
         "levels": [0.0, 0.5, 0.95]
+      },
+      "y_factor": {
+        "name": "yaw_error_rad",
+        "field": "yaw_rad",
+        "levels": [0.0, 1.2, 2.6]
+      }
+    },
+    {
+      "grid_uid": "grid_speed_yaw_on_l90",
+      "source_case_uid": "syn_l90",
+      "x_factor": {
+        "name": "initial_speed_mps",
+        "field": "velocity_x_mps",
+        "levels": [0.0, 0.5, 0.95]
+      },
+      "y_factor": {
+        "name": "yaw_error_rad",
+        "field": "yaw_rad",
+        "levels": [0.0, 1.2, 2.6]
+      }
+    },
+    {
+      "grid_uid": "grid_speed_yaw_on_narrow",
+      "source_case_uid": "syn_narrow_channel",
+      "x_factor": {
+        "name": "initial_speed_mps",
+        "field": "velocity_x_mps",
+        "levels": [0.0, 0.3, 0.6]
+      },
+      "y_factor": {
+        "name": "yaw_error_rad",
+        "field": "yaw_rad",
+        "levels": [0.0, 0.5, 1.2]
+      }
+    },
+    {
+      "grid_uid": "grid_yawrate_speed_on_l90",
+      "source_case_uid": "syn_l90",
+      "x_factor": {
+        "name": "initial_yaw_rate_radps",
+        "field": "yaw_rate_radps",
+        "levels": [0.0, 0.25, 0.48]
+      },
+      "y_factor": {
+        "name": "initial_speed_mps",
+        "field": "velocity_x_mps",
+        "levels": [0.0, 0.5, 0.95]
+      }
+    },
+    {
+      "grid_uid": "grid_accel_yaw_on_l90",
+      "source_case_uid": "syn_l90",
+      "x_factor": {
+        "name": "initial_acceleration_x_mps2",
+        "field": "acceleration_x_mps2",
+        "levels": [0.0, 0.5, 0.75]
       },
       "y_factor": {
         "name": "yaw_error_rad",

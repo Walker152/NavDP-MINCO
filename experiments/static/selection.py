@@ -307,6 +307,10 @@ def _apply_factor_field(
         specification["yaw_rad"] = float(level)
     elif field == "yaw_rate_radps":
         specification["yaw_rate_radps"] = float(level)
+    elif field == "acceleration_x_mps2":
+        specification["acceleration_xyz_mps2"] = [float(level), 0.0, 0.0]
+    elif field == "acceleration_y_mps2":
+        specification["acceleration_xyz_mps2"] = [0.0, float(level), 0.0]
     else:
         raise ValueError(f"unsupported boundary factor field: {field}")
 
