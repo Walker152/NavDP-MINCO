@@ -250,3 +250,86 @@ class StaticGifContentTests(unittest.TestCase):
                 self.fail(f"Size mismatch for {r['path']}")
             digest = hashlib.sha256(fp.read_bytes()).hexdigest()
             self.assertEqual(digest, r["sha256"], f"Hash mismatch for {r['path']}")
+
+
+class PairedStaticGifTests(unittest.TestCase):
+    """Verify paired legacy/safe GIFs meet Plan A requirements."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.output = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_render_paired_static_gif_function_exists(self):
+        """render_paired_static_gif is importable."""
+        from experiments.visualizers.static_benchmark import render_paired_static_gif
+        self.assertTrue(callable(render_paired_static_gif))
+
+    def test_paired_gif_two_panel_layout(self):
+        """Paired GIF has width approximately 2x single panel width."""
+        from experiments.visualizers.static_benchmark import (
+            render_static_case,
+            render_paired_static_gif,
+        )
+
+        case = _make_straight_case()
+        legacy_result = _make_result(case, "SUCCEEDED")
+        safe_case = _make_straight_case("safe_corridor_v1")
+        safe_result = _make_result(safe_case, "SUCCEEDED")
+        path = legacy_result.samples[:, 1:4]
+        detail = _make_detail(path)
+        metrics = {"safe_dist_m": 0.15, "min_clearance_m": 0.45}
+
+        # Generate single GIF for width reference
+        render_static_case(case, legacy_result, metrics, detail, self.output / "single")
+        single_gif = self.output / "single" / "test_straight_animation.gif"
+        single_frames = imageio.mimread(single_gif)
+        single_width = single_frames[0].shape[1]
+
+        # Generate paired GIF
+        paired_path = self.output / "paired" / "test_straight_legacy_vs_safe.gif"
+        paired_path.parent.mkdir(parents=True, exist_ok=True)
+        render_paired_static_gif(
+            paired_path,
+            case=case,
+            legacy_result=legacy_result,
+            legacy_detail=detail,
+            safe_result=safe_result,
+            safe_detail=detail,
+        )
+        paired_frames = imageio.mimread(paired_path)
+        paired_width = paired_frames[0].shape[1]
+
+        # Paired width should be roughly 2x single width (within tolerance)
+        ratio = paired_width / single_width
+        self.assertGreater(ratio, 1.7, f"Paired/single width ratio {ratio:.2f} < 1.7")
+        self.assertLess(ratio, 2.3, f"Paired/single width ratio {ratio:.2f} > 2.3")
+
+    def test_paired_gif_creates_evidence_package(self):
+        """Paired GIF rendering produces a valid evidence package."""
+        from experiments.visualizers.static_benchmark import render_paired_static_gif
+
+        case = _make_straight_case()
+        legacy_result = _make_result(case, "SUCCEEDED")
+        safe_case = _make_straight_case("safe_corridor_v1")
+        safe_result = _make_result(safe_case, "SUCCEEDED")
+        path = legacy_result.samples[:, 1:4]
+        detail = _make_detail(path)
+
+        paired_path = self.output / "test_paired.gif"
+        render_paired_static_gif(
+            paired_path,
+            case=case,
+            legacy_result=legacy_result,
+            legacy_detail=detail,
+            safe_result=safe_result,
+            safe_detail=detail,
+        )
+
+        evidence_dir = self.output / "test_paired_evidence"
+        self.assertTrue(evidence_dir.is_dir())
+
+        validation = json.loads((evidence_dir / "validation.json").read_text())
+        self.assertTrue(validation.get("valid"), f"Validation: {validation}")
