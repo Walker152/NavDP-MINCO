@@ -15,6 +15,26 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import numpy as np
 
+from experiments.visualizers.rolling_showcase import (
+    draw_heading_arrow,
+    _draw_capsule,
+    _draw_obstacles,
+    _draw_static_rectangles,
+    _draw_velocity,
+    _status_box,
+    _configure_axis,
+    _draw_orientation_contract,
+    _limits,
+    GUIDE_STYLE,
+    LEGACY_STYLE,
+    SAFE_STYLE,
+    GOAL_COLOR,
+    OBSTACLE_COLOR,
+    VELOCITY_COLOR,
+    FRAME_DURATION_S,
+    TERMINAL_HOLD_FRAMES,
+)
+
 from experiments.static.case_schema import StaticCase
 from experiments.static.runner import StaticRunResult
 
