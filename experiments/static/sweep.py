@@ -94,7 +94,9 @@ def run_capability_sweep(
     # State variants + factor grids (reuse boundary expansion)
     from experiments.static.selection import generate_boundary_cases
     try:
-        boundary_cases = generate_boundary_cases(sweep_with_grid)
+        boundary_config = dict(sweep_with_grid)
+        boundary_config["base_case_config"] = str(base_config_path)
+        boundary_cases = generate_boundary_cases(boundary_config)
         existing = {c.case_uid for c in case_list}
         for c in boundary_cases:
             if c.case_uid not in existing:
@@ -106,6 +108,32 @@ def run_capability_sweep(
     profiles = ["legacy", "safe_corridor_v1"]
     metric_limits = _assemble_metric_limits(sweep_config)
 
+    # Factor metadata for comparison charts
+    factor_meta: dict[str, dict[str, Any]] = {}
+    for spec in sweep_config.get("state_variants", []):
+        factor_meta[str(spec["case_uid"])] = {
+            "factor_name": str(spec.get("factor_name", "")),
+            "factor_level": spec.get("factor_level", ""),
+        }
+    for grid in sweep_config.get("factor_grids", []):
+        xf, yf = grid["x_factor"], grid["y_factor"]
+        for xi, xl in enumerate(xf["levels"]):
+            for yi, yl in enumerate(yf["levels"]):
+                uid = f"{grid['grid_uid']}_x{xi:02d}_y{yi:02d}"
+                factor_meta[uid] = {
+                    "factor_name": str(xf["name"]),
+                    "factor_level": xl,
+                    "factor_name_secondary": str(yf["name"]),
+                    "factor_level_secondary": yl,
+                }
+    for entry in sweep_config.get("obstacle_variants", []):
+        for variant in entry.get("variants", []):
+            uid = f"{entry['source_case_uid']}_{variant['case_uid_suffix']}"
+            factor_meta[uid] = {
+                "factor_name": "obstacle_density",
+                "factor_level": str(variant.get("density", "")),
+            }
+
     rows: list[dict[str, Any]] = []
     # Deduplicate by case_uid (boundary expansion may overlap with obstacle variants)
     seen_uids: set[str] = set()
@@ -116,7 +144,11 @@ def run_capability_sweep(
             unique_cases.append(case)
     case_list = unique_cases
 
+    per_case_results: dict[
+        str, dict[str, tuple[StaticCase, StaticRunResult, dict[str, Any], dict[str, Any]]]
+    ] = {}
     for case in case_list:
+        per_case_results[case.case_uid] = {}
         for profile_name in profiles:
             profile_config = _assemble_profile_config(sweep_config, profile_name)
             # Force constraint_profile from assembly
@@ -132,7 +164,28 @@ def run_capability_sweep(
 
             artifact_dir = output_dir / "artifacts" / case.case_uid / profile_name
             render_static_case(case, result, metrics, detail, artifact_dir)
+            per_case_results[case.case_uid][profile_name] = (case, result, metrics, detail)
 
+            # Per-dimension margins (same formula as selection._safe_margin)
+            safe_dist = float(metric_limits.get("safe_distance_m", 0.279))
+            max_v = float(metric_limits.get("max_velocity_mps", 1.0))
+            max_a = float(metric_limits.get("max_acceleration_mps2", 1.5))
+            max_j = float(metric_limits.get("max_jerk_mps3", 20.0))
+            max_w = float(metric_limits.get("max_yaw_rate_radps", 0.5))
+            margins: dict[str, float] = {}
+            for key, limit in (("velocity", max_v), ("acceleration", max_a),
+                               ("jerk", max_j), ("yaw_rate", max_w)):
+                viol = float(metrics.get(f"{key}_violation_ratio", 0.0))
+                margins[f"margin_{key}"] = 1.0 - viol if math.isfinite(viol) else float("nan")
+            min_clear = float(metrics.get("min_clearance_m", float("nan")))
+            margins["margin_clearance"] = (
+                (min_clear - safe_dist) / safe_dist
+                if math.isfinite(min_clear) else float("nan")
+            )
+            valid_margins = [v for v in margins.values() if math.isfinite(v)]
+            min_normalized_margin = min(valid_margins) if valid_margins else float("nan")
+
+            factor = factor_meta.get(case.case_uid, {})
             row = _json_safe({
                 "case_uid": case.case_uid,
                 "case_source": case.case_source,
@@ -143,9 +196,36 @@ def run_capability_sweep(
                 "corridor_segment_count": result.diagnostics.get("corridor_segment_count", 0),
                 "corridor_failure_reason": result.diagnostics.get("corridor_failure_reason", ""),
                 "validation_failure_reason": result.diagnostics.get("validation_failure_reason", ""),
+                "factor_name": factor.get("factor_name", ""),
+                "factor_level": factor.get("factor_level", ""),
+                "factor_name_secondary": factor.get("factor_name_secondary", ""),
+                "factor_level_secondary": factor.get("factor_level_secondary", ""),
+                "min_normalized_margin": min_normalized_margin,
+                **margins,
                 **metrics,
             })
             rows.append(row)
+
+    # Paired legacy/safe GIFs per case
+    from experiments.visualizers.static_benchmark import render_paired_static_gif
+    for case in case_list:
+        both = per_case_results[case.case_uid]
+        if "legacy" not in both or "safe_corridor_v1" not in both:
+            continue
+        legacy_case, legacy_result, _, legacy_detail = both["legacy"]
+        safe_case, safe_result, _, safe_detail = both["safe_corridor_v1"]
+        paired_gif = (
+            output_dir / "comparison" / case.case_uid / f"{case.case_uid}_legacy_vs_safe.gif"
+        )
+        paired_gif.parent.mkdir(parents=True, exist_ok=True)
+        render_paired_static_gif(
+            paired_gif,
+            case=legacy_case,
+            legacy_result=legacy_result,
+            legacy_detail=legacy_detail,
+            safe_result=safe_result,
+            safe_detail=safe_detail,
+        )
 
     # Write sweep CSV
     fields = sorted({k for row in rows for k in row})
@@ -168,5 +248,10 @@ def run_capability_sweep(
     (output_dir / "sweep_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+
+    # Comparison analysis: deltas, aggregates, both-profile charts
+    from experiments.analyzers.sweep_comparison import generate_sweep_comparison
+    comparison = generate_sweep_comparison(output_dir)
+    manifest["comparison"] = comparison
 
     return manifest
