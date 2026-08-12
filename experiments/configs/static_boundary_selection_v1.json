@@ -30,7 +30,7 @@
   "factor_grids": [
     {
       "grid_uid": "grid_speed_yaw",
-      "source_case_uid": "syn_straight",
+      "source_case_uid": "syn_s_curve",
       "x_factor": {
         "name": "initial_speed_mps",
         "field": "velocity_x_mps",
