@@ -11,6 +11,7 @@ import numpy as np
 
 from experiments.calibration.profile import load_robot_calibration
 from experiments.orchestrators.suite_runner import run_suite
+from experiments.visualizers.video_evidence import build_video_evidence_package
 
 
 def _sha256(path: Path) -> str:
@@ -22,6 +23,39 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"expected JSON object: {path}")
     return value
+
+
+def _write_pending_video_evidence(
+    output_dir: Path | str, expected_runs: list[Mapping[str, object]]
+) -> list[str]:
+    """Materialize honest header-only evidence for videos not collected yet."""
+    root = Path(output_dir).resolve() / "pending_video_evidence"
+    packages = []
+    for row in expected_runs:
+        case_uid = str(row["case_uid"])
+        episode_uid = str(row["episode_uid"])
+        profile = str(row["profile"])
+        package = root / case_uid / profile
+        build_video_evidence_package(
+            None,
+            package,
+            evidence_uid=f"pending-{case_uid}-{profile}-video-evidence",
+            media_uid=f"pending-{episode_uid}-{profile}-video",
+            data_source="UNAVAILABLE",
+            status="PENDING_REAL_SIMULATION",
+            case_uid=case_uid,
+            episode_uid=episode_uid,
+            caption_overrides={
+                "scene_zh": f"动态候选案例 {case_uid}",
+                "method_zh": profile,
+                "conclusion_limit_zh": (
+                    "必须完成真实 Isaac/NavDP 采集并通过媒体与控制数据校验后，"
+                    "才能报告任何动态定量结论"
+                ),
+            },
+        )
+        packages.append(str(package))
+    return packages
 
 
 def _decode_vector(value: Any, name: str, length: int = 3) -> list[float]:
@@ -53,6 +87,77 @@ def _ensure_materializable_acceleration(
         )
 
 
+def _case_uid(value: Any) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("case_uid", value.get("uid", ""))
+    return str(value)
+
+
+def _materialization_failure(case_payload: Mapping[str, Any]) -> str | None:
+    materialization = case_payload.get("materialization", {})
+    if not materialization.get("dynamic_replayable", False):
+        return "DYNAMIC_REPLAY_DISABLED"
+    try:
+        acceleration = _decode_vector(
+            materialization.get("required_initial_acceleration", [0.0, 0.0, 0.0]),
+            "required_initial_acceleration",
+        )
+    except (TypeError, ValueError):
+        return "INITIAL_ACCELERATION_INVALID"
+    if np.linalg.norm(np.asarray(acceleration, dtype=np.float64)) > 1e-9:
+        return "INITIAL_ACCELERATION_NOT_INJECTABLE"
+    return None
+
+
+def resolve_materializable_selection(
+    selected: Mapping[str, Any], *, started_processes: int = 0
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Resolve the frozen four slots using only their predeclared backups."""
+    cases = selected.get("cases", {})
+    chosen: list[str] = []
+    substitutions: list[dict[str, Any]] = []
+    categories = (("best2", "best_backups"), ("worst2", "worst_backups"))
+    for main_key, backup_key in categories:
+        backups = [_case_uid(value) for value in selected.get(backup_key, [])]
+        backup_cursor = 0
+        for slot_index, raw_uid in enumerate(selected.get(main_key, [])):
+            uid = _case_uid(raw_uid)
+            payload = cases.get(uid, {})
+            reason = _materialization_failure(payload)
+            if reason is None:
+                chosen.append(uid)
+                continue
+            if started_processes:
+                raise RuntimeError(
+                    "frozen substitutions are disabled after a real process starts"
+                )
+            replacement = ""
+            while backup_cursor < len(backups):
+                candidate = backups[backup_cursor]
+                backup_cursor += 1
+                if candidate not in chosen and _materialization_failure(
+                    cases.get(candidate, {})
+                ) is None:
+                    replacement = candidate
+                    break
+            if not replacement:
+                raise ValueError(
+                    f"no materializable frozen backup for {main_key}[{slot_index}] {uid}"
+                )
+            chosen.append(replacement)
+            substitutions.append({
+                "slot": f"{main_key}[{slot_index}]",
+                "reason": reason,
+                "rejected_case_uid": uid,
+                "rejected_case_hash": payload.get("case_hash", ""),
+                "selected_case_uid": replacement,
+                "selected_case_hash": cases[replacement].get("case_hash", ""),
+            })
+    if len(chosen) != 4 or len(set(chosen)) != 4:
+        raise ValueError("materialized selection must contain four unique cases")
+    return chosen, substitutions
+
+
 def _usda_scene(rectangles: list[list[float]]) -> str:
     lines = [
         "#usda 1.0",
@@ -63,6 +168,8 @@ def _usda_scene(rectangles: list[list[float]]) -> str:
         ")",
         'def Xform "World" {',
         '    def Cube "Floor" {',
+        '        prepend apiSchemas = ["PhysicsCollisionAPI"]',
+        "        bool physics:collisionEnabled = true",
         "        double size = 1",
         "        double3 xformOp:scale = (20, 20, 0.1)",
         "        double3 xformOp:translate = (5, 5, -0.05)",
@@ -77,6 +184,8 @@ def _usda_scene(rectangles: list[list[float]]) -> str:
         lines.extend(
             [
                 f'    def Cube "Obstacle_{index:03d}" {{',
+                '        prepend apiSchemas = ["PhysicsCollisionAPI"]',
+                "        bool physics:collisionEnabled = true",
                 "        double size = 1",
                 f"        double3 xformOp:scale = ({width}, {depth}, 1.0)",
                 f"        double3 xformOp:translate = ({0.5 * (xmin + xmax)}, {0.5 * (ymin + ymax)}, 0.5)",
@@ -118,11 +227,15 @@ def prepare_dynamic_pilot(
         "legacy": _load_json(legacy_profile_path),
         "safe_corridor_v1": _load_json(safe_profile_path),
     }
-    case_uids = list(selected.get("best2", [])) + list(
-        selected.get("worst2", [])
+    case_uids, substitutions = resolve_materializable_selection(selected)
+    (output_dir / "substitution_receipts.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "started_processes": 0,
+            "substitutions": substitutions,
+        }, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
-    if len(case_uids) != 4 or len(set(case_uids)) != 4:
-        raise ValueError("selected file must contain exactly four unique cases")
 
     scenes = []
     materialization_receipts = {}
@@ -176,6 +289,8 @@ def prepare_dynamic_pilot(
             "schema_version": 1,
             "case_uid": uid,
             "case_hash": case_payload["case_hash"],
+            "scene_sha256": _sha256(usd_path),
+            "calibration_sha256": calibration.calibration_sha256,
             "scene_id": scene_id,
             "start_pose_xy_yaw": start_pose,
             "initial_linear_velocity_xyz_mps": velocity,
@@ -188,6 +303,9 @@ def prepare_dynamic_pilot(
                 "initial_penetration": False,
                 "transform_profile_sha256": calibration.calibration_sha256,
                 "esdf_clearance_match_tolerance_m": 0.05,
+                "pose_match_tolerance_m": 0.02,
+                "yaw_match_tolerance_rad": 0.02,
+                "minimum_initial_clearance_m": calibration.validation_safe_dist_m,
                 "velocity_match_tolerance_mps": 0.02,
                 "yaw_rate_match_tolerance_radps": 0.02,
             },
@@ -313,6 +431,18 @@ def prepare_dynamic_pilot(
         "isaac",
         "--allow-real-simulation",
     ]
+    expected_video_runs = [
+        {
+            "case_uid": uid,
+            "episode_uid": f"dynamic_{uid}",
+            "profile": profile,
+        }
+        for uid in case_uids
+        for profile in ("legacy", "safe_corridor_v1")
+    ]
+    pending_video_evidence = _write_pending_video_evidence(
+        output_dir, expected_video_runs
+    )
     receipt = {
         "schema_version": 1,
         "status": "READY_FOR_REAL_RUN",
@@ -327,12 +457,15 @@ def prepare_dynamic_pilot(
             "safe_corridor_v1": _sha256(safe_profile_path),
         },
         "case_uids": case_uids,
+        "substitutions": substitutions,
+        "substitution_receipts": str(output_dir / "substitution_receipts.json"),
         "run_count": 8,
         "profiles": ["legacy", "safe_corridor_v1"],
         "warm_start_mode": "gated",
         "suite_seed": 6100,
         "navdp_seeds": [16100 + index for index in range(4)],
         "started_processes": 0,
+        "pending_video_evidence": pending_video_evidence,
         "estimated_resources": {
             "isaac_processes_per_run": 1,
             "navdp_server_processes_per_run": 1,

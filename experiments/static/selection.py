@@ -15,7 +15,11 @@ from experiments.static.case_schema import StaticCase
 from experiments.static.metrics import compute_static_case_metrics
 from experiments.static.runner import load_legacy_profile, run_static_case
 from experiments.static.synthetic import generate_catalogue
-from experiments.visualizers.static_benchmark import render_static_case
+from experiments.visualizers.static_benchmark import (
+    build_paired_static_gif_evidence,
+    render_static_case,
+)
+from experiments.core.artifact_receipt import inventory_receipts
 
 
 POLICY_VERSION = "best-worst-lexicographic-v1"
@@ -26,6 +30,42 @@ def _canonical_hash(value: Any) -> str:
         value, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def boundary_case_content_hash(case: StaticCase) -> str:
+    """Hash measured geometry/state content independently of the case label."""
+    digest = hashlib.sha256()
+    scalars = {
+        "esdf_resolution": case.esdf_resolution,
+        "start_yaw": case.start_yaw,
+        "start_yaw_rate": case.start_yaw_rate,
+        "esdf_available": case.esdf_available,
+    }
+    digest.update(
+        json.dumps(scalars, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    arrays: dict[str, np.ndarray] = {
+        "guide_path_xyz": case.guide_path_xyz,
+        "occupancy": case.occupancy,
+        "esdf_distance": case.esdf_distance,
+        "esdf_origin": case.esdf_origin,
+        "start_position": case.start_position,
+        "start_velocity": case.start_velocity,
+        "start_acceleration": case.start_acceleration,
+    }
+    if case.terminal_goal is not None:
+        arrays["terminal_goal"] = case.terminal_goal
+    for name, value in case.auxiliary_arrays.items():
+        arrays[f"aux__{name}"] = value
+    for name, value in sorted(arrays.items()):
+        array = np.ascontiguousarray(value)
+        digest.update(name.encode("utf-8"))
+        digest.update(str(array.dtype).encode("utf-8"))
+        digest.update(json.dumps(list(array.shape)).encode("utf-8"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
 
 
 def _json_safe(value: Any) -> Any:
@@ -76,7 +116,10 @@ def default_selection_policy() -> dict[str, Any]:
             "OPTIMIZER_FAILED",
         ],
         "backup_count_per_side": 2,
-        "duplicate_rule": "retain lexicographically first case_uid per case_hash",
+        "duplicate_rule": (
+            "retain lexicographically first case_uid per semantic content hash; "
+            "case labels and profiles do not alter content identity"
+        ),
     }
     policy["policy_sha256"] = _canonical_hash(policy)
     return policy
@@ -108,7 +151,9 @@ def select_cases(
                 row.get("not_replayable_reason") or "NOT_DYNAMIC_REPLAYABLE"
             )
             continue
-        case_hash = str(row.get("case_hash", ""))
+        case_hash = str(
+            row.get("selection_content_hash") or row.get("case_hash", "")
+        )
         if not case_hash or case_hash in seen_hashes:
             exclusions[uid] = "DUPLICATE_CASE_HASH"
             continue
@@ -186,6 +231,59 @@ def select_cases(
         if uid not in worst:
             worst.append(uid)
 
+    def complete_rows(
+        primary: Iterable[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        ordered: list[dict[str, Any]] = []
+        observed: set[str] = set()
+        for row in list(primary) + eligible:
+            uid = str(row["case_uid"])
+            if uid not in observed:
+                observed.add(uid)
+                ordered.append(dict(row))
+        return ordered
+
+    best_complete = complete_rows(
+        best_ranked
+        + sorted(
+            (row for row in eligible if row not in safe),
+            key=lambda row: (
+                severity.get(str(row.get("failure_reason")), len(severity)),
+                str(row["case_uid"]),
+            ),
+        )
+    )
+    worst_complete = complete_rows(
+        failed_ranked + degraded_ranked + list(reversed(best_ranked))
+    )
+
+    def ranking_records(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        keys = (
+            "case_uid",
+            "case_hash",
+            "selection_content_hash",
+            "expected_category",
+            "classification",
+            "failure_reason",
+            "min_normalized_margin",
+            "guide_deviation_p95_m",
+            "path_length_ratio",
+            "actual_jerk_p95_mps3",
+            "runtime_ms",
+            "violation_margin",
+            "factor_name",
+            "factor_level",
+            "factor_name_secondary",
+            "factor_level_secondary",
+        )
+        return [
+            {
+                "rank": rank,
+                **{key: row.get(key, "") for key in keys},
+            }
+            for rank, row in enumerate(values, 1)
+        ]
+
     return {
         "policy_version": policy["policy_version"],
         "policy_sha256": policy["policy_sha256"],
@@ -193,7 +291,81 @@ def select_cases(
         "exclusions": exclusions,
         "best": best,
         "worst": worst,
+        "best_ranking": ranking_records(best_complete),
+        "worst_ranking": ranking_records(worst_complete),
     }
+
+
+def _apply_factor_field(
+    specification: dict[str, Any], field: str, level: float
+) -> None:
+    if field == "velocity_x_mps":
+        specification["velocity_xyz_mps"] = [float(level), 0.0, 0.0]
+    elif field == "velocity_y_mps":
+        specification["velocity_xyz_mps"] = [0.0, float(level), 0.0]
+    elif field == "yaw_rad":
+        specification["yaw_rad"] = float(level)
+    elif field == "yaw_rate_radps":
+        specification["yaw_rate_radps"] = float(level)
+    else:
+        raise ValueError(f"unsupported boundary factor field: {field}")
+
+
+def _expanded_variant_specs(config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    specifications = [dict(row) for row in config.get("state_variants", [])]
+    for grid in config.get("factor_grids", []):
+        first = grid["x_factor"]
+        second = grid["y_factor"]
+        for x_index, x_level in enumerate(first["levels"]):
+            for y_index, y_level in enumerate(second["levels"]):
+                specification: dict[str, Any] = {
+                    "case_uid": (
+                        f"{grid['grid_uid']}_x{x_index:02d}_y{y_index:02d}"
+                    ),
+                    "source_case_uid": grid["source_case_uid"],
+                    "factor_name": first["name"],
+                    "factor_level": x_level,
+                    "factor_name_secondary": second["name"],
+                    "factor_level_secondary": y_level,
+                    "scan_group": grid["grid_uid"],
+                    "tags": ["TWO_FACTOR_GRID", str(grid["grid_uid"])],
+                }
+                _apply_factor_field(
+                    specification, str(first["field"]), float(x_level)
+                )
+                _apply_factor_field(
+                    specification, str(second["field"]), float(y_level)
+                )
+                specifications.append(specification)
+    return specifications
+
+
+def boundary_factor_metadata(
+    config: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return explicit, measured factor metadata keyed by generated case UID."""
+    metadata: dict[str, dict[str, Any]] = {}
+    for specification in _expanded_variant_specs(config):
+        uid = str(specification["case_uid"])
+        factor_name = str(specification.get("factor_name", ""))
+        if not factor_name:
+            raise ValueError(f"state variant lacks factor_name: {uid}")
+        if "factor_level" not in specification:
+            raise ValueError(f"state variant lacks factor_level: {uid}")
+        metadata[uid] = {
+            "factor_name": factor_name,
+            "factor_level": specification["factor_level"],
+            "factor_name_secondary": str(
+                specification.get("factor_name_secondary", "")
+            ),
+            "factor_level_secondary": specification.get(
+                "factor_level_secondary", ""
+            ),
+            "scan_group": str(
+                specification.get("scan_group", factor_name)
+            ),
+        }
+    return metadata
 
 
 def _state_variant(case: StaticCase, specification: Mapping[str, Any]) -> StaticCase:
@@ -227,7 +399,7 @@ def generate_boundary_cases(config: Mapping[str, Any]) -> list[StaticCase]:
     base_cases = generate_catalogue(base_config)
     by_uid = {case.case_uid: case for case in base_cases}
     cases = list(base_cases)
-    for specification in config.get("state_variants", []):
+    for specification in _expanded_variant_specs(config):
         source_uid = str(specification["source_case_uid"])
         if source_uid not in by_uid:
             raise ValueError(f"unknown source_case_uid: {source_uid}")
@@ -321,6 +493,7 @@ def run_boundary_selection(
             value if value.is_absolute() else (config_path.parent / value).resolve()
         )
     cases = generate_boundary_cases(config)
+    factor_metadata = boundary_factor_metadata(config)
     profile_paths = {}
     for name, path in config["profiles"].items():
         value = Path(path)
@@ -356,6 +529,7 @@ def run_boundary_selection(
                 **metrics,
                 "case_uid": case.case_uid,
                 "case_hash": case.case_hash,
+                "selection_content_hash": boundary_case_content_hash(case),
                 "expected_category": case.expected_category,
                 "profile": profile_name,
                 "status": result.status,
@@ -430,6 +604,16 @@ def run_boundary_selection(
                 ).hexdigest(),
                 "native_extension_path": result.native_extension_path,
                 "native_extension_sha256": result.native_extension_sha256,
+                **factor_metadata.get(
+                    case.case_uid,
+                    {
+                        "factor_name": "geometry_category",
+                        "factor_level": case.expected_category,
+                        "factor_name_secondary": "",
+                        "factor_level_secondary": "",
+                        "scan_group": "geometry_catalogue",
+                    },
+                ),
             }
             for key in (
                 "constraint_profile",
@@ -472,6 +656,9 @@ def run_boundary_selection(
         "best_backups": selection["best"][2 : 2 + backup_count],
         "worst_backups": selection["worst"][2 : 2 + backup_count],
         "eligible_case_uids": selection["eligible_case_uids"],
+        "best_ranking": selection["best_ranking"],
+        "worst_ranking": selection["worst_ranking"],
+        "hot_start_evidence": "PENDING_DYNAMIC_VALIDATION",
         "exclusions": selection["exclusions"],
         "cases": {},
     }
@@ -489,6 +676,7 @@ def run_boundary_selection(
         case = case_lookup[uid]
         frozen["cases"][uid] = {
             "case_hash": case.case_hash,
+            "selection_content_hash": boundary_case_content_hash(case),
             "expected_category": case.expected_category,
             "legacy_static": row_lookup[(uid, "legacy")],
             "safe_corridor_v1_static": row_lookup[
@@ -537,7 +725,33 @@ def run_boundary_selection(
             for rank, uid in enumerate(values)
         ],
     )
-    _render_selection_figures(rows, frozen, output_dir)
+    best_by_uid = {
+        str(row["case_uid"]): row for row in frozen["best_ranking"]
+    }
+    worst_by_uid = {
+        str(row["case_uid"]): row for row in frozen["worst_ranking"]
+    }
+    _write_csv(
+        output_dir / "complete_case_rankings.csv",
+        [
+            {
+                "case_uid": uid,
+                "best_rank": best_by_uid[uid]["rank"],
+                "worst_rank": worst_by_uid[uid]["rank"],
+                "classification": best_by_uid[uid]["classification"],
+                "failure_reason": best_by_uid[uid]["failure_reason"],
+                "factor_name": best_by_uid[uid]["factor_name"],
+                "factor_level": best_by_uid[uid]["factor_level"],
+                "factor_name_secondary": best_by_uid[uid][
+                    "factor_name_secondary"
+                ],
+                "factor_level_secondary": best_by_uid[uid][
+                    "factor_level_secondary"
+                ],
+            }
+            for uid in sorted(best_by_uid)
+        ],
+    )
     report = [
         "# Static capability boundary and frozen dynamic selection",
         "",
@@ -551,87 +765,34 @@ def run_boundary_selection(
         "The grid is a controlled capability scan; rows are not treated as",
         "independent population samples. Failures remain in all denominators.",
         "No dynamic simulator was started.",
+        "Static hot-start history is not claimed; hot-start evidence is "
+        "`PENDING_DYNAMIC_VALIDATION`.",
     ]
     (output_dir / "selection_report.md").write_text(
         "\n".join(report) + "\n", encoding="utf-8"
     )
-    return frozen
-
-
-def _render_selection_figures(
-    rows: list[dict[str, Any]], frozen: Mapping[str, Any], output_dir: Path
-) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    figure_dir = output_dir / "figures"
-    figure_dir.mkdir(parents=True, exist_ok=True)
-    new_rows = [row for row in rows if row["profile"] == "safe_corridor_v1"]
-    categories = sorted({str(row["expected_category"]) for row in new_rows})
-    classes = sorted({str(row["classification"]) for row in new_rows})
-    matrix = np.zeros((len(categories), len(classes)))
-    for row in new_rows:
-        matrix[categories.index(str(row["expected_category"])), classes.index(str(row["classification"]))] += 1
-    fig, ax = plt.subplots(figsize=(max(7, len(classes) * 1.4), max(5, len(categories) * 0.35)))
-    image = ax.imshow(matrix, aspect="auto", cmap="Blues")
-    ax.set_xticks(range(len(classes)), classes, rotation=30, ha="right")
-    ax.set_yticks(range(len(categories)), categories)
-    ax.set_title(f"safe_corridor_v1 capability boundary (n={len(new_rows)})")
-    fig.colorbar(image, ax=ax, label="case count")
-    fig.tight_layout()
-    fig.savefig(figure_dir / "capability_heatmap.png", dpi=160)
-    plt.close(fig)
-
-    reasons = sorted({str(row["failure_reason"]) for row in rows})
-    profiles = ["legacy", "safe_corridor_v1"]
-    counts = np.asarray(
-        [[sum(row["profile"] == p and row["failure_reason"] == r for row in rows) for r in reasons] for p in profiles]
+    from experiments.analyzers.static_comparison import (
+        generate_static_paper_outputs,
     )
-    fig, ax = plt.subplots(figsize=(10, 5))
-    bottom = np.zeros(len(profiles))
-    for index, reason in enumerate(reasons):
-        ax.bar(profiles, counts[:, index], bottom=bottom, label=reason)
-        bottom += counts[:, index]
-    ax.set_ylabel("case count")
-    ax.set_title(f"Failure reasons by profile (paired n={len(new_rows)})")
-    ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.01, 1.0))
-    fig.tight_layout()
-    fig.savefig(figure_dir / "failure_reason_stack.png", dpi=160)
-    plt.close(fig)
 
-    successful = [row for row in rows if row["status"] == "SUCCEEDED"]
-    fig, ax = plt.subplots(figsize=(7, 5))
-    for profile in profiles:
-        subset = [row for row in successful if row["profile"] == profile]
-        ax.scatter(
-            [_number(row, "runtime_ms", math.nan) for row in subset],
-            [_number(row, "guide_deviation_p95_m", math.nan) for row in subset],
-            label=f"{profile} (n={len(subset)})",
-            alpha=0.75,
+    generate_static_paper_outputs(output_dir, output_dir / "paper")
+    selection_receipt_path = output_dir / "artifact_receipt.json"
+    selection_receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "root": ".",
+                "artifacts": inventory_receipts(
+                    output_dir, exclude=(selection_receipt_path,)
+                ),
+            },
+            indent=2,
+            sort_keys=True,
         )
-    ax.set_xlabel("native runtime (ms)")
-    ax.set_ylabel("guide deviation p95 (m)")
-    ax.set_title("Runtime–shape Pareto view")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(figure_dir / "runtime_shape_pareto.png", dpi=160)
-    plt.close(fig)
-
-    lookup = {(row["case_uid"], row["profile"]): row for row in rows}
-    transitions: dict[tuple[str, str], int] = {}
-    for uid in sorted({row["case_uid"] for row in rows}):
-        key = (
-            str(lookup[(uid, "legacy")]["classification"]),
-            str(lookup[(uid, "safe_corridor_v1")]["classification"]),
-        )
-        transitions[key] = transitions.get(key, 0) + 1
-    transition_rows = [
-        {"legacy": left, "safe_corridor_v1": right, "case_count": count}
-        for (left, right), count in sorted(transitions.items())
-    ]
-    _write_csv(output_dir / "legacy_to_new_transitions.csv", transition_rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    return frozen
 
 
 def _render_selected_artifacts(
@@ -649,6 +810,7 @@ def _render_selected_artifacts(
     for uid in selected_uids:
         profile_dirs: dict[str, Path] = {}
         artifacts: list[str] = []
+        trajectory_rows: list[dict[str, Any]] = []
         for profile in ("legacy", "safe_corridor_v1"):
             case, result, metrics, detail = per_case[(uid, profile)]
             profile_dir = root / uid / profile
@@ -659,6 +821,38 @@ def _render_selected_artifacts(
             artifacts.extend(
                 str(path.relative_to(output_dir)) for path in paths
             )
+            trajectory = (
+                result.samples[:, 1:4]
+                if len(result.samples)
+                else np.empty((0, 3), dtype=np.float64)
+            )
+            trajectory_rows.extend(
+                {
+                    "case_uid": uid,
+                    "profile": profile,
+                    "series": "trajectory",
+                    "sample_index": index,
+                    "x_m": float(point[0]),
+                    "y_m": float(point[1]),
+                }
+                for index, point in enumerate(trajectory)
+            )
+
+        guide = per_case[(uid, "legacy")][0].guide_path_xyz
+        trajectory_rows.extend(
+            {
+                "case_uid": uid,
+                "profile": "guide",
+                "series": "guide",
+                "sample_index": index,
+                "x_m": float(point[0]),
+                "y_m": float(point[1]),
+            }
+            for index, point in enumerate(guide)
+        )
+        trajectory_path = root / uid / "trajectory_samples.csv"
+        _write_csv(trajectory_path, trajectory_rows)
+        artifacts.append(str(trajectory_path.relative_to(output_dir)))
 
         legacy_overview = next(profile_dirs["legacy"].glob("*_overview.png"))
         new_overview = next(
@@ -707,4 +901,19 @@ def _render_selected_artifacts(
         paired_gif = root / uid / f"{uid}_legacy_vs_safe.gif"
         imageio.mimsave(paired_gif, paired_frames, duration=0.1, loop=0)
         artifacts.append(str(paired_gif.relative_to(output_dir)))
+        legacy_case, legacy_result, _, legacy_detail = per_case[(uid, "legacy")]
+        _, safe_result, _, safe_detail = per_case[(uid, "safe_corridor_v1")]
+        paired_evidence = build_paired_static_gif_evidence(
+            paired_gif,
+            case=legacy_case,
+            legacy_result=legacy_result,
+            legacy_detail=legacy_detail,
+            legacy_gif_path=gifs[0],
+            safe_result=safe_result,
+            safe_detail=safe_detail,
+            safe_gif_path=gifs[1],
+        )
+        artifacts.extend(
+            str(path.relative_to(output_dir)) for path in paired_evidence
+        )
         frozen["cases"][uid]["artifact_paths"] = artifacts

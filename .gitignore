@@ -54,3 +54,9 @@ test_*.hpp
 
 PPT/
 docs/
+
+# Versioned experiment infrastructure, acceptance criteria, and executable tests.
+!run_scripts/
+!run_scripts/**
+run_scripts/**/__pycache__/
+run_scripts/**/*.pyc

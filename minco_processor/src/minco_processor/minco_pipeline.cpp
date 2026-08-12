@@ -471,12 +471,18 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     }
     result.corridor_min_overlap = std::numeric_limits<double>::infinity();
     const auto & segments = corridor_.segments();
+    const double junction_tolerance = std::max(1e-6, map_->resolution());
     for (size_t index = 0; index + 1U < segments.size(); ++index) {
       const double gap =
         (segments[index].end - segments[index + 1U].start).head<2>().norm();
+      if (!std::isfinite(gap) || gap > junction_tolerance) {
+        result.corridor_failure_reason = "CORRIDOR_DISCONNECTED";
+        result.failure_reason = result.corridor_failure_reason;
+        return finish();
+      }
       result.corridor_min_overlap = std::min(
         result.corridor_min_overlap,
-        segments[index].radius + segments[index + 1U].radius - gap);
+        std::min(segments[index].radius, segments[index + 1U].radius));
     }
     if (segments.size() == 1U) {
       result.corridor_min_overlap = segments.front().radius;
@@ -597,6 +603,20 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   result.timing_ms["optimizer_ms"] = elapsedMs(stage_start);
   result.optimizer_return_code = optimizer_->lastReturnCode();
   result.optimizer_iteration_count = optimizer_->lastIterationCount();
+  const auto & penalty_log = optimizer_->lastPenaltyLog();
+  auto penalty_value = [&penalty_log](int index) {
+      return index >= 0 && index < penalty_log.size() ? penalty_log(index) : 0.0;
+    };
+  const bool has_guide_term = penalty_log.size() > 6;
+  result.penalty_terms = {
+    {"energy", penalty_value(0)},
+    {"position", penalty_value(1)},
+    {"velocity", penalty_value(2)},
+    {"acceleration", penalty_value(3)},
+    {"attractor", penalty_value(4)},
+    {"guide_corridor", has_guide_term ? penalty_value(5) : 0.0},
+    {"time_barrier", penalty_value(has_guide_term ? 6 : 5)},
+  };
   if (!std::isfinite(result.objective)) {
     result.failure_reason = "OPTIMIZER_FAILED";
     return finish();
@@ -994,9 +1014,14 @@ bool MincoPipeline::validateTrajectory(
     ordered.reserve(static_cast<size_t>(std::max(2, config_.adaptive_sample_budget)));
     int subdivisions = 0;
     bool budget_exhausted = false;
+    bool depth_exhausted = false;
+    double depth_exhausted_displacement = std::numeric_limits<double>::quiet_NaN();
+    double depth_exhausted_time = std::numeric_limits<double>::quiet_NaN();
+    Eigen::Vector3d depth_exhausted_position =
+      Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
     std::function<void(const Node &, const Node &, int)> refine;
     refine = [&](const Node & left, const Node & right, int depth) {
-      if (budget_exhausted) {
+      if (budget_exhausted || depth_exhausted) {
         return;
       }
       const double dt = right.t - left.t;
@@ -1008,12 +1033,19 @@ bool MincoPipeline::validateTrajectory(
       const bool near_clearance =
         !left.query_ok || !right.query_ok ||
         left.clearance <= near_limit || right.clearance <= near_limit;
-      const bool split =
-        depth < config_.adaptive_max_depth && dt > 1e-6 &&
+      const bool needs_refine =
+        dt > 1e-6 &&
         (displacement > config_.adaptive_max_spatial_step ||
         derivative_change > config_.adaptive_max_spatial_step ||
         near_clearance);
-      if (split) {
+      if (needs_refine && depth >= config_.adaptive_max_depth) {
+        depth_exhausted = true;
+        depth_exhausted_displacement = displacement;
+        depth_exhausted_time = 0.5 * (left.t + right.t);
+        depth_exhausted_position = 0.5 * (left.pos + right.pos);
+        return;
+      }
+      if (needs_refine) {
         if (static_cast<int>(ordered.size()) + subdivisions + 3 >
           config_.adaptive_sample_budget)
         {
@@ -1040,6 +1072,12 @@ bool MincoPipeline::validateTrajectory(
       return reject(
         "VALIDATION_BUDGET_EXHAUSTED", static_cast<int>(ordered.size()), duration,
         end.pos, static_cast<double>(ordered.size()), config_.adaptive_sample_budget);
+    }
+    if (depth_exhausted) {
+      return reject(
+        "VALIDATION_DEPTH_EXHAUSTED", static_cast<int>(ordered.size()),
+        depth_exhausted_time, depth_exhausted_position,
+        depth_exhausted_displacement, config_.adaptive_max_spatial_step);
     }
 
     double min_clearance = std::numeric_limits<double>::infinity();

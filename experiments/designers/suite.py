@@ -22,6 +22,35 @@ class SuiteConfig:
     parameters: dict | None = None
 
 
+@dataclass(frozen=True)
+class SuiteBehavior:
+    resume: bool
+    retry_failed: bool
+    analysis_enabled: bool
+
+
+def resolve_suite_behavior(
+    config: SuiteConfig,
+    *,
+    resume: bool | None = None,
+    retry_failed: bool | None = None,
+    analysis_enabled: bool | None = None,
+) -> SuiteBehavior:
+    return SuiteBehavior(
+        resume=config.resume if resume is None else bool(resume),
+        retry_failed=(
+            bool((config.retry or {}).get("failed", False))
+            if retry_failed is None
+            else bool(retry_failed)
+        ),
+        analysis_enabled=(
+            bool((config.analysis or {}).get("enabled", True))
+            if analysis_enabled is None
+            else bool(analysis_enabled)
+        ),
+    )
+
+
 def load_suite(path: Path | str) -> SuiteConfig:
     path = Path(path); data = json.loads(path.read_text(encoding="utf-8"))
     if not data.get("suite_id") or not data.get("runs"): raise ValueError("suite_id and runs are required")

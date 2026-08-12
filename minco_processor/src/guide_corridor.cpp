@@ -111,9 +111,11 @@ bool GuideCorridor2D::contains(
     return false;
   }
   const int begin = std::max(0, previous_segment - 1);
+  const int end = std::min(
+    static_cast<int>(segments_.size()), std::max(0, previous_segment) + 2);
   double best_margin = -std::numeric_limits<double>::infinity();
   int best = -1;
-  for (int index = begin; index < static_cast<int>(segments_.size()); ++index) {
+  for (int index = begin; index < end; ++index) {
     const auto & segment = segments_[static_cast<size_t>(index)];
     const double distance = std::sqrt(std::max(
       0.0, squaredDistanceAndGradient(point, segment.start, segment.end, nullptr)));

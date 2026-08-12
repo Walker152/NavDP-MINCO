@@ -545,6 +545,10 @@ class PointNavTerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     arrive_goal = DoneTerm(func=arrival_terminal_check,
                            params={"robot_asset_cfg":SceneEntityCfg("robot")})
+    base_contact = DoneTerm(
+        func=mdp.illegal_contact,
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=DINGO_BASE_LINK), "threshold": DINGO_THRESHOLD},
+    )
     stuck = DoneTerm(func=stuck_terminal_check,
                       params={"robot_asset_cfg": SceneEntityCfg("robot"),
                               "window_size": 200,
@@ -632,4 +636,3 @@ class DingoExplorationCfg(ManagerBasedRLEnvCfg):
         self.sim.disable_contact_processing = True
 
         
-

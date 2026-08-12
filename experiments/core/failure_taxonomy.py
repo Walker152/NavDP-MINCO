@@ -54,6 +54,9 @@ _ROWS = {
     "VALIDATION_BUDGET_EXHAUSTED": (
         "CPP_VALIDATION", True, True, "TRY_NEXT_CANDIDATE"
     ),
+    "VALIDATION_DEPTH_EXHAUSTED": (
+        "CPP_VALIDATION", True, True, "TRY_NEXT_CANDIDATE"
+    ),
     "PY_ESDF_VALIDATION_CLEARANCE": (
         "PYTHON_VALIDATION", True, True, "TRY_NEXT_CANDIDATE"
     ),
@@ -90,11 +93,11 @@ def classify_reason(reason: str) -> dict[str, Any]:
     row = _ROWS.get(canonical)
     if row is None:
         return {
-            "failure_stage": "INFRASTRUCTURE",
+            "failure_stage": "UNKNOWN",
             "primary_reason": canonical or "UNKNOWN",
             "reason_source": "UNMAPPED",
             "recovery_action": "STOP",
-            "safe_failure": True,
+            "safe_failure": False,
             "retry_next_candidate": False,
         }
     stage, safe_failure, retry, recovery = row

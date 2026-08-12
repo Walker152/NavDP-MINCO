@@ -1,5 +1,7 @@
 import argparse
+from datetime import datetime, timezone
 import json
+from pathlib import Path
 
 from experiments.analyzers.run_analysis import analyze_run
 from experiments.analyzers.paired import compare_runs
@@ -8,6 +10,12 @@ from experiments.analyzers.validator import validate_run
 from experiments.closure import run_codex_closure
 from experiments.dynamic_pilot import prepare_dynamic_pilot
 from experiments.orchestrators.suite_runner import run_suite
+from experiments.orchestrators.research_workflow import (
+    WorkflowOptions,
+    run_all_workflows,
+    run_simulation_workflow,
+    run_static_workflow,
+)
 from experiments.static.benchmark import (
     generate_static_cases,
     replay_static_case,
@@ -20,7 +28,7 @@ from experiments.static.selection import run_boundary_selection
 def build_parser():
     parser = argparse.ArgumentParser(description="NavDP–MINCO experiment toolkit (mock-safe by default)")
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run-suite"); run.add_argument("--config", required=True); run.add_argument("--backend", default=None, choices=["mock", "isaac"]); run.add_argument("--resume", action="store_true"); run.add_argument("--retry-failed", action="store_true"); run.add_argument("--dry-run", action="store_true"); run.add_argument("--allow-real-simulation", action="store_true"); run.add_argument("--skip-video", action="store_true"); run.add_argument("--analysis-only", action="store_true")
+    run = commands.add_parser("run-suite"); run.add_argument("--config", required=True); run.add_argument("--backend", default=None, choices=["mock", "isaac"]); run.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None); run.add_argument("--retry-failed", action=argparse.BooleanOptionalAction, default=None); run.add_argument("--analysis", action=argparse.BooleanOptionalAction, default=None); run.add_argument("--dry-run", action="store_true"); run.add_argument("--allow-real-simulation", action="store_true"); run.add_argument("--skip-video", action="store_true"); run.add_argument("--analysis-only", action="store_true")
     validate = commands.add_parser("validate"); validate.add_argument("run_dir")
     analyze = commands.add_parser("analyze-run"); analyze.add_argument("run_dir")
     compare = commands.add_parser("compare"); compare.add_argument("--baseline", required=True); compare.add_argument("--method", required=True); compare.add_argument("--output", required=True)
@@ -63,12 +71,39 @@ def build_parser():
     closure.add_argument("--resume", action="store_true")
     closure.add_argument("--retry-failed", action="store_true")
     closure.add_argument("--skip-video", action="store_true")
+    for name in (
+        "run-static-workflow",
+        "run-simulation-workflow",
+        "run-all-workflows",
+    ):
+        workflow = commands.add_parser(name)
+        workflow.add_argument("--output")
+        workflow.add_argument("--resume", action="store_true")
+        workflow.add_argument("--retry-failed", action="store_true")
+        workflow.add_argument("--allow-real-simulation", action="store_true")
+        workflow.add_argument("--full-suite", action="store_true")
+        workflow.add_argument("--skip-video", action="store_true")
     return parser
+
+
+def _workflow_options(args) -> WorkflowOptions:
+    output = args.output or (
+        "results/navdp_minco_paper_"
+        + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    )
+    return WorkflowOptions(
+        output_root=Path(output),
+        resume=args.resume,
+        retry_failed=args.retry_failed,
+        allow_real_simulation=args.allow_real_simulation,
+        full_suite=args.full_suite,
+        skip_video=args.skip_video,
+    )
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.command == "run-suite": result = run_suite(args.config, args.backend, args.resume, retry_failed=args.retry_failed, dry_run=args.dry_run, analysis_only=args.analysis_only, allow_real_simulation=args.allow_real_simulation, skip_video=args.skip_video); print(json.dumps(result.__dict__))
+    if args.command == "run-suite": result = run_suite(args.config, args.backend, args.resume, retry_failed=args.retry_failed, dry_run=args.dry_run, analysis_only=args.analysis_only, allow_real_simulation=args.allow_real_simulation, skip_video=args.skip_video, analysis_enabled=args.analysis); print(json.dumps(result.__dict__))
     elif args.command == "validate": result = validate_run(args.run_dir); print(json.dumps(result, indent=2)); return 0 if result["valid"] else 1
     elif args.command == "analyze-run": print(json.dumps(analyze_run(args.run_dir), indent=2))
     elif args.command == "analyze-suite-readonly":
@@ -155,5 +190,18 @@ def main(argv=None):
         )
         print(json.dumps(result, indent=2))
         return 0 if not result["validation_errors"] else 1
+    elif args.command in {
+        "run-static-workflow",
+        "run-simulation-workflow",
+        "run-all-workflows",
+    }:
+        runner = {
+            "run-static-workflow": run_static_workflow,
+            "run-simulation-workflow": run_simulation_workflow,
+            "run-all-workflows": run_all_workflows,
+        }[args.command]
+        result = runner(repo_root=Path("."), options=_workflow_options(args))
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] in {"COMPLETE", "READY_FOR_REAL_RUN"} else 1
     else: print(json.dumps(compare_runs(args.baseline, args.method, args.output), indent=2))
     return 0

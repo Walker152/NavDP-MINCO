@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -10,6 +12,12 @@ from typing import Mapping
 import cv2
 import imageio.v2 as imageio
 import numpy as np
+
+from experiments.recorders.video_recorder import validate_video_receipt
+from experiments.visualizers.video_evidence import (
+    build_video_evidence_package,
+    validate_video_evidence_package,
+)
 
 
 PANEL_ORDER = ("raw", "minco-cold", "minco-hot")
@@ -22,6 +30,8 @@ class VideoSource:
     receipt_path: Path
     terminal_status: str = "UNKNOWN"
     terminal_time_s: float | None = None
+    control_samples_path: Path | None = None
+    control_episode_uid: str | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,7 @@ class VideoClock:
     error_bound_s: float
     exact_wall_clock: bool
     frame_timestamps_s: tuple[float, ...] = ()
+    clock_domain: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +55,64 @@ class PairedVideoReceipt:
     panel_order: tuple[str, ...]
     sync_method_by_variant: Mapping[str, str]
     sync_error_bound_s_by_variant: Mapping[str, float]
+    exact_wall_clock_alignment: bool = False
+    common_clock_domain: str | None = None
+    evidence_package_path: Path | None = None
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _decoded_video_truth(path: Path) -> dict[str, object]:
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise ValueError(f"cannot open video: {path}")
+    count = 0
+    shape = None
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            current = [int(value) for value in frame.shape]
+            if shape is None:
+                shape = current
+            elif shape != current:
+                raise ValueError(f"decoded frame shape changed: {path}")
+            count += 1
+    finally:
+        capture.release()
+    if count <= 0 or shape is None:
+        raise ValueError(f"video contains no readable frames: {path}")
+    return {"frame_count": count, "shape": shape}
+
+
+def _validate_source_truth(source: VideoSource, clock: VideoClock) -> None:
+    payload = json.loads(source.receipt_path.read_text(encoding="utf-8"))
+    if int(payload.get("schema_version", 1)) >= 2:
+        errors = validate_video_receipt(source.path, source.receipt_path)
+        if errors:
+            raise ValueError(
+                f"source video receipt mismatch ({source.variant}): "
+                + "; ".join(errors)
+            )
+    decoded = _decoded_video_truth(source.path)
+    if decoded["frame_count"] != clock.frame_count:
+        raise ValueError(
+            f"source decoded frame_count does not match receipt "
+            f"({source.variant}): {decoded['frame_count']} != {clock.frame_count}"
+        )
+    declared_shape = payload.get("decoded_shape", payload.get("shape"))
+    if declared_shape is not None and list(declared_shape) != decoded["shape"]:
+        raise ValueError(
+            f"source decoded shape does not match receipt ({source.variant}): "
+            f"{decoded['shape']} != {declared_shape}"
+        )
 
 
 def _finite_positive(value: object, name: str) -> float:
@@ -91,14 +160,27 @@ def read_video_clock(
         ]
         error_bound = 0.5 * max(gaps, default=1.0 / fps)
         duration = timestamps[-1] - timestamps[0] + 1.0 / fps
+        clock_domain = str(
+            receipt.get("frame_timestamp_clock_domain", "")
+        ).strip() or None
+        absolute_epoch = (
+            receipt.get("frame_timestamps_are_absolute_epoch") is True
+            and clock_domain is not None
+            and all(value >= 0.0 for value in timestamps)
+        )
         return VideoClock(
             fps=fps,
             frame_count=frame_count,
             duration_s=duration,
-            method="RECORDED_FRAME_TIMESTAMPS",
+            method=(
+                "RECORDED_ABSOLUTE_TIMESTAMPS"
+                if absolute_epoch
+                else "RECORDED_RELATIVE_TIMESTAMPS"
+            ),
             error_bound_s=error_bound,
-            exact_wall_clock=True,
+            exact_wall_clock=absolute_epoch,
             frame_timestamps_s=timestamps,
+            clock_domain=clock_domain,
         )
 
     return VideoClock(
@@ -143,15 +225,315 @@ class _FrameCursor:
         self.capture.release()
 
 
-def _source_frame_index(clock: VideoClock, output_time_s: float) -> int:
+def _source_frame_index(
+    clock: VideoClock,
+    output_time_s: float,
+    *,
+    timeline_origin_s: float | None = None,
+) -> int:
     if clock.frame_timestamps_s:
-        origin = clock.frame_timestamps_s[0]
-        relative = np.asarray(clock.frame_timestamps_s) - origin
-        return int(np.argmin(np.abs(relative - output_time_s)))
+        target = output_time_s
+        if timeline_origin_s is not None:
+            target += timeline_origin_s
+            timestamps = np.asarray(clock.frame_timestamps_s)
+        else:
+            timestamps = (
+                np.asarray(clock.frame_timestamps_s)
+                - clock.frame_timestamps_s[0]
+            )
+        return int(np.argmin(np.abs(timestamps - target)))
     return min(
         int(math.floor(output_time_s * clock.fps + 1e-9)),
         clock.frame_count - 1,
     )
+
+
+def _last_native_time_s(clock: VideoClock) -> float:
+    if clock.frame_timestamps_s:
+        return clock.frame_timestamps_s[-1] - clock.frame_timestamps_s[0]
+    return (clock.frame_count - 1) / clock.fps
+
+
+def _optional_control_value(row: Mapping[str, str], field: str) -> object:
+    value = str(row.get(field, "")).strip()
+    if not value:
+        return ""
+    try:
+        numeric = float(value)
+    except ValueError:
+        return value
+    return numeric if math.isfinite(numeric) else ""
+
+
+def _load_control_rows(
+    source: VideoSource,
+    episode_uid: str,
+) -> tuple[dict[str, str], ...]:
+    path = source.control_samples_path
+    if path is None:
+        return ()
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"control_samples.csv does not exist: {path}")
+    expected_uid = source.control_episode_uid or episode_uid
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = [
+            row
+            for row in csv.DictReader(stream)
+            if row.get("episode_uid") == expected_uid
+        ]
+    timed = []
+    for row in rows:
+        try:
+            timestamp = float(row.get("timestamp_monotonic_s", ""))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(timestamp):
+            timed.append((timestamp, row))
+    timed.sort(key=lambda item: item[0])
+    if any(right[0] <= left[0] for left, right in zip(timed, timed[1:])):
+        raise ValueError(
+            f"control timestamps must be strictly increasing: {source.variant}"
+        )
+    return tuple(row for _, row in timed)
+
+
+def _control_time_axis(rows: tuple[dict[str, str], ...]) -> np.ndarray:
+    if not rows:
+        return np.asarray([], dtype=np.float64)
+    absolute = np.asarray(
+        [float(row["timestamp_monotonic_s"]) for row in rows],
+        dtype=np.float64,
+    )
+    return absolute - absolute[0]
+
+
+def _aligned_control_fields(
+    row: Mapping[str, str],
+    *,
+    source_index: int,
+    source_time_s: float,
+    alignment_error_s: float,
+    variant: str,
+) -> dict[str, object]:
+    try:
+        recorded_index = int(row.get("frame_idx", source_index))
+    except (TypeError, ValueError):
+        recorded_index = source_index
+    result = {
+        "source_sample_index": recorded_index,
+        "source_time_s": source_time_s,
+        "x_m": _optional_control_value(row, "robot_x_m"),
+        "y_m": _optional_control_value(row, "robot_y_m"),
+        "yaw_rad": _optional_control_value(row, "robot_yaw_rad"),
+        "clearance_m": _optional_control_value(row, "executed_clearance_m"),
+        "speed_mps": _optional_control_value(row, "actual_v_mps"),
+        "yaw_rate_rps": _optional_control_value(row, "actual_w_radps"),
+        "tracking_error_m": _optional_control_value(
+            row, "time_aligned_position_error_m"
+        ),
+        "command_linear_mps": _optional_control_value(row, "cmd_v_mps"),
+        "command_angular_rps": _optional_control_value(row, "cmd_w_radps"),
+        "optimizer_state": str(row.get("mpc_solver_status", "")).strip(),
+        "control_state": str(row.get("control_state", "")).strip(),
+        "planning_state": str(row.get("planning_state", "")).strip(),
+        "data_availability": (
+            f"ALIGNED_CONTROL_SAMPLE:{variant};"
+            f"NEAREST_RELATIVE_TIME_ERROR_S={alignment_error_s:.9g}"
+        ),
+    }
+    return result
+
+
+def _evidence_frame_rows(
+    ordered: tuple[str, ...],
+    sources: Mapping[str, VideoSource],
+    clocks: Mapping[str, VideoClock],
+    *,
+    output_frames: int,
+    output_fps: float,
+    timeline_origin_s: float | None,
+    control_rows_by_variant: Mapping[str, tuple[dict[str, str], ...]],
+) -> list[dict[str, object]]:
+    metric_variant = next(
+        (variant for variant in ordered if control_rows_by_variant.get(variant)),
+        None,
+    )
+    metric_controls = (
+        control_rows_by_variant[metric_variant] if metric_variant else ()
+    )
+    metric_times = _control_time_axis(metric_controls)
+    rows = []
+    for output_index in range(output_frames):
+        output_time = output_index / output_fps
+        mappings = []
+        for variant in ordered:
+            source_index = _source_frame_index(
+                clocks[variant],
+                output_time,
+                timeline_origin_s=timeline_origin_s,
+            )
+            frozen = output_time > _last_native_time_s(clocks[variant]) + 1e-9
+            mappings.append(
+                f"{variant}:{source_index}:{'FROZEN' if frozen else 'LIVE'}"
+            )
+        row = {
+                "frame_index": output_index,
+                "time_s": output_time,
+                "event_tags": "|".join(mappings),
+                "data_availability": "VIDEO_CLOCK_ONLY;CONTROL_SAMPLES_UNAVAILABLE",
+        }
+        if metric_variant is not None:
+            control_index = int(np.argmin(np.abs(metric_times - output_time)))
+            row.update(
+                _aligned_control_fields(
+                    metric_controls[control_index],
+                    source_index=control_index,
+                    source_time_s=float(metric_times[control_index]),
+                    alignment_error_s=abs(
+                        float(metric_times[control_index]) - output_time
+                    ),
+                    variant=metric_variant,
+                )
+            )
+            source = sources[metric_variant]
+            terminal_time = source.terminal_time_s
+            if terminal_time is not None and math.isfinite(terminal_time):
+                terminal_index = min(
+                    output_frames - 1,
+                    max(0, int(round(terminal_time * output_fps))),
+                )
+                if output_index == terminal_index:
+                    status = str(source.terminal_status).upper()
+                    if status == "COLLISION":
+                        row["collision"] = True
+                    if status == "GOAL_REACHED":
+                        row["goal_reached"] = True
+        rows.append(row)
+    return rows
+
+
+def _evidence_event_rows(
+    ordered: tuple[str, ...],
+    sources: Mapping[str, VideoSource],
+    clocks: Mapping[str, VideoClock],
+    *,
+    output_frames: int,
+    output_fps: float,
+    control_rows_by_variant: Mapping[str, tuple[dict[str, str], ...]],
+) -> list[dict[str, object]]:
+    last_output_index = output_frames - 1
+    last_output_time = last_output_index / output_fps
+    rows = []
+    for variant in ordered:
+        clock = clocks[variant]
+        source = sources[variant]
+        native_end = _last_native_time_s(clock)
+        first_frozen = int(math.floor(native_end * output_fps + 1e-9)) + 1
+        if first_frozen <= last_output_index:
+            rows.append(
+                {
+                    "event_uid": f"{variant}-freeze-last-frame",
+                    "event_type": "FREEZE_LAST_FRAME",
+                    "start_frame_index": first_frozen,
+                    "end_frame_index": last_output_index,
+                    "start_time_s": first_frozen / output_fps,
+                    "end_time_s": last_output_time,
+                    "severity": "INFO",
+                    "source_uid": variant,
+                    "metric_name": "synchronization_error_bound",
+                    "metric_value": clock.error_bound_s,
+                    "metric_unit": "s",
+                    "description_zh": (
+                        f"{variant} 原视频结束后保留末帧；该区间不表示机器人继续运动。"
+                    ),
+                    "data_availability": "DERIVED_FROM_VIDEO_CLOCK",
+                }
+            )
+        terminal_time = source.terminal_time_s
+        if terminal_time is None or not math.isfinite(terminal_time):
+            terminal_time = min(native_end, last_output_time)
+            availability = "TERMINAL_TIME_UNAVAILABLE"
+        else:
+            terminal_time = min(max(0.0, terminal_time), last_output_time)
+            availability = "RECORDED_OR_CLAMPED_TO_MEDIA"
+        terminal_index = min(
+            last_output_index,
+            max(0, int(round(terminal_time * output_fps))),
+        )
+        terminal_time = terminal_index / output_fps
+        terminal_status = str(source.terminal_status or "UNKNOWN").upper()
+        terminal_event_type = {
+            "COLLISION": "COLLISION",
+            "GOAL_REACHED": "GOAL_REACHED",
+        }.get(terminal_status, "TERMINATION")
+        rows.append(
+            {
+                "event_uid": f"{variant}-terminal-status",
+                "event_type": terminal_event_type,
+                "start_frame_index": terminal_index,
+                "end_frame_index": terminal_index,
+                "start_time_s": terminal_time,
+                "end_time_s": terminal_time,
+                "severity": "INFO",
+                "source_uid": variant,
+                "description_zh": (
+                    f"{variant} 终止状态：{source.terminal_status or 'UNKNOWN'}。"
+                ),
+                "data_availability": availability,
+            }
+        )
+        controls = control_rows_by_variant.get(variant, ())
+        times = _control_time_axis(controls)
+        previous_state = None
+        for control_index, (control, control_time) in enumerate(
+            zip(controls, times)
+        ):
+            frame_index = min(
+                last_output_index,
+                max(0, int(round(float(control_time) * output_fps))),
+            )
+            event_time = frame_index / output_fps
+            state = str(control.get("control_state", "")).strip()
+            if state and previous_state is not None and state != previous_state:
+                rows.append(
+                    {
+                        "event_uid": f"{variant}-control-state-{control_index}",
+                        "event_type": "CONTROL_STATE_CHANGE",
+                        "start_frame_index": frame_index,
+                        "end_frame_index": frame_index,
+                        "start_time_s": event_time,
+                        "end_time_s": event_time,
+                        "severity": "INFO",
+                        "source_uid": variant,
+                        "description_zh": f"{variant} 控制状态由 {previous_state} 变为 {state}。",
+                        "data_availability": "RECORDED_CONTROL_SAMPLE",
+                    }
+                )
+            if state:
+                previous_state = state
+            if str(control.get("wheel_saturated", "")).strip().lower() in {
+                "1", "true", "yes",
+            }:
+                rows.append(
+                    {
+                        "event_uid": f"{variant}-wheel-saturation-{control_index}",
+                        "event_type": "WHEEL_SATURATION",
+                        "start_frame_index": frame_index,
+                        "end_frame_index": frame_index,
+                        "start_time_s": event_time,
+                        "end_time_s": event_time,
+                        "severity": "WARNING",
+                        "source_uid": variant,
+                        "description_zh": f"{variant} 记录到轮速饱和。",
+                        "data_availability": "RECORDED_CONTROL_SAMPLE",
+                    }
+                )
+    return rows
+
+
+def _evidence_package_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}_evidence")
 
 
 def _normalize_panel(frame: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -209,6 +591,7 @@ def render_paired_episode_video(
     output_path: Path | str,
     *,
     episode_uid: str,
+    data_source: str = "UNKNOWN",
 ) -> PairedVideoReceipt:
     if len(sources) < 2:
         raise ValueError("paired video requires at least two variants")
@@ -220,14 +603,32 @@ def render_paired_episode_video(
         variant: read_video_clock(source.path, source.receipt_path)
         for variant, source in sources.items()
     }
+    for variant, source in sources.items():
+        _validate_source_truth(source, clocks[variant])
     output_fps = max(clock.fps for clock in clocks.values())
+    clock_domains = {clock.clock_domain for clock in clocks.values()}
+    exact_wall_clock_alignment = (
+        all(clock.exact_wall_clock for clock in clocks.values())
+        and len(clock_domains) == 1
+        and None not in clock_domains
+    )
+    timeline_origin_s = (
+        min(clock.frame_timestamps_s[0] for clock in clocks.values())
+        if exact_wall_clock_alignment
+        else None
+    )
+    if exact_wall_clock_alignment:
+        output_duration_s = max(
+            clock.frame_timestamps_s[-1] + 1.0 / clock.fps
+            for clock in clocks.values()
+        ) - float(timeline_origin_s)
+    else:
+        output_duration_s = max(clock.duration_s for clock in clocks.values())
     output_frames = max(
         1,
         int(
             math.ceil(
-                max(clock.duration_s for clock in clocks.values())
-                * output_fps
-                - 1e-9
+                output_duration_s * output_fps - 1e-9
             )
         ),
     )
@@ -256,7 +657,11 @@ def render_paired_episode_video(
             output_time = output_index / output_fps
             panels = []
             for variant in ordered:
-                source_index = _source_frame_index(clocks[variant], output_time)
+                source_index = _source_frame_index(
+                    clocks[variant],
+                    output_time,
+                    timeline_origin_s=timeline_origin_s,
+                )
                 frame = cursors[variant].frame_at(source_index)
                 panel = _normalize_panel(frame, panel_width, panel_height)
                 panels.append(
@@ -270,6 +675,105 @@ def render_paired_episode_video(
         for cursor in cursors.values():
             cursor.close()
 
+    evidence_path = _evidence_package_path(output_path)
+    control_rows_by_variant = {
+        variant: _load_control_rows(sources[variant], episode_uid)
+        for variant in ordered
+    }
+    metric_variant = next(
+        (variant for variant in ordered if control_rows_by_variant[variant]),
+        None,
+    )
+    metric_control_times = (
+        _control_time_axis(control_rows_by_variant[metric_variant])
+        if metric_variant
+        else np.asarray([], dtype=np.float64)
+    )
+    control_alignment_error = (
+        max(
+            float(np.min(np.abs(metric_control_times - index / output_fps)))
+            for index in range(output_frames)
+        )
+        if metric_variant is not None
+        else None
+    )
+    missing_controls = [
+        variant for variant in ordered if not control_rows_by_variant[variant]
+    ]
+    frame_rows = _evidence_frame_rows(
+        ordered,
+        sources,
+        clocks,
+        output_frames=output_frames,
+        output_fps=output_fps,
+        timeline_origin_s=timeline_origin_s,
+        control_rows_by_variant=control_rows_by_variant,
+    )
+    event_rows = _evidence_event_rows(
+        ordered,
+        sources,
+        clocks,
+        output_frames=output_frames,
+        output_fps=output_fps,
+        control_rows_by_variant=control_rows_by_variant,
+    )
+    missing_variants = [variant for variant in PANEL_ORDER if variant not in sources]
+    method_summary = "；".join(
+        f"{variant}={clocks[variant].method}, 误差界≤{clocks[variant].error_bound_s:.6g}s"
+        for variant in ordered
+    )
+    build_video_evidence_package(
+        output_path,
+        evidence_path,
+        evidence_uid=f"{episode_uid}-paired-video-evidence",
+        media_uid=f"{episode_uid}-paired-video",
+        data_source=data_source,
+        fps=output_fps,
+        episode_uid=episode_uid,
+        frame_rows=frame_rows,
+        event_rows=event_rows,
+        caption_overrides={
+            "scene_zh": f"共享 episode_uid={episode_uid} 的并排闭环回放",
+            "method_zh": " / ".join(ordered),
+            "metrics_units_zh": (
+                "逐帧数值字段锚定方法="
+                + (metric_variant or "无可用控制样本")
+                + "；位置/间隙/误差：m；时间：s；速度：m/s；角量：rad"
+            ),
+            "time_basis_zh": (
+                "共享绝对墙钟时间轴"
+                if exact_wall_clock_alignment
+                else "相对媒体时间轴；不声称精确墙钟同步"
+            ),
+            "synchronization_zh": (
+                f"同步方法与同步误差：{method_summary}；"
+                "较短视频采用末帧冻结，冻结段不代表继续运动；"
+                + (
+                    f"逐帧数值以 {metric_variant} 控制样本首时刻为相对原点做最近邻对齐，"
+                    f"最大对齐误差≤{control_alignment_error:.6g}s"
+                    if metric_variant is not None
+                    else "无控制样本可供逐帧数值对齐"
+                )
+            ),
+            "missing_data_zh": (
+                "缺失证据/面板："
+                + ("、".join(missing_variants) if missing_variants else "无")
+                + "；缺失控制样本："
+                + ("、".join(missing_controls) if missing_controls else "无")
+                + "；未记录指标保持为空"
+            ),
+            "failure_handling_zh": (
+                "各方法终止状态独立标注；末帧冻结事件显式记录于事件表"
+            ),
+            "evidence_boundary_zh": (
+                "仅证明已录制图像、声明时间轴及终止状态；不替代碰撞、ESDF或因果证据"
+            ),
+            "conclusion_limit_zh": (
+                "非共享绝对时钟的面板只能作误差界内的相对时序比较"
+            ),
+        },
+    )
+
     receipt = PairedVideoReceipt(
         episode_uid=episode_uid,
         output_path=output_path,
@@ -282,6 +786,11 @@ def render_paired_episode_video(
         sync_error_bound_s_by_variant=MappingProxyType(
             {variant: clocks[variant].error_bound_s for variant in ordered}
         ),
+        exact_wall_clock_alignment=exact_wall_clock_alignment,
+        common_clock_domain=(
+            next(iter(clock_domains)) if exact_wall_clock_alignment else None
+        ),
+        evidence_package_path=evidence_path,
     )
     sidecar = output_path.with_suffix(".comparison.json")
     sidecar.write_text(
@@ -298,7 +807,43 @@ def render_paired_episode_video(
                 "sync_error_bound_s_by_variant": dict(
                     receipt.sync_error_bound_s_by_variant
                 ),
+                "exact_wall_clock_alignment": (
+                    receipt.exact_wall_clock_alignment
+                ),
+                "common_clock_domain": receipt.common_clock_domain,
                 "shorter_variants_end_behavior": "FREEZE_LAST_FRAME",
+                "video_size_bytes": output_path.stat().st_size,
+                "video_sha256": _sha256(output_path),
+                "evidence_package": evidence_path.name,
+                "source_receipts": {
+                    variant: {
+                        "video_path": str(sources[variant].path.resolve()),
+                        "video_sha256": _sha256(sources[variant].path),
+                        "receipt_path": str(
+                            sources[variant].receipt_path.resolve()
+                        ),
+                        "receipt_sha256": _sha256(
+                            sources[variant].receipt_path
+                        ),
+                        **(
+                            {
+                                "control_samples_path": str(
+                                    Path(
+                                        sources[variant].control_samples_path
+                                    ).resolve()
+                                ),
+                                "control_samples_sha256": _sha256(
+                                    Path(
+                                        sources[variant].control_samples_path
+                                    )
+                                ),
+                            }
+                            if sources[variant].control_samples_path is not None
+                            else {}
+                        ),
+                    }
+                    for variant in ordered
+                },
             },
             indent=2,
         )
@@ -306,3 +851,58 @@ def render_paired_episode_video(
         encoding="utf-8",
     )
     return receipt
+
+
+def validate_paired_video_bundle(output_path: Path | str) -> list[str]:
+    output_path = Path(output_path).resolve()
+    errors = []
+    sidecar = output_path.with_suffix(".comparison.json")
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"unreadable paired video sidecar: {error}"]
+    if not output_path.is_file():
+        errors.append(f"missing paired video: {output_path}")
+    else:
+        if payload.get("video_size_bytes") != output_path.stat().st_size:
+            errors.append("paired video size mismatch")
+        if payload.get("video_sha256") != _sha256(output_path):
+            errors.append("paired video hash mismatch")
+        try:
+            decoded = _decoded_video_truth(output_path)
+        except ValueError as error:
+            errors.append(str(error))
+        else:
+            if decoded["frame_count"] != payload.get("frame_count"):
+                errors.append("paired video decoded frame_count mismatch")
+    evidence_name = payload.get("evidence_package")
+    evidence_path = output_path.parent / str(evidence_name or "")
+    if not evidence_name:
+        errors.append("paired video sidecar missing evidence_package")
+    else:
+        errors.extend(validate_video_evidence_package(evidence_path))
+    for variant, source in payload.get("source_receipts", {}).items():
+        for kind in ("video", "receipt"):
+            path = Path(str(source.get(f"{kind}_path", "")))
+            if not path.is_file():
+                errors.append(f"missing {variant} source {kind}")
+            elif _sha256(path) != source.get(f"{kind}_sha256"):
+                errors.append(f"{variant} source {kind} hash mismatch")
+        control_path_text = source.get("control_samples_path")
+        if control_path_text:
+            control_path = Path(str(control_path_text))
+            if not control_path.is_file():
+                errors.append(f"missing {variant} source control_samples")
+            elif _sha256(control_path) != source.get("control_samples_sha256"):
+                errors.append(f"{variant} source control_samples hash mismatch")
+    return errors
+
+
+__all__ = [
+    "PairedVideoReceipt",
+    "VideoClock",
+    "VideoSource",
+    "read_video_clock",
+    "render_paired_episode_video",
+    "validate_paired_video_bundle",
+]

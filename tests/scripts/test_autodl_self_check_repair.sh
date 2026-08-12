@@ -50,7 +50,7 @@ write_valid_plan() {
   "commands": [
     [
       "conda", "run", "--no-capture-output", "-n", "isaaclab",
-      "bash", "/fixture/IsaacLab/isaaclab.sh", "-p", "/fixture/NavDP/eval_pointgoal_wheeled.py",
+      "bash", "/fixture/IsaacLab/isaaclab.sh", "-p", "/fixture/NavDP/run_scripts/eval_pointgoal_wheeled.py",
       "--experiment-variant", "raw",
       "--episode-uids", "ep_0", "ep_1",
       "--headless",
@@ -64,7 +64,7 @@ write_valid_plan() {
     ],
     [
       "conda", "run", "--no-capture-output", "-n", "isaaclab",
-      "bash", "/fixture/IsaacLab/isaaclab.sh", "-p", "/fixture/NavDP/eval_pointgoal_wheeled.py",
+      "bash", "/fixture/IsaacLab/isaaclab.sh", "-p", "/fixture/NavDP/run_scripts/eval_pointgoal_wheeled.py",
       "--experiment-variant", "minco-hot",
       "--episode-uids", "ep_0", "ep_1",
       "--headless",
@@ -146,9 +146,10 @@ make_fixture_repo() {
     "$root/experiments/simulators" \
     "$root/experiments/configs" \
     "$root/baselines/navdp" \
+    "$root/run_scripts" \
     "$root/results"
 
-  cat >"$root/eval_pointgoal_wheeled.py" <<'PY'
+  cat >"$root/run_scripts/eval_pointgoal_wheeled.py" <<'PY'
 parser.add_argument("--minco_start_validation_exemption_radius")
 parser.add_argument("--minco_penalty_weight_attractor")
 parser.add_argument("--navdp-seeds")
@@ -663,8 +664,8 @@ for required_report in \
 done
 
 cat >"$CASE_PS" <<EOF
-910101 1 910101 910101 900 $CASE_BIN/conda run -n isaaclab bash $CASE_ISAAC/isaaclab.sh -p $CASE_REPO/eval_pointgoal_wheeled.py
-910102 910101 910101 910101 890 $CASE_WORK/conda/envs/isaaclab/bin/python $CASE_REPO/eval_pointgoal_wheeled.py
+910101 1 910101 910101 900 $CASE_BIN/conda run -n isaaclab bash $CASE_ISAAC/isaaclab.sh -p $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
+910102 910101 910101 910101 890 $CASE_WORK/conda/envs/isaaclab/bin/python $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 910201 1 910201 910201 800 python $CASE_REPO/baselines/navdp/navdp_server.py --port 8889 --api-token SUPERSECRET --authorization BEARERSECRET https://example.invalid/?token=URLSECRET
 910301 1 910301 910301 700 python /other/NavDP/eval_pointgoal_wheeled.py
 910401 1 910401 910401 600 python unrelated_worker.py
@@ -709,8 +710,8 @@ parent_term_line="$(grep -n -- '-TERM 910101' "$CASE_KILL_LOG" | head -n 1 | cut
 
 prepare_case active-and-readers
 cat >"$CASE_PS" <<EOF
-920100 920000 920100 920100 10 python $CASE_REPO/eval_pointgoal_wheeled.py
-920200 1 920200 920200 900 vim $CASE_REPO/eval_pointgoal_wheeled.py
+920100 920000 920100 920100 10 python $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
+920200 1 920200 920200 900 vim $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 920300 1 920300 920300 900 tail -f $CASE_REPO/baselines/navdp/navdp_server.py
 EOF
 run_prepared_case --skip-smoke --skip-dry-run
@@ -722,9 +723,9 @@ run_prepared_case --skip-smoke --skip-dry-run
 
 prepare_case target-path-as-data
 cat >"$CASE_PS" <<EOF
-923100 1 923100 923100 900 python -c print_data $CASE_REPO/eval_pointgoal_wheeled.py
-923200 1 923200 923200 900 bash -c echo_data $CASE_REPO/eval_pointgoal_wheeled.py
-923300 1 923300 923300 900 conda run -n isaaclab python -c print_data $CASE_REPO/eval_pointgoal_wheeled.py
+923100 1 923100 923100 900 python -c print_data $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
+923200 1 923200 923200 900 bash -c echo_data $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
+923300 1 923300 923300 900 conda run -n isaaclab python -c print_data $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 EOF
 run_prepared_case --skip-smoke --skip-dry-run
 [[ "$CASE_STATUS" == 0 ]] || fail "target paths used only as data should be excluded"
@@ -733,7 +734,7 @@ run_prepared_case --skip-smoke --skip-dry-run
 
 prepare_case young-orphan
 cat >"$CASE_PS" <<EOF
-925100 1 925100 925100 10 python $CASE_REPO/eval_pointgoal_wheeled.py
+925100 1 925100 925100 10 python $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 EOF
 run_prepared_case --skip-smoke --skip-dry-run
 [[ "$CASE_STATUS" == 0 ]] || fail "young orphan process exclusion should pass"
@@ -742,7 +743,7 @@ assert_contains "$CASE_REPORT/process-scan.txt" "YOUNG_ORPHAN_EXCLUDED"
 
 prepare_case stubborn-stale
 cat >"$CASE_PS" <<EOF
-930100 1 930100 930100 900 python $CASE_REPO/eval_pointgoal_wheeled.py
+930100 1 930100 930100 900 python $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 EOF
 FAKE_KILL_SURVIVES=1 FAKE_KILL_SIGNAL_FAIL=1 \
   run_prepared_case --skip-smoke --skip-dry-run
@@ -752,7 +753,7 @@ assert_not_contains "$CASE_OUT" "[REPAIRED] Terminated"
 
 prepare_case stale-exits-before-term
 cat >"$CASE_PS" <<EOF
-930500 1 930500 930500 900 python $CASE_REPO/eval_pointgoal_wheeled.py
+930500 1 930500 930500 900 python $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 EOF
 FAKE_KILL_TERM_ALREADY_EXITED=1 \
   run_prepared_case --skip-smoke --skip-dry-run
@@ -761,7 +762,7 @@ assert_contains "$CASE_REPORT/process-scan.txt" "ALREADY_EXITED_BEFORE_TERM"
 
 prepare_case unknown-stale-liveness
 cat >"$CASE_PS" <<EOF
-931100 1 931100 931100 900 python $CASE_REPO/eval_pointgoal_wheeled.py
+931100 1 931100 931100 900 python $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 EOF
 FAKE_KILL_LIVENESS_FAIL=1 \
   run_prepared_case --skip-smoke --skip-dry-run
@@ -777,7 +778,7 @@ assert_not_contains "$CASE_HOME/.bashrc" "# >>> NavDP AutoDL runtime >>>"
 
 prepare_case check-only-with-stale
 cat >"$CASE_PS" <<EOF
-935100 1 935100 935100 900 python $CASE_REPO/eval_pointgoal_wheeled.py
+935100 1 935100 935100 900 python $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 EOF
 run_prepared_case --check-only --skip-smoke --skip-dry-run
 [[ "$CASE_STATUS" == 0 ]] || fail "check-only with stale candidate should pass"
@@ -787,7 +788,7 @@ assert_contains "$CASE_OUT" "Check-only: found 1 stale"
 
 prepare_case test-signal-isolation
 cat >"$CASE_PS" <<EOF
-936100 1 936100 936100 900 python $CASE_REPO/eval_pointgoal_wheeled.py
+936100 1 936100 936100 900 python $CASE_REPO/run_scripts/eval_pointgoal_wheeled.py
 EOF
 cat >"$CASE_BIN/hostile-kill-wrapper" <<'SH'
 #!/usr/bin/env bash
@@ -846,7 +847,7 @@ set -e
 assert_contains "$CASE_OUT" "远端运行时版本混用"
 
 prepare_case eval-parser-order-mismatch
-cat >"$CASE_REPO/eval_pointgoal_wheeled.py" <<'PY'
+cat >"$CASE_REPO/run_scripts/eval_pointgoal_wheeled.py" <<'PY'
 parser.add_argument("--minco_start_validation_exemption_radius")
 parser.add_argument("--minco_penalty_weight_attractor")
 parser.add_argument("--navdp-seeds")

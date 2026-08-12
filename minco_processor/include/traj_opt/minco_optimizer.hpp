@@ -94,6 +94,22 @@ public:
   int lastReturnCode() const { return last_return_code_; }
   double lastObjectiveTotal() const { return last_objective_total_; }
   uint64_t lastQueryFailureCount() const { return last_query_failure_count_; }
+  const VecDf & lastPenaltyLog() const { return opt_vars_.penalty_log; }
+
+  static double evaluateGuideCorridorTerm(
+    const Eigen::Vector3d & point,
+    const Eigen::Vector3d & segment_start,
+    const Eigen::Vector3d & segment_end,
+    double radius,
+    double smooth_eps,
+    double weight,
+    Eigen::Vector3d * gradient);
+
+  static double evaluateTimeBarrierTerm(
+    double duration,
+    double minimum_duration,
+    double weight,
+    double * duration_gradient);
 
   // --- Trajectory Optimization ---
   double optimize(const std::vector<Eigen::Vector3d> & waypoints,

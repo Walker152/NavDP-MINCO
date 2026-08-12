@@ -13,9 +13,10 @@
       "initial_top_k": 2,
       "max_top_k": 4,
       "candidate_time_budget_ms": 1500.0,
-      "optimization_safe_distance_m": 0.3,
-      "validation_safe_distance_m": 0.15,
+      "optimization_safe_distance_m": 0.4293079057,
+      "validation_safe_distance_m": 0.2793079057,
       "start_validation_exemption_radius_m": 0.35,
+      "constraint_profile": "safe_corridor_v1",
       "sample_dt_s": 0.05,
       "max_velocity_mps": 1.0,
       "max_acceleration_mps2": 1.5,
@@ -47,7 +48,7 @@
       "w_max_radps": 1.0,
       "max_acceleration_mps2": 1.5,
       "max_yaw_acceleration_radps2": 1.0,
-      "max_wheel_speed_radps": null
+      "max_wheel_speed_radps": 100.0
     },
     "video": {"fps": 10, "crf": 23, "scale": 1.0},
     "scene": {"scale": 1.0},

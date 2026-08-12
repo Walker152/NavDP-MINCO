@@ -23,6 +23,44 @@ def _populated(value) -> bool:
     return math.isfinite(number)
 
 
+def summarize_csv_paths(
+    paths,
+    *,
+    root: Path | str | None = None,
+) -> list[dict]:
+    """Summarize every declared field in explicit CSV evidence files."""
+
+    root_path = Path(root).resolve() if root is not None else None
+    summaries = []
+    for path in sorted(Path(item).resolve() for item in paths):
+        with path.open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream)
+            table_rows = list(reader)
+            fieldnames = list(reader.fieldnames or [])
+        if root_path is None:
+            source_file = str(path)
+        else:
+            try:
+                source_file = path.relative_to(root_path).as_posix()
+            except ValueError:
+                source_file = str(path)
+        count = len(table_rows)
+        for field in fieldnames:
+            populated = sum(_populated(row.get(field, "")) for row in table_rows)
+            summaries.append(
+                {
+                    "source_file": source_file,
+                    "table": path.stem,
+                    "field": field,
+                    "row_count": count,
+                    "populated_count": populated,
+                    "missing_count": count - populated,
+                    "coverage_rate": populated / count if count else 0.0,
+                }
+            )
+    return summaries
+
+
 def summarize_field_coverage(run_dir: Path | str, write_output: bool = True) -> list[dict]:
     run_dir = Path(run_dir)
     rows = []

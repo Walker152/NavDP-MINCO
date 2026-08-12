@@ -74,6 +74,7 @@ def build_run_manifest(repo_root, run_config, evaluation_command, server_command
         "environment":{"orchestrator_python":sys.version, "executable":sys.executable, "conda_prefix":os.environ.get("CONDA_PREFIX"), "eval_conda_env":"isaaclab", "server_conda_env":"navdp"},
         "host":{**host_identity, "logical_cpu_count":os.cpu_count(), "memory_total_bytes":int(memory.total), "gpu":_gpu_inventory(probe_external)},
         "effective_parameters":run_config.get("effective_parameters", {}),
+        "parameter_receipt":run_config.get("parameter_receipt", {}),
     }
 
 

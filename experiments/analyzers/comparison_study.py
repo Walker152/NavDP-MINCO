@@ -8,14 +8,17 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, TypeVar
 
 from experiments.analyzers.comparison_index import (
     EpisodeGroup,
     EpisodeRecord,
     build_episode_groups,
 )
-from experiments.analyzers.readonly import snapshot_protected_receipts
+from experiments.analyzers.readonly import (
+    snapshot_input_evidence,
+    snapshot_protected_receipts,
+)
 from experiments.analyzers.trace_evidence import (
     load_trace_evidence,
     render_trace_evidence,
@@ -23,11 +26,22 @@ from experiments.analyzers.trace_evidence import (
 from experiments.visualizers.paired_video import (
     VideoSource,
     render_paired_episode_video,
+    validate_paired_video_bundle,
 )
 
 
-GENERATOR_VERSION = "task01-comparison-v1"
+GENERATOR_VERSION = "task03-comparison-v2"
 PAIRING_KEY = ("experiment_id", "scene_id", "seed", "episode_uid")
+TRACE_COVERAGE_TAGS = (
+    "RAW_UNSAFE",
+    "HIGH_TURN",
+    "JUMP_INPUT",
+    "MINCO_FAIL",
+    "RAW_SAFE",
+    "LOW_TURN",
+    "STABLE_INPUT",
+)
+_TraceCandidate = TypeVar("_TraceCandidate")
 
 
 @dataclass(frozen=True)
@@ -215,10 +229,39 @@ def _trace_context(record: EpisodeRecord, planning_cycle_uid: str) -> dict[str, 
     }
 
 
+def _select_stratified_trace_candidates(
+    candidates: list[tuple[_TraceCandidate, tuple[str, ...]]],
+    *,
+    limit: int,
+) -> list[tuple[_TraceCandidate, tuple[str, ...]]]:
+    """Cover diagnostic tags first, preserving the caller's stable tie-break."""
+    selected: list[tuple[_TraceCandidate, tuple[str, ...]]] = []
+    selected_indices: set[int] = set()
+    covered_tags: set[str] = set()
+    for target in TRACE_COVERAGE_TAGS:
+        if target in covered_tags:
+            continue
+        for index, candidate in enumerate(candidates):
+            if index not in selected_indices and target in candidate[1]:
+                selected.append(candidate)
+                selected_indices.add(index)
+                covered_tags.update(candidate[1])
+                break
+        if len(selected) >= limit:
+            return selected
+    for index, candidate in enumerate(candidates):
+        if index not in selected_indices:
+            selected.append(candidate)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def _resume_compatible(
     output_dir: Path,
     input_suite: Path,
     protected_hashes: Mapping[str, str],
+    consumed_inputs: list[dict[str, object]],
     max_trace_cases: int,
 ) -> None:
     manifest_path = output_dir / "study_manifest.json"
@@ -228,6 +271,7 @@ def _resume_compatible(
     expected = {
         "input_suite": str(input_suite),
         "input_receipt_hashes": dict(protected_hashes),
+        "consumed_inputs": consumed_inputs,
         "max_trace_cases": max_trace_cases,
         "generator_version": GENERATOR_VERSION,
     }
@@ -262,11 +306,15 @@ def _artifact_rows(
     ):
         relative = str(path.relative_to(output_dir))
         association = associations.get(relative, {})
+        artifact_type = type_by_suffix.get(path.suffix.lower(), "file")
+        if (
+            artifact_type == "paired_video"
+            and path.parent.name.endswith("_evidence")
+        ):
+            artifact_type = "evidence_media"
         rows.append(
             {
-                "artifact_type": type_by_suffix.get(
-                    path.suffix.lower(), "file"
-                ),
+                "artifact_type": artifact_type,
                 "path": relative,
                 "sha256": _sha256(path),
                 "size": path.stat().st_size,
@@ -295,13 +343,18 @@ def generate_comparison_study(
         raise ValueError("comparison output must be outside the input suite")
 
     protected_before = snapshot_protected_receipts(input_suite)
+    consumed_before = snapshot_input_evidence(input_suite)
     if output_dir.exists() and any(output_dir.iterdir()):
         if not resume:
             raise FileExistsError(
                 f"comparison output already exists; pass resume: {output_dir}"
             )
         _resume_compatible(
-            output_dir, input_suite, protected_before, max_trace_cases
+            output_dir,
+            input_suite,
+            protected_before,
+            consumed_before,
+            max_trace_cases,
         )
     output_dir.mkdir(parents=True, exist_ok=True)
     for directory in ("paired_videos", "planning_cases", "tables"):
@@ -356,6 +409,12 @@ def generate_comparison_study(
                     receipt_path=record.video_receipt_path,
                     terminal_status=_terminal_status(record),
                     terminal_time_s=duration,
+                    control_samples_path=(
+                        record.run.run_dir / "control_samples.csv"
+                        if (record.run.run_dir / "control_samples.csv").is_file()
+                        else None
+                    ),
+                    control_episode_uid=group.key[3],
                 )
             else:
                 missing_rows.append(
@@ -388,7 +447,13 @@ def generate_comparison_study(
                 / f"{_group_id(group)}_{_slug(label)}.mp4"
             )
             sidecar = path.with_suffix(".comparison.json")
-            if resume and path.is_file() and sidecar.is_file():
+            evidence_path = path.with_name(f"{path.stem}_evidence")
+            if (
+                resume
+                and path.is_file()
+                and sidecar.is_file()
+                and evidence_path.is_dir()
+            ):
                 existing = json.loads(sidecar.read_text(encoding="utf-8"))
                 expected_order = [
                     variant
@@ -402,14 +467,31 @@ def generate_comparison_study(
                     raise ValueError(
                         f"cannot resume incompatible paired video: {path}"
                     )
-                artifact_paths = (path.resolve(), sidecar.resolve())
+                bundle_errors = validate_paired_video_bundle(path)
+                if bundle_errors:
+                    raise ValueError(
+                        f"cannot resume invalid paired video: {path}: "
+                        + "; ".join(bundle_errors)
+                    )
+                artifact_paths = (
+                    path.resolve(),
+                    sidecar.resolve(),
+                    *sorted(item.resolve() for item in evidence_path.iterdir()),
+                )
             else:
                 receipt = render_paired_episode_video(
-                    sources, path, episode_uid=group.key[3]
+                    sources,
+                    path,
+                    episode_uid=group.key[3],
+                    data_source=data_source,
                 )
                 artifact_paths = (
                     receipt.output_path,
                     receipt.output_path.with_suffix(".comparison.json"),
+                    *sorted(
+                        item.resolve()
+                        for item in receipt.evidence_package_path.iterdir()
+                    ),
                 )
             paired_video_count += 1
             for artifact in artifact_paths:
@@ -429,8 +511,8 @@ def generate_comparison_study(
             ),
         )
         for record in records:
-            if record.trace_paths:
-                trace_candidates.append((group, record, record.trace_paths[0]))
+            for trace_path in record.trace_paths:
+                trace_candidates.append((group, record, trace_path))
     trace_candidates.sort(
         key=lambda item: (
             item[0].key,
@@ -439,8 +521,22 @@ def generate_comparison_study(
         )
     )
 
+    annotated_trace_candidates = []
+    for candidate in trace_candidates:
+        _, record, trace_path = candidate
+        planning_cycle_uid = trace_path.stem.removeprefix("planning_trace_")
+        context = _trace_context(record, planning_cycle_uid)
+        tags = tuple(
+            tag for tag in context["case_tags"].split("|") if tag
+        )
+        annotated_trace_candidates.append((candidate, tags))
+    selected_trace_candidates = _select_stratified_trace_candidates(
+        annotated_trace_candidates,
+        limit=max_trace_cases,
+    )
+
     case_rows = []
-    for group, record, trace_path in trace_candidates[:max_trace_cases]:
+    for (group, record, trace_path), _ in selected_trace_candidates:
         planning_cycle_uid = trace_path.stem.removeprefix("planning_trace_")
         case_uid = _slug(f"{planning_cycle_uid}_{record.run.variant}")
         evidence = load_trace_evidence(trace_path)
@@ -567,6 +663,7 @@ def generate_comparison_study(
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "input_suite": str(input_suite),
         "input_receipt_hashes": dict(protected_before),
+        "consumed_inputs": consumed_before,
         "pairing_key": list(PAIRING_KEY),
         "max_trace_cases": max_trace_cases,
         "data_source": data_source,
@@ -592,7 +689,7 @@ def generate_comparison_study(
         payload = json.loads(sidecar.read_text(encoding="utf-8"))
         methods = payload.get("sync_method_by_variant", {}).values()
         exact_sync_count += sum(
-            method == "RECORDED_FRAME_TIMESTAMPS" for method in methods
+            method == "RECORDED_ABSOLUTE_TIMESTAMPS" for method in methods
         )
         fixed_sync_count += sum(
             method == "FIXED_FPS_RECONSTRUCTION" for method in methods
@@ -608,9 +705,11 @@ def generate_comparison_study(
         f"- Rendered planning traces: {len(case_rows)}\n"
         f"- Missing-evidence records: {len(missing_rows)}\n\n"
         "## Synchronization boundary\n\n"
-        f"Recorded-timestamp streams: {exact_sync_count}; fixed-FPS reconstructed "
-        f"streams: {fixed_sync_count}. Fixed-FPS streams are not exact wall-clock "
-        "alignment; each comparison sidecar records its error bound. Shorter "
+        f"Absolute timestamp streams: {exact_sync_count}; fixed-FPS reconstructed "
+        f"streams: {fixed_sync_count}. Only streams declaring absolute epoch time "
+        "and one shared clock domain are aligned as exact wall clock; relative "
+        "and fixed-FPS streams remain non-exact. Each comparison sidecar records "
+        "its method and error bound. Shorter "
         "variants freeze their final frame.\n\n"
         "## Interpretation boundary\n\n"
         "Videos show recorded visual/control behavior and relative timing under "
@@ -623,12 +722,15 @@ def generate_comparison_study(
     protected_after = snapshot_protected_receipts(input_suite)
     if protected_before != protected_after:
         raise RuntimeError("comparison generation mutated protected input receipts")
+    if consumed_before != snapshot_input_evidence(input_suite):
+        raise RuntimeError("comparison generation mutated source evidence")
 
     artifact_manifest = {
         "schema_version": 1,
         "generator_version": GENERATOR_VERSION,
         "input_suite": str(input_suite),
         "input_receipt_hashes": dict(protected_before),
+        "consumed_inputs": consumed_before,
         "pairing_key": list(PAIRING_KEY),
         "data_source": data_source,
         "artifacts": _artifact_rows(output_dir, associations, data_source),
@@ -697,6 +799,9 @@ def validate_comparison_study(output_dir: Path | str) -> list[str]:
         else:
             if current_hashes != manifest.get("input_receipt_hashes"):
                 errors.append("input receipt hashes changed")
+            current_inputs = snapshot_input_evidence(input_suite)
+            if current_inputs != manifest.get("consumed_inputs"):
+                errors.append("consumed input evidence changed")
 
     seen = set()
     paired_video_count = 0
@@ -737,5 +842,10 @@ def validate_comparison_study(output_dir: Path | str) -> list[str]:
         errors.append(
             "paired_video_count mismatch: "
             f"{paired_video_count} != {study.get('paired_video_count')}"
+        )
+    for paired_video in sorted((output_dir / "paired_videos").glob("*.mp4")):
+        errors.extend(
+            f"paired evidence invalid ({paired_video.name}): {error}"
+            for error in validate_paired_video_bundle(paired_video)
         )
     return errors

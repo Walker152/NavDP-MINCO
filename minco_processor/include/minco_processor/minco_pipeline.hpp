@@ -105,6 +105,7 @@ public:
     geometry_utils::Trajectory yaw_trajectory;
     std::vector<TrajectorySample> samples;
     double objective{std::numeric_limits<double>::infinity()};
+    std::map<std::string, double> penalty_terms;
     int optimizer_return_code{0};
     std::map<std::string, double> timing_ms;
     int dense_path_size{0};

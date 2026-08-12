@@ -3,11 +3,10 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run_all_experiments.sh [options]
+Usage: scripts/run_simulation_experiments.sh [options]
 
-Run the complete workflow from calibration through experiments, publication
-figures/tables, validation, and the final receipt. The safe default performs
-local static work, mock simulation, and an Isaac dry-run only.
+By default runs the local mock suite and prepares/validates an eight-run Isaac
+dynamic dry-run plan without starting Isaac or NavDP processes.
 
 Options:
   --output PATH             Workflow output root
@@ -46,4 +45,4 @@ export NAVDP_PYTHON="$PYTHON_BIN"
 export ISAACLAB_PYTHON="${ISAACLAB_PYTHON:-}"
 export PYTHONPATH="$REPO_ROOT/minco_processor/build:$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 cd "$REPO_ROOT"
-exec "$PYTHON_BIN" -m experiments run-all-workflows "$@"
+exec "$PYTHON_BIN" -m experiments run-simulation-workflow "$@"

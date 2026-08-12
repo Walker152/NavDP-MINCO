@@ -8,6 +8,7 @@ from experiments.core.schemas import SCHEMAS
 from experiments.core.trace_schema import validate_trace
 from experiments.analyzers.data_quality import summarize_field_coverage
 from experiments.recorders.run_recorder import atomic_json
+from experiments.recorders.video_recorder import validate_video_receipt
 from experiments.core.failure_taxonomy import classify_reason
 
 
@@ -84,6 +85,64 @@ def required_diagnostic_errors(table_rows, variant, data_source):
     return errors
 
 
+def _truthy(value):
+    return str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def real_machine_truth_errors(config, table_rows):
+    if config.get("data_source") != "REAL":
+        return []
+    errors = []
+    is_minco = config.get("variant") != "raw"
+    for row in table_rows.get("episode_metrics", []):
+        uid = row.get("episode_uid", "")
+        if _is_blank(row.get("termination_term_raw", "")):
+            errors.append(f"missing raw termination terms: {uid}")
+        if _is_blank(row.get("termination_frame_idx", "")):
+            errors.append(f"missing termination frame association: {uid}")
+        if is_minco and (
+            _is_blank(row.get("termination_plan_uid", ""))
+            or _is_blank(row.get("termination_planning_cycle_uid", ""))
+        ):
+            errors.append(f"missing termination plan association: {uid}")
+        if _is_blank(row.get("hold_duration_s", "")) or _is_blank(
+            row.get("stop_duration_s", "")
+        ):
+            errors.append(f"missing recovery duration truth: {uid}")
+        collision = _truthy(row.get("collision", "")) or str(
+            row.get("done_reason", "")
+        ) == "COLLISION"
+        contact = row.get("contact_detected", "")
+        if _is_blank(contact) or collision != _truthy(contact):
+            errors.append(f"contact consistency mismatch: {uid}")
+        for field in ("done_reason", "failure_reason"):
+            reason = str(row.get(field, "")).strip()
+            if reason and classify_reason(reason)["reason_source"] == "UNMAPPED":
+                errors.append(f"unmapped machine reason: {uid}: {reason}")
+
+    wheel_limit = (
+        config.get("effective_parameters", {})
+        .get("robot_calibration", {})
+        .get("max_wheel_speed_radps")
+    )
+    try:
+        wheel_limited = float(wheel_limit) > 0.0
+    except (TypeError, ValueError):
+        wheel_limited = False
+    if wheel_limited:
+        required = (
+            "actual_left_wheel_radps", "actual_right_wheel_radps",
+            "wheel_speed_limit_radps", "wheel_saturated",
+        )
+        for row in table_rows.get("control_samples", []):
+            if any(_is_blank(row.get(field, "")) for field in required):
+                errors.append(
+                    f"missing wheel truth: {row.get('episode_uid', '')}/"
+                    f"{row.get('frame_idx', '')}"
+                )
+    return errors
+
+
 def validate_run(run_dir: Path | str, write_report=True):
     run_dir = Path(run_dir); errors = [] ; counts = {}
     config_path = run_dir / "run_config.json"
@@ -128,6 +187,7 @@ def validate_run(run_dir: Path | str, write_report=True):
         config.get("variant", ""),
         config.get("data_source", ""),
     ))
+    errors.extend(real_machine_truth_errors(config, table_rows))
     if config.get("data_source") == "REAL" and config.get("variant") != "raw":
         for row in cycles:
             published = str(row.get("published", "")).lower() == "true"
@@ -160,6 +220,22 @@ def validate_run(run_dir: Path | str, write_report=True):
     actual_uids = [row.get("episode_uid") for row in table_rows.get("episode_metrics", [])]
     if expected_uids and sorted(actual_uids) != sorted(expected_uids): errors.append("episode completion set does not match run_config")
     if config.get("data_source") == "REAL":
+        availability_path = run_dir / "machine_truth_availability.json"
+        if not availability_path.exists():
+            errors.append("missing machine_truth_availability.json")
+        else:
+            try:
+                availability = json.loads(availability_path.read_text())
+                for field in (
+                    "contact_sensor", "impact_force_tensor",
+                    "collision_object_identity", "wheel_joint_velocity",
+                ):
+                    if field not in availability:
+                        errors.append(
+                            f"machine truth availability missing field: {field}"
+                        )
+            except Exception as error:
+                errors.append(f"unreadable machine_truth_availability.json: {error}")
         is_dynamic_stress = str(config.get("suite_id", "")).startswith(
             "task06_dynamic_"
         )
@@ -210,6 +286,11 @@ def validate_run(run_dir: Path | str, write_report=True):
                 payload = json.loads(metadata.read_text())
                 if not payload.get("complete") or int(payload.get("frame_count", 0)) <= 0: errors.append(f"incomplete video metadata: {uid}")
             except Exception as error: errors.append(f"unreadable video metadata: {uid}: {error}")
+            else:
+                errors.extend(
+                    f"video receipt validation failed: {uid}: {error}"
+                    for error in validate_video_receipt(video, metadata)
+                )
     result = {"valid": not errors, "errors": errors, "row_counts": counts}
     summarize_field_coverage(run_dir, write_output=True)
     if write_report:

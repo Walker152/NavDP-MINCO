@@ -8,6 +8,57 @@
 namespace minco_planner {
 using Mat63f = Eigen::Matrix<double, 6, 3>;
 
+double MincoOptimizer::evaluateGuideCorridorTerm(
+  const Eigen::Vector3d & point,
+  const Eigen::Vector3d & segment_start,
+  const Eigen::Vector3d & segment_end,
+  double radius,
+  double smooth_eps,
+  double weight,
+  Eigen::Vector3d * gradient)
+{
+  Eigen::Vector3d distance_gradient = Eigen::Vector3d::Zero();
+  const double distance_squared =
+    minco_processor::GuideCorridor2D::squaredDistanceAndGradient(
+    point, segment_start, segment_end, &distance_gradient);
+  const double violation = distance_squared - radius * radius;
+  double penalty = 0.0;
+  double penalty_derivative = 0.0;
+  if (!gcopter::smoothedL1(
+      violation, smooth_eps, penalty, penalty_derivative))
+  {
+    if (gradient) {
+      gradient->setZero();
+    }
+    return 0.0;
+  }
+  if (gradient) {
+    *gradient = weight * penalty_derivative * distance_gradient;
+  }
+  return weight * penalty;
+}
+
+double MincoOptimizer::evaluateTimeBarrierTerm(
+  double duration,
+  double minimum_duration,
+  double weight,
+  double * duration_gradient)
+{
+  if (duration_gradient) {
+    *duration_gradient = 0.0;
+  }
+  if (!(std::isfinite(duration) && std::isfinite(minimum_duration) &&
+    std::isfinite(weight)) || duration >= minimum_duration || weight <= 0.0)
+  {
+    return 0.0;
+  }
+  const double violation = minimum_duration - duration;
+  if (duration_gradient) {
+    *duration_gradient = -3.0 * weight * violation * violation;
+  }
+  return weight * violation * violation * violation;
+}
+
 double MincoOptimizer::optimize(const std::vector<Eigen::Vector3d> & waypoints,
   const Eigen::Matrix3d & start_state,
   const Eigen::Matrix3d & end_state,
@@ -20,6 +71,9 @@ double MincoOptimizer::optimize(const std::vector<Eigen::Vector3d> & waypoints,
   last_objective_total_ = std::numeric_limits<double>::quiet_NaN();
   last_query_failure_count_ = 0;
   opt_vars_.query_failure_count = 0;
+  opt_vars_.penalty_log.resize(
+    opt_vars_.penaltyWeights.size() > 5 ? 7 : 6);
+  opt_vars_.penalty_log.setZero();
 
   if (!setupProblemAndCheck(waypoints, start_state, end_state)) {
     cout << YELLOW << " -- [TrajOpt] Error in setup problem, force return." << RESET << endl;
@@ -35,10 +89,6 @@ double MincoOptimizer::optimize(const std::vector<Eigen::Vector3d> & waypoints,
   Eigen::Map<VecDf> tau(x.data(), opt_vars_.dim_t);
   Eigen::Map<VecDf> xi(x.data() + opt_vars_.dim_t, opt_vars_.dim_p);
   opt_vars_.local_magnitudes = local_magnitudes;
-  opt_vars_.penalty_log.resize(
-    opt_vars_.penaltyWeights.size() > 5 ? 7 : 6);
-  opt_vars_.penalty_log.setZero();
-
   if (opt_vars_.times.minCoeff() < 1e-3) {
     cout << YELLOW << " -- [TrajOpt] Error, the init times have zero, force return." << RESET << endl;
     cout << " -- Head PVA: " << endl;
@@ -245,10 +295,11 @@ void MincoOptimizer::computeTimeBarrier(const OptVars & opt_vars,
 
     if (t_i < t_min) {
       const double violation = t_min - t_i;
-      const double violation2 = violation * violation;
-      cost += w_barrier * violation2 * violation;
-      gradByTimes(i) += -3.0 * w_barrier * violation2;
-      penalty_log(penalty_log.size() > 6 ? 6 : 5) = violation;
+      double duration_gradient = 0.0;
+      cost += evaluateTimeBarrierTerm(t_i, t_min, w_barrier, &duration_gradient);
+      gradByTimes(i) += duration_gradient;
+      const int log_index = penalty_log.size() > 6 ? 6 : 5;
+      penalty_log(log_index) = std::max(penalty_log(log_index), violation);
     }
   }
 }
@@ -358,26 +409,25 @@ void MincoOptimizer::constraintsFunctional(const VecDf & T,
         guide_path.size() >= 2U)
       {
         double best_distance_sq = std::numeric_limits<double>::infinity();
-        Eigen::Vector3d best_gradient = Eigen::Vector3d::Zero();
+        size_t best_guide_index = 0U;
         for (size_t guide_index = 0; guide_index + 1U < guide_path.size(); ++guide_index) {
-          Eigen::Vector3d gradient = Eigen::Vector3d::Zero();
           const double distance_sq =
             minco_processor::GuideCorridor2D::squaredDistanceAndGradient(
-            pos, guide_path[guide_index], guide_path[guide_index + 1U], &gradient);
+            pos, guide_path[guide_index], guide_path[guide_index + 1U], nullptr);
           if (distance_sq < best_distance_sq) {
             best_distance_sq = distance_sq;
-            best_gradient = gradient;
+            best_guide_index = guide_index;
           }
         }
         const double violation =
           best_distance_sq - guide_corridor_radius * guide_corridor_radius;
-        double penalty = 0.0;
-        double penalty_derivative = 0.0;
-        if (gcopter::smoothedL1(
-            violation, smooth_eps, penalty, penalty_derivative))
-        {
-          gradPos += weightGuide * penalty_derivative * best_gradient;
-          tmp_cost += weightGuide * penalty;
+        Eigen::Vector3d guide_gradient = Eigen::Vector3d::Zero();
+        const double guide_cost = evaluateGuideCorridorTerm(
+          pos, guide_path[best_guide_index], guide_path[best_guide_index + 1U], guide_corridor_radius,
+          smooth_eps, weightGuide, &guide_gradient);
+        if (guide_cost > 0.0) {
+          tmp_cost += guide_cost;
+          gradPos += guide_gradient;
           max_pena(GUIDE_IDX) = std::max(max_pena(GUIDE_IDX), violation);
         }
       }

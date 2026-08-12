@@ -100,6 +100,7 @@ def run_codex_closure(
     *,
     repo_root: Path | str,
     output_dir: Path | str,
+    evidence_root: Path | str | None = None,
     static_only: bool = False,
     select_cases: bool = False,
     dynamic_dry_run: bool = False,
@@ -112,10 +113,55 @@ def run_codex_closure(
 ) -> dict[str, Any]:
     repo_root = Path(repo_root).resolve()
     output_dir = Path(output_dir).resolve()
+    if evidence_root is None and not analysis_only_readonly:
+        from experiments.orchestrators.research_workflow import (
+            WorkflowOptions,
+            run_all_workflows,
+            run_static_workflow,
+        )
+
+        options = WorkflowOptions(
+            output_root=output_dir,
+            resume=resume,
+            retry_failed=retry_failed,
+            allow_real_simulation=allow_real_simulation,
+            full_suite=False,
+            skip_video=skip_video,
+        )
+        workflow = (
+            run_static_workflow
+            if static_only and not dynamic_dry_run
+            else run_all_workflows
+        )
+        workflow_receipt = workflow(repo_root=repo_root, options=options)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            **workflow_receipt,
+            "validation_errors": [],
+            "dynamic_real_run_authorized": allow_real_simulation,
+            "dynamic_real_run_completed": bool(allow_real_simulation),
+            "video_evidence_reduced": skip_video,
+        }
+        (output_dir / "closure_receipt.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (output_dir / "closure_report.md").write_text(
+            "# NavDP–MINCO workflow compatibility closure\n\n"
+            f"Status: **{summary['status']}**\n\n"
+            "This compatibility entry delegates to the reproducible research "
+            "workflow and does not assume dated historical results.\n",
+            encoding="utf-8",
+        )
+        return summary
     if output_dir.exists() and any(output_dir.iterdir()) and not resume:
         raise FileExistsError(f"closure output already exists: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    result_root = repo_root / "results/navdp_minco_longterm_20260726"
+    result_root = (
+        Path(evidence_root).resolve()
+        if evidence_root is not None
+        else repo_root / "results/navdp_minco_longterm_20260726"
+    )
     legacy_dir = result_root / "static_baseline"
     safe_dir = result_root / "static_safe_corridor_v1"
     selection_dir = result_root / "static_boundary_selection_v1"
@@ -238,10 +284,16 @@ def run_codex_closure(
             continue
         for path in sorted(task_root.rglob("*")):
             if path.is_file():
+                try:
+                    task_root_label = str(task_root.relative_to(repo_root))
+                    artifact_path_label = str(path.relative_to(repo_root))
+                except ValueError:
+                    task_root_label = str(task_root)
+                    artifact_path_label = str(path)
                 artifact_rows.append(
                     {
-                        "task_root": str(task_root.relative_to(repo_root)),
-                        "artifact_path": str(path.relative_to(repo_root)),
+                        "task_root": task_root_label,
+                        "artifact_path": artifact_path_label,
                         "size_bytes": path.stat().st_size,
                         "sha256": _sha256(path),
                     }

@@ -10,6 +10,9 @@ parser.add_argument(
 parser.add_argument("--scene-path", type=str, default=None)
 parser.add_argument("--scene-id", type=str, default=None)
 parser.add_argument("--dynamic-case-spec", type=str, default=None)
+parser.add_argument("--dynamic-case-hash", type=str, default="")
+parser.add_argument("--dynamic-scene-sha256", type=str, default="")
+parser.add_argument("--dynamic-calibration-sha256", type=str, default="")
 parser.add_argument(
     "--scene_scale", type=float, default=1.0)
 parser.add_argument(
@@ -136,6 +139,7 @@ import carb
 import numpy as np
 import imageio
 import os
+import hashlib
 import csv
 import json
 from pathlib import Path
@@ -188,6 +192,7 @@ from utils_tasks.timing_utils import (
 from utils_tasks.episode_diagnostics import (
     EpisodeStartupDiagnostics,
     infer_termination_details,
+    observe_termination,
 )
 from utils_tasks.mpc_diagnostics import ExpectedMotionZeroDetector
 from utils_tasks.minco_fallback import is_hold_trajectory_valid
@@ -716,6 +721,7 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         optimizer_return_code=cycle_info.get("optimizer_return_code", "") if used_minco else "",
                         optimizer_iteration_count=cycle_info.get("optimizer_iteration_count", "") if used_minco else "",
                         objective=cycle_info.get("objective", "") if used_minco else "",
+                        objective_terms=cycle_info.get("objective_terms", {}) if used_minco else {},
                         cpp_validation_success=cycle_info.get("cpp_validation_success", cycle_info.get("success", "")) if used_minco else "",
                         cpp_validation_min_clearance_m=cycle_info.get("validation_min_clearance", "") if used_minco else "",
                         python_validation_success=cycle_info.get("python_validation_success", cycle_info.get("success", "")) if used_minco else "",
@@ -803,6 +809,7 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             optimizer_return_code=cycle_info.get("optimizer_return_code", "") if used_minco else "",
                             optimizer_iteration_count=cycle_info.get("optimizer_iteration_count", "") if used_minco else "",
                             objective=cycle_info.get("objective", "") if used_minco else "",
+                            objective_terms=cycle_info.get("objective_terms", {}) if used_minco else {},
                             cpp_validation_success=cycle_info.get("cpp_validation_success", "") if used_minco else "",
                             cpp_validation_min_clearance_m=cycle_info.get("validation_min_clearance", "") if used_minco else "",
                             python_validation_success=cycle_info.get("python_validation_success", cycle_info.get("success", "")) if used_minco else "",
@@ -995,6 +1002,30 @@ for _ in range(PREHEAT_STEPS):
     obs, rewards, dones, infos = env.step(action)
 
 dynamic_case_spec = None
+dynamic_observed_state = None
+robot_articulation = env.unwrapped.scene.articulations["robot"]
+wheel_joint_ids, _ = robot_articulation.find_joints(DINGO_WHEEL_JOINTS)
+if len(wheel_joint_ids) != 2:
+    raise RuntimeError("expected exactly two calibrated Dingo wheel joints")
+if args_cli.experiment_run_dir:
+    from experiments.recorders.run_recorder import atomic_json
+    contact_sensor_available = "contact_sensor" in env.unwrapped.scene.sensors
+    atomic_json(
+        Path(args_cli.experiment_run_dir) / "machine_truth_availability.json",
+        {
+            "schema_version": 1,
+            "contact_sensor": bool(contact_sensor_available),
+            "impact_force_tensor": bool(contact_sensor_available),
+            "collision_object_identity": False,
+            "wheel_joint_velocity": True,
+            "wheel_joint_names": list(DINGO_WHEEL_JOINTS),
+            "notes": {
+                "collision_object_identity": (
+                    "Isaac contact sensor exposes force tensors but no stable collider identity"
+                )
+            },
+        },
+    )
 if args_cli.dynamic_case_spec:
     with open(args_cli.dynamic_case_spec, "r", encoding="utf-8") as stream:
         dynamic_case_spec = json.load(stream)
@@ -1021,7 +1052,6 @@ if args_cli.dynamic_case_spec:
         or not np.all(np.isfinite(requested_angular))
     ):
         raise ValueError("dynamic initial velocity is invalid")
-    robot_articulation = env.unwrapped.scene.articulations["robot"]
     root_velocity = torch.zeros(
         (args_cli.num_envs, 6),
         dtype=robot_articulation.data.root_lin_vel_w.dtype,
@@ -1036,6 +1066,19 @@ if args_cli.dynamic_case_spec:
     robot_articulation.write_root_velocity_to_sim(root_velocity)
     observed_linear = robot_articulation.data.root_lin_vel_w[0, :3].cpu().numpy()
     observed_angular = robot_articulation.data.root_ang_vel_w[0, :3].cpu().numpy()
+    observed_position = robot_articulation.data.root_pos_w[0, :3].cpu().numpy()
+    observed_quat_wxyz = robot_articulation.data.root_quat_w[0].cpu().numpy()
+    observed_yaw = float(R.from_quat([
+        observed_quat_wxyz[1], observed_quat_wxyz[2],
+        observed_quat_wxyz[3], observed_quat_wxyz[0],
+    ]).as_euler("xyz")[2])
+    dynamic_observed_state = {
+        "start_pose_xy_yaw": [
+            float(observed_position[0]), float(observed_position[1]), observed_yaw,
+        ],
+        "linear_velocity_xyz_mps": observed_linear.tolist(),
+        "angular_velocity_xyz_radps": observed_angular.tolist(),
+    }
     requirements = dynamic_case_spec.get("frame_sanity_requirements", {})
     linear_tolerance = float(
         requirements.get("velocity_match_tolerance_mps", 0.02)
@@ -1104,6 +1147,36 @@ if args_cli.enable_minco or args_cli.eval_monitor:
     ok, dist = esdf_builder.query_grid(esdf, camera_pos_debug[0, :2])
     print(f"[SimESDF] initial camera query ok={ok} dist={dist}")
     esdf_grid = EsdfGridView.from_mapping(esdf)
+    if dynamic_case_spec is not None:
+        from experiments.integration.dynamic_sanity import validate_dynamic_receipts
+        observed_ok, observed_clearance = esdf_builder.query_grid(
+            esdf, np.asarray(dynamic_observed_state["start_pose_xy_yaw"][:2])
+        )
+        dynamic_observed_state["initial_esdf_clearance_m"] = (
+            float(observed_clearance) if observed_ok else float("nan")
+        )
+        dynamic_observed_state["expected_initial_esdf_clearance_m"] = float("nan")
+        actual_scene_sha256 = hashlib.sha256(Path(usd_path).read_bytes()).hexdigest()
+        sanity_receipt = validate_dynamic_receipts(
+            dynamic_case_spec,
+            dynamic_observed_state,
+            case_sha256=args_cli.dynamic_case_hash,
+            scene_sha256=actual_scene_sha256,
+            calibration_sha256=robot_calibration.calibration_sha256,
+        )
+        if args_cli.dynamic_scene_sha256 != actual_scene_sha256:
+            raise RuntimeError("dynamic command scene hash mismatch")
+        if (
+            args_cli.dynamic_calibration_sha256
+            != robot_calibration.calibration_sha256
+        ):
+            raise RuntimeError("dynamic command calibration hash mismatch")
+        if args_cli.experiment_run_dir:
+            from experiments.recorders.run_recorder import atomic_json
+            atomic_json(
+                Path(args_cli.experiment_run_dir) / "dynamic_sanity_receipt.json",
+                sanity_receipt,
+            )
     if args_cli.enable_minco:
         from utils_tasks.navdp_minco_adapter import NavDPMincoAdapter
         minco_adapter = NavDPMincoAdapter(
@@ -1670,6 +1743,20 @@ try:
                         if ep_min_clearance[0] < float("inf") else ""
                     ),
                     wheel_speed_limit_radps=mpc_max_wheel_speed or "",
+                    actual_left_wheel_radps=float(
+                        robot_articulation.data.joint_vel[0, wheel_joint_ids[0]].item()
+                    ),
+                    actual_right_wheel_radps=float(
+                        robot_articulation.data.joint_vel[0, wheel_joint_ids[1]].item()
+                    ),
+                    wheel_saturated=(
+                        bool(mpc_max_wheel_speed)
+                        and max(
+                            abs(float(robot_articulation.data.joint_vel[0, wheel_joint_ids[0]].item())),
+                            abs(float(robot_articulation.data.joint_vel[0, wheel_joint_ids[1]].item())),
+                        ) >= float(mpc_max_wheel_speed) - 1e-6
+                    ),
+                    sample_dt_s=float(env.unwrapped.step_dt),
                     reference_stale=control_states[0] == "STALE_PLAN",
                 )
             env_step_timer = StageTimer()
@@ -1686,7 +1773,28 @@ try:
                 if stop_event.is_set():
                     break
                 if dones[i] == True:
-                    termination_reason, termination_term_raw = infer_termination_details(infos, i)
+                    impact_force_n = None
+                    contact_detected = None
+                    try:
+                        contact_sensor = env.unwrapped.scene.sensors["contact_sensor"]
+                        force_tensor = contact_sensor.data.net_forces_w[i]
+                        force_value = float(torch.linalg.vector_norm(
+                            force_tensor, dim=-1
+                        ).max().item())
+                        if np.isfinite(force_value):
+                            impact_force_n = force_value
+                            contact_detected = force_value >= float(DINGO_THRESHOLD)
+                    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+                        pass
+                    termination = observe_termination(
+                        infos,
+                        i,
+                        contact_detected=contact_detected,
+                        impact_force_n=impact_force_n,
+                        collision_object="",
+                    )
+                    termination_reason = termination.reason
+                    termination_term_raw = termination.raw_terms
                     success_flag_bool = bool(np.sqrt(np.square(goals[i]).sum()) < 1.0)
                     executed_length = float(trajectory_length[i])
                     repository_spl = float(np.clip(euclidean[i] / executed_length, 0, 1)) if success_flag_bool and executed_length > 0 else 0.0
@@ -1712,7 +1820,9 @@ try:
                             ),
                             termination_frame_idx=frame_idx,
                             termination_plan_uid=str(current_plan_id),
-                            contact_detected=termination_reason == "COLLISION",
+                            contact_detected=termination.contact_detected,
+                            impact_force_n=termination.impact_force_n,
+                            collision_object=termination.collision_object,
                         )
                     if episode_video_recorder is not None:
                         episode_video_recorder.end_episode()

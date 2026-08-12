@@ -18,6 +18,9 @@ class IsaacNavDPBackend:
 
     def __init__(self, repo_root: Path, supervisor_factory=ProcessSupervisor, isaaclab_dir=None, navdp_port=None):
         self.repo_root = Path(repo_root).resolve()
+        self.evaluator_path = (
+            self.repo_root / "run_scripts" / "eval_pointgoal_wheeled.py"
+        ).resolve()
         self.supervisor_factory = supervisor_factory
         default_isaaclab_dir = self.repo_root.parent / "IsaacLab"
         self.isaaclab_dir = Path(
@@ -30,7 +33,8 @@ class IsaacNavDPBackend:
         if run.variant not in {"raw", "minco-cold", "minco-hot"}: errors.append("unsupported variant")
         expected = "gated" if run.variant == "minco-hot" else "cold"
         if run.warm_start_mode != expected: errors.append(f"{run.variant} requires {expected} warm start")
-        if not (self.repo_root / "eval_pointgoal_wheeled.py").exists(): errors.append("missing eval_pointgoal_wheeled.py")
+        if not self.evaluator_path.is_file():
+            errors.append(f"missing evaluator: {self.evaluator_path}")
         if scene is not None:
             if str(scene.scene_path).startswith("mock://"):
                 errors.append("isaac backend rejects mock scene paths")
@@ -80,9 +84,15 @@ class IsaacNavDPBackend:
             )
         episode_uids = [episode.episode_uid for episode in episodes]
         navdp_seeds = [episode.navdp_seed for episode in episodes]
+        isaac_python = os.environ.get("ISAACLAB_PYTHON", "").strip()
+        isaac_selector = (
+            ["-p", str(Path(isaac_python).expanduser().resolve().parent.parent)]
+            if isaac_python
+            else ["-n", "isaaclab"]
+        )
         command = [
-            "conda", "run", "--no-capture-output", "-n", "isaaclab",
-            "bash", str(self.isaaclab_dir / "isaaclab.sh"), "-p", str(self.repo_root / "eval_pointgoal_wheeled.py"),
+            "conda", "run", "--no-capture-output", *isaac_selector,
+            "bash", str(self.isaaclab_dir / "isaaclab.sh"), "-p", str(self.evaluator_path),
             "--experiment-config", str(Path(run_dir) / "run_config.json"),
             "--experiment-run-dir", str(run_dir), "--experiment-variant", run.variant, "--scenario-manifest", str(manifest_path),
             "--scene-path", str(scene.scene_path), "--scene-id", scene.scene_id,
@@ -96,7 +106,26 @@ class IsaacNavDPBackend:
         ]
         dynamic_case_path = Path(scene.scene_path) / "dynamic_case.json"
         if dynamic_case_path.is_file():
-            command.extend(["--dynamic-case-spec", str(dynamic_case_path.resolve())])
+            dynamic_case = json.loads(dynamic_case_path.read_text(encoding="utf-8"))
+            usd_path = sorted(Path(scene.scene_path).glob("*.usd"))[0]
+            scene_hash = hashlib.sha256(usd_path.read_bytes()).hexdigest()
+            if dynamic_case.get("scene_id") != scene.scene_id:
+                raise ValueError("dynamic case/scene id mismatch")
+            if dynamic_case.get("scene_sha256") != scene_hash:
+                raise ValueError("dynamic case scene hash mismatch")
+            if any(
+                episode.scenario_id != dynamic_case.get("case_uid")
+                for episode in episodes
+            ):
+                raise ValueError("dynamic case/episode pairing mismatch")
+            if dynamic_case.get("calibration_sha256") != calibration.get("sha256"):
+                raise ValueError("dynamic case calibration hash mismatch")
+            command.extend([
+                "--dynamic-case-spec", str(dynamic_case_path.resolve()),
+                "--dynamic-case-hash", str(dynamic_case.get("case_hash", "")),
+                "--dynamic-scene-sha256", scene_hash,
+                "--dynamic-calibration-sha256", str(calibration.get("sha256", "")),
+            ])
         command.extend(["--raw-controller", "original-navdp-mpc" if run.variant == "raw" else "disabled"])
         minco = effective["minco"]; esdf = effective["esdf"]; video = effective["video"]
         diagnostics = effective["runtime_diagnostics"]
@@ -154,8 +183,14 @@ class IsaacNavDPBackend:
 
     def build_server_command(self, run_dir, run_id, seed, port=None):
         port = self.navdp_port if port is None else int(port)
+        navdp_python = os.environ.get("NAVDP_PYTHON", "").strip()
+        navdp_selector = (
+            ["-p", str(Path(navdp_python).expanduser().resolve().parent.parent)]
+            if navdp_python
+            else ["-n", "navdp"]
+        )
         return [
-            "conda", "run", "--no-capture-output", "-n", "navdp", "python", "-u",
+            "conda", "run", "--no-capture-output", *navdp_selector, "python", "-u",
             str(self.repo_root / "baselines/navdp/navdp_server.py"),
             "--port", str(port), "--checkpoint", str(self.repo_root / "baselines/navdp/checkpoints/navdp_checkpoint.ckpt"),
             "--output-dir", str(run_dir), "--run-id", str(run_id), "--seed", str(seed), "--no-save-video",

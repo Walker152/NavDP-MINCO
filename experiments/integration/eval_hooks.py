@@ -16,6 +16,22 @@ def _finite_or_blank(value):
     return number if math.isfinite(number) else ""
 
 
+def _json_object(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return ""
+    if not isinstance(value, dict):
+        return ""
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError):
+        return ""
+
+
 def _causal_fields(reason, fields, final_plan_status=""):
     classified = classify_reason(reason)
     return {
@@ -81,15 +97,21 @@ class ExperimentHookBridge:
     def start_episode(self, episode_uid, generation, initial_goal_distance_m=None):
         self.episode_uid = str(episode_uid); self.generation = int(generation); self._cycle = 0; self._frame = 0
         self._cycle_rows = []; self._tracking_errors = []; self._episode_started = time.monotonic()
+        self._hold_duration_s = 0.0; self._stop_duration_s = 0.0
+        self._wheel_saturation_count = 0; self._last_planning_cycle_uid = ""
         self._initial_goal_distance_m = float(initial_goal_distance_m) if initial_goal_distance_m is not None else None
         self.sink.submit_csv("events", {**self._base(), "timestamp_monotonic_s":time.monotonic(), "frame_idx":0, "plan_uid":"", "event_type":"EPISODE_START", "severity":"INFO", "primary_reason":"", "secondary_reason":"", "message":f"generation={generation}"})
 
     def record_planning_cycle(self, cycle_uid, published, stale, fallback_mode, failure_reason="", **fields):
+        self._last_planning_cycle_uid = str(cycle_uid)
         attempted_indices = fields.get("attempted_candidate_indices", [])
         if not isinstance(attempted_indices, str):
             attempted_indices = json.dumps([int(value) for value in attempted_indices])
         observation_timestamp = fields.get("observation_timestamp_s", "")
         row = {**self._base(), "episode_generation":self.generation, "planning_cycle_uid":cycle_uid, **_constraint_fields(fields), "trigger_timestamp_s":fields.get("trigger_timestamp_s", observation_timestamp if observation_timestamp != "" else time.monotonic()), "observation_sequence":fields.get("observation_sequence", ""), "observation_timestamp_s":observation_timestamp, "planning_started_timestamp_s":fields.get("planning_started_timestamp_s", ""), "published_timestamp_s":fields.get("published_timestamp_s", ""), "observation_to_plan_ms":fields.get("observation_to_plan_ms", ""), "planning_deadline_ms":fields.get("planning_deadline_ms", ""), "planning_deadline_miss":fields.get("planning_deadline_miss", ""), "input_snapshot_ms":fields.get("input_snapshot_ms", ""), "raw_diagnostics_ms":fields.get("raw_diagnostics_ms", ""), "candidate_transform_ms":fields.get("candidate_transform_ms", ""), "threshold_profile_id":fields.get("threshold_profile_id", ""), "raw_available":fields.get("raw_available", True), "candidate_count":fields.get("candidate_count", 0), "screened_candidate_count":fields.get("screened_candidate_count", 0), "rejected_candidate_count":fields.get("rejected_candidate_count", 0), "attempted_candidate_count":fields.get("attempted_candidate_count", 0), "attempted_candidate_indices":attempted_indices, "selected_candidate_index":fields.get("selected_candidate_index", ""), "optimizer_success":fields.get("optimizer_success", ""), "optimizer_return_code":fields.get("optimizer_return_code", ""), "optimizer_iteration_count":fields.get("optimizer_iteration_count", ""), "objective":fields.get("objective", ""), "cpp_validation_success":fields.get("cpp_validation_success", ""), "cpp_validation_min_clearance_m":fields.get("cpp_validation_min_clearance_m", ""), "python_validation_success":fields.get("python_validation_success", ""), "python_validation_min_clearance_m":fields.get("python_validation_min_clearance_m", ""), "validation_start_exempt_count":fields.get("validation_start_exempt_count", ""), "validation_oob_count":fields.get("validation_oob_count", ""), "validation_failure_reason":fields.get("validation_failure_reason", ""), "candidate_screen_ms":fields.get("candidate_screen_ms", ""), "candidate_attempt_total_ms":fields.get("candidate_attempt_total_ms", ""), "candidate_cpp_total_ms":fields.get("candidate_cpp_total_ms", ""), "python_validation_total_ms":fields.get("python_validation_total_ms", ""), "adapter_overhead_ms":fields.get("adapter_overhead_ms", ""), "stale":bool(stale), "published":bool(published), "fallback_mode":fallback_mode, "failure_reason":failure_reason, **_causal_fields(failure_reason, fields, "PUBLISHED" if published else fallback_mode), "navdp_ms":fields.get("navdp_ms", ""), "minco_ms":fields.get("minco_ms", ""), "validation_ms":fields.get("validation_ms", ""), "planning_total_ms":fields.get("planning_total_ms", ""), "plan_age_when_applied_ms":fields.get("plan_age_when_applied_ms", "")}
+        row["objective_terms_json"] = _json_object(
+            fields.get("objective_terms", fields.get("objective_terms_json", {}))
+        )
         for field in (
             "optimizer_return_code", "optimizer_iteration_count", "objective",
             "cpp_validation_min_clearance_m", "python_validation_min_clearance_m",
@@ -140,6 +162,9 @@ class ExperimentHookBridge:
             "fallback_mode":fields.get("fallback_mode", "NONE"),
         }
         row.update({column: fields.get(column, "") for column in columns})
+        row["objective_terms_json"] = _json_object(
+            fields.get("objective_terms", fields.get("objective_terms_json", {}))
+        )
         row.update(_causal_fields(
             row.get("failure_reason", ""), fields, row["plan_status"]
         ))
@@ -217,6 +242,9 @@ class ExperimentHookBridge:
                 "optimizer_return_code":attempt.get("optimizer_return_code", ""),
                 "optimizer_iteration_count":attempt.get("optimizer_iteration_count", ""),
                 "objective":_finite_or_blank(attempt.get("objective", "")),
+                "objective_terms_json":_json_object(
+                    attempt.get("objective_terms", attempt.get("objective_terms_json", {}))
+                ),
                 "failure_reason":attempt.get("failure_reason", ""),
                 **_causal_fields(
                     attempt.get("failure_reason", ""), attempt,
@@ -257,6 +285,15 @@ class ExperimentHookBridge:
             error_value = float(error)
             if math.isfinite(error_value): self._tracking_errors.append(error_value)
         except (TypeError, ValueError): pass
+        sample_dt_s = _finite_or_blank(fields.get("sample_dt_s", ""))
+        if sample_dt_s != "" and sample_dt_s >= 0.0:
+            state = str(fields.get("control_state", ""))
+            if state == "HOLD_LAST":
+                self._hold_duration_s += sample_dt_s
+            elif state == "STOP":
+                self._stop_duration_s += sample_dt_s
+        if bool(fields.get("wheel_saturated", False)):
+            self._wheel_saturation_count += 1
         self.sink.submit_csv("control_samples", {
             **self._base(), "frame_idx":frame_idx, "plan_uid":plan_uid,
             "static_selected_case_uid":fields.get("static_selected_case_uid", ""),
@@ -313,7 +350,7 @@ class ExperimentHookBridge:
             "termination_frame_idx":fields.get("termination_frame_idx", ""),
             "termination_plan_uid":fields.get("termination_plan_uid", ""),
             "termination_planning_cycle_uid":fields.get(
-                "termination_planning_cycle_uid", ""
+                "termination_planning_cycle_uid", self._last_planning_cycle_uid
             ),
             "episode_duration_s":duration, "actual_path_length_m":fields.get("actual_path_length_m", ""),
             "repository_spl":fields.get("repository_spl", ""),
@@ -321,9 +358,11 @@ class ExperimentHookBridge:
             "tracking_error_p95_m": float(np.percentile(self._tracking_errors, 95)) if self._tracking_errors else "",
             "initial_goal_distance_m": getattr(self, '_initial_goal_distance_m', None) or "",
             "minimum_executed_clearance_m":fields.get("minimum_executed_clearance_m", ""),
-            "wheel_saturation_count":fields.get("wheel_saturation_count", ""),
-            "hold_duration_s":fields.get("hold_duration_s", ""),
-            "stop_duration_s":fields.get("stop_duration_s", ""),
+            "wheel_saturation_count":fields.get(
+                "wheel_saturation_count", self._wheel_saturation_count
+            ),
+            "hold_duration_s":fields.get("hold_duration_s", self._hold_duration_s),
+            "stop_duration_s":fields.get("stop_duration_s", self._stop_duration_s),
             "planning_count":self._cycle,
             "minco_ok_count":sum(bool(row.get("published")) for row in self._cycle_rows) if self.identity.get("variant") != "raw" else 0,
             "validation_failure_count":sum(str(row.get("python_validation_success")).lower() == "false" for row in self._cycle_rows),
@@ -336,3 +375,5 @@ class ExperimentHookBridge:
     def reset(self, generation):
         self.episode_uid = None; self.generation = int(generation); self._cycle = 0; self._frame = 0
         self._cycle_rows = []; self._tracking_errors = []; self._episode_started = None
+        self._hold_duration_s = 0.0; self._stop_duration_s = 0.0
+        self._wheel_saturation_count = 0; self._last_planning_cycle_uid = ""

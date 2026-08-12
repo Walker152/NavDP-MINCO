@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from pathlib import Path
 
 from experiments.baselines.raw_navdp.original_mpc import ORIGINAL_MPC_SPEC
@@ -17,8 +16,8 @@ EFFECTIVE_PARAMETERS = {
         "initial_top_k": 2,
         "max_top_k": 4,
         "candidate_time_budget_ms": 1500.0,
-        "optimization_safe_distance_m": 0.45,
-        "validation_safe_distance_m": 0.35,
+        "optimization_safe_distance_m": _CALIBRATION.optimization_safe_dist_m,
+        "validation_safe_distance_m": _CALIBRATION.validation_safe_dist_m,
         "start_validation_exemption_radius_m": 0.35,
         "sample_dt_s": 0.05,
         "max_velocity_mps": 1.0,
@@ -31,7 +30,7 @@ EFFECTIVE_PARAMETERS = {
         "penalty_weight_attractor": 20.0,
         "time_weight": 0.1,
         "time_barrier_weight": 10.0,
-        "constraint_profile": "legacy",
+        "constraint_profile": "safe_corridor_v1",
         "guide_corridor_weight": 2000.0,
         "corridor_max_radius_m": 0.45,
         "corridor_min_radius_m": 0.04,
@@ -87,6 +86,7 @@ EFFECTIVE_PARAMETERS = {
         "status": _CALIBRATION.status,
         "wheel_radius_m": _CALIBRATION.wheel_radius_m,
         "wheel_base_m": _CALIBRATION.wheel_base_m,
+        "max_wheel_speed_radps": _CALIBRATION.max_wheel_speed_radps,
         "circumscribed_radius_m": _CALIBRATION.circumscribed_radius_m,
         "validation_safe_dist_m": _CALIBRATION.validation_safe_dist_m,
         "optimization_safe_dist_m": _CALIBRATION.optimization_safe_dist_m,
@@ -103,12 +103,11 @@ EFFECTIVE_PARAMETERS = {
 
 
 def effective_parameters(video_enabled=True, overrides=None):
-    snapshot = deepcopy(EFFECTIVE_PARAMETERS)
-    for section, values in (overrides or {}).items():
-        if section not in snapshot or not isinstance(values, dict):
-            raise ValueError(f"unknown parameter section: {section}")
-        unknown = set(values) - set(snapshot[section])
-        if unknown: raise ValueError(f"unknown {section} parameters: {sorted(unknown)}")
-        snapshot[section].update(values)
-    snapshot["video"]["enabled"] = bool(video_enabled)
-    return snapshot
+    # Import lazily so the compatibility module can continue exporting the
+    # immutable default snapshot without creating an import cycle.
+    from experiments.core.parameter_receipt import resolve_parameter_receipt
+
+    return resolve_parameter_receipt(
+        video_enabled=video_enabled,
+        overrides=overrides,
+    )["effective"]

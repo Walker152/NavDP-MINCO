@@ -229,6 +229,7 @@ private:
     out["success"] = result.success;
     out["failure_reason"] = result.failure_reason;
     out["objective"] = result.objective;
+    out["penalty_terms"] = result.penalty_terms;
     out["optimizer_return_code"] = result.optimizer_return_code;
     out["duration"] = duration;
     out["cpp_optimize_time_ms"] = duration * 1000.0;

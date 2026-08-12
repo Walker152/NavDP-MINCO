@@ -555,7 +555,7 @@ preflight() {
   local required_file
   for required_file in \
     "$CONFIG" \
-    "$REPO_ROOT/eval_pointgoal_wheeled.py" \
+    "$REPO_ROOT/run_scripts/eval_pointgoal_wheeled.py" \
     "$REPO_ROOT/experiments/simulators/isaac_navdp_backend.py" \
     "$REPO_ROOT/baselines/navdp/navdp_server.py" \
     "$ISAACLAB_DIR/isaaclab.sh" \
@@ -631,7 +631,7 @@ collect_ancestor_pids() {
 
 python_script_is_target() {
   local script="$1"
-  [[ "$script" == "$REPO_ROOT/eval_pointgoal_wheeled.py" ||
+  [[ "$script" == "$REPO_ROOT/run_scripts/eval_pointgoal_wheeled.py" ||
      "$script" == "$REPO_ROOT/baselines/navdp/navdp_server.py" ||
      "$script" == "$ISAACLAB_DIR"/*.py ||
      "$script" == "$ISAACLAB_DIR"/*/*.py ]]
@@ -1620,7 +1620,7 @@ PY
 }
 
 check_runtime_contract() {
-  local eval_file="$REPO_ROOT/eval_pointgoal_wheeled.py"
+  local eval_file="$REPO_ROOT/run_scripts/eval_pointgoal_wheeled.py"
   local backend_file="$REPO_ROOT/experiments/simulators/isaac_navdp_backend.py"
   local token cli_token flag ok=1 help_output
   local -a tokens=(

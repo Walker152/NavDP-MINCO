@@ -4,34 +4,31 @@
 
 ## 一键运行
 
-先进行零进程检查：
+完整安全默认流程（标定、静态、mock、动态 dry-run、论文图表与验证）：
 
 ```bash
 cd /home/alioth/NavDP
-conda activate navdp
-bash scripts/run_all_experiments.sh configs/experiments/full_suite.json \
-  --backend isaac --dry-run
+scripts/run_all_experiments.sh
 ```
 
-确认 `results/navdp_minco_full_real/dry_run_plan.json` 中 `run_count=6`、`started_processes=0` 后，运行全量实验：
+分别运行或复用同一输出目录：
 
 ```bash
-bash scripts/run_all_experiments.sh configs/experiments/full_suite.json \
-  --backend isaac --allow-real-simulation --resume
+scripts/run_static_experiments.sh --output results/navdp_minco_paper_local_verification_20260812
+scripts/run_simulation_experiments.sh --output results/navdp_minco_paper_local_verification_20260812 --resume
 ```
 
-资源紧张时关闭视频：
+真实动态 pilot 及全量 suite 必须分别显式授权：
 
 ```bash
-bash scripts/run_all_experiments.sh configs/experiments/full_suite.json \
-  --backend isaac --allow-real-simulation --resume --skip-video
+scripts/run_all_experiments.sh --allow-real-simulation
+scripts/run_all_experiments.sh --allow-real-simulation --full-suite
 ```
 
 失败修复后重试 FAILED run：
 
 ```bash
-bash scripts/run_all_experiments.sh configs/experiments/full_suite.json \
-  --backend isaac --allow-real-simulation --resume --retry-failed
+scripts/run_all_experiments.sh --allow-real-simulation --resume --retry-failed
 ```
 
 ## 终端进度显示
@@ -85,8 +82,8 @@ RAW-SPARSE × 10 → RAW-DENSE × 10
 | JSON 参数 | 默认值 | 含义 |
 |---|---:|---|
 | `minco.top_k` | 2 | 送入 MINCO 的 NavDP 候选数量 |
-| `minco.optimization_safe_distance_m` | 0.45 | 优化代价使用的 ESDF 安全距离 |
-| `minco.validation_safe_distance_m` | 0.35 | C++/Python 轨迹验收、HOLD 轨迹复核与热启动历史检查距离 |
+| `minco.optimization_safe_distance_m` | 0.4293079057 | 标定派生的优化 ESDF 安全距离 |
+| `minco.validation_safe_distance_m` | 0.2793079057 | 标定派生的 C++/Python 验收距离 |
 | `minco.sample_dt_s` | 0.05 | MINCO 轨迹时间采样间隔 |
 | `minco.max_velocity_mps` | 1.0 | 优化器速度约束 |
 | `minco.max_acceleration_mps2` | 1.0 | 优化器加速度约束 |
@@ -121,7 +118,7 @@ RAW-SPARSE × 10 → RAW-DENSE × 10
 | `minco_mpc.w_max_radps` | 0.5 | 最大角速度 |
 | `minco_mpc.max_acceleration_mps2` | 1.0 | 命令加速度约束 |
 | `minco_mpc.max_yaw_acceleration_radps2` | 1.0 | 角加速度约束 |
-| `minco_mpc.max_wheel_speed_radps` | null | 车轮角速度约束；null 表示关闭 |
+| `minco_mpc.max_wheel_speed_radps` | 100.0 | 标定的车轮角速度约束 |
 
 MINCO MPC 的 `N=15`、`ref_gap=3`、Q/R 类权重、终端权重和 IPOPT 参数会完整记录在 `run_config.json`。这些参数当前作为控制器实现常量记录，不通过 suite JSON 修改。
 
@@ -136,6 +133,16 @@ RAW 必须保持原 NavDP 基线：`N=15`、`T=0.1`、`ref_gap=3`、`Q=[10,10,0]
 | `video.crf` | 23 | H.264 CRF；越大文件越小、画质越低 |
 | `video.scale` | 1.0 | 输出图像缩放比例 |
 | `scene.scale` | 1.0 | USD 场景缩放 |
+
+视频参数会原样进入 parameter receipt 和视频 manifest。单 episode MP4 额外记录
+逐帧相对单调时间戳、clock domain、真实解码帧数/分辨率和媒体 SHA-256。只有显式
+绝对 epoch 时间戳且所有流共享 clock domain 时才允许声称精确墙钟同步；否则
+caption 必须给出固定 FPS 或相对时间同步方法及误差上界。较短对比流采用末帧冻结，
+冻结区间会写入 `event_timeline.csv`，不解释为机器人继续运动。
+
+静态 `frame_metrics.csv` 来自确定性 case/result/detail 数据；动态逐帧表只允许来自
+真实视频时钟及同 episode 的控制/规划记录。不能获取的碰撞、ESDF、控制或规划字段
+保持空值，`data_availability` 明确其来源和限制。
 
 ## 按实验情景运行
 
@@ -155,10 +162,10 @@ RAW 必须保持原 NavDP 基线：`N=15`、`T=0.1`、`ref_gap=3`、`Q=[10,10,0]
 "scene_ids": ["cluttered_hard_0"]
 ```
 
-运行：
+自定义 suite 不属于固定的一键论文工作流，应直接运行并保留独立输出：
 
 ```bash
-bash scripts/run_all_experiments.sh <新配置.json> \
+python -m experiments run-suite --config <新配置.json> \
   --backend isaac --allow-real-simulation --resume
 ```
 

@@ -1,5 +1,16 @@
 import time
 import re
+from dataclasses import dataclass
+import math
+
+
+@dataclass(frozen=True)
+class TerminationObservation:
+    reason: str
+    raw_terms: str
+    contact_detected: bool | None
+    collision_object: str
+    impact_force_n: float | None
 
 
 def _env_flag(value, env_idx):
@@ -50,6 +61,31 @@ def infer_termination_details(infos, env_idx):
 
 def infer_termination_reason(infos, env_idx):
     return infer_termination_details(infos, env_idx)[0]
+
+
+def observe_termination(
+    infos,
+    env_idx,
+    *,
+    contact_detected=None,
+    collision_object="",
+    impact_force_n=None,
+):
+    reason, raw_terms = infer_termination_details(infos, env_idx)
+    contact = None if contact_detected is None else bool(contact_detected)
+    try:
+        force = float(impact_force_n) if impact_force_n is not None else None
+    except (TypeError, ValueError):
+        force = None
+    if force is not None and not math.isfinite(force):
+        force = None
+    return TerminationObservation(
+        reason=reason,
+        raw_terms=raw_terms,
+        contact_detected=contact,
+        collision_object=str(collision_object or ""),
+        impact_force_n=force,
+    )
 
 
 class EpisodeStartupDiagnostics:
