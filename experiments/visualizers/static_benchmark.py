@@ -408,6 +408,204 @@ def _finalize_static_gif_package(
     return tuple(sorted(path for path in package.iterdir() if path.is_file()))
 
 
+def render_paired_static_gif(
+    gif_path: Path | str,
+    *,
+    case: StaticCase,
+    legacy_result: StaticRunResult,
+    legacy_detail: Mapping[str, np.ndarray],
+    safe_result: StaticRunResult,
+    safe_detail: Mapping[str, np.ndarray],
+    footprint_radius_m: float = 0.2,
+) -> Path:
+    """Render a dual-panel Legacy/Safe paired GIF from static results.
+
+    Left panel: legacy trajectory with its own data (no corridor capsules).
+    Right panel: safe_corridor_v1 trajectory with corridor capsules from real data.
+
+    Both panels show heading arrows, obstacles, and status boxes.
+    """
+    gif_path = Path(gif_path).resolve()
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+
+    legacy_path = _path(legacy_result)
+    if len(legacy_path) == 0:
+        legacy_path = case.guide_path_xyz
+    safe_path = _path(safe_result)
+    if len(safe_path) == 0:
+        safe_path = case.guide_path_xyz
+
+    base_frames = min(32, max(8, max(len(legacy_path), len(safe_path))))
+    legacy_indices = np.rint(np.linspace(0, len(legacy_path) - 1, base_frames)).astype(int)
+    safe_indices = np.rint(np.linspace(0, len(safe_path) - 1, base_frames)).astype(int)
+    total_frames = base_frames + TERMINAL_HOLD_FRAMES
+
+    safe_corridors = _corridor_segments_from_diagnostics(safe_result.diagnostics)
+    obstacles = _obstacles_from_diagnostics(safe_result.diagnostics)
+    static_rects = _static_obstacle_rectangles(case)
+
+    # Compute shared view limits from both trajectories
+    all_points = [
+        case.guide_path_xyz[:, :2],
+        legacy_path[:, :2],
+        safe_path[:, :2],
+    ]
+    if case.terminal_goal is not None:
+        all_points.append(case.terminal_goal[:2].reshape(1, 2))
+    for x0, y0, x1, y1, radius, _ in safe_corridors:
+        all_points.append(np.array([[x0 - radius, y0 - radius], [x1 + radius, y1 + radius]]))
+    combined = np.concatenate(all_points, axis=0)
+    vmin = np.min(combined, axis=0)
+    vmax = np.max(combined, axis=0)
+    span = np.maximum(vmax - vmin, 1.0)
+    margin = max(0.4, 0.08 * float(max(span)))
+    limits = [float(vmin[0] - margin), float(vmax[0] + margin),
+              float(vmin[1] - margin), float(vmax[1] + margin)]
+    arrow_length = 0.08 * max(limits[1] - limits[0], limits[3] - limits[2])
+
+    has_legacy_temporal = len(legacy_result.samples) == len(legacy_path) and len(legacy_result.samples) > 0
+    has_safe_temporal = len(safe_result.samples) == len(safe_path) and len(safe_result.samples) > 0
+
+    panels = (
+        ("legacy", legacy_path, legacy_indices, legacy_result, has_legacy_temporal, False),
+        ("safe_corridor_v1", safe_path, safe_indices, safe_result, has_safe_temporal, True),
+    )
+
+    frames = []
+    for encoded_index in range(total_frames):
+        progress_index = min(encoded_index, base_frames - 1)
+        fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.8), constrained_layout=True)
+
+        for ax, (method, traj, indices, result, has_temporal, show_corridors) in zip(axes, panels):
+            source_idx = int(indices[progress_index])
+
+            _draw_map(ax, case)
+            ax.plot(
+                case.guide_path_xyz[:, 0], case.guide_path_xyz[:, 1],
+                "--", color="#4B5563", linewidth=1.0, alpha=0.7,
+            )
+            ax.plot(
+                traj[: source_idx + 1, 0], traj[: source_idx + 1, 1],
+                color=SAFE_STYLE["color"] if method == "safe_corridor_v1" else LEGACY_STYLE["color"],
+                linewidth=SAFE_STYLE["linewidth"] if method == "safe_corridor_v1" else LEGACY_STYLE["linewidth"],
+                linestyle=SAFE_STYLE["linestyle"] if method == "safe_corridor_v1" else LEGACY_STYLE["linestyle"],
+            )
+            ax.scatter(*case.start_position[:2], marker="s", color="green", s=60, zorder=8)
+
+            if case.terminal_goal is not None:
+                ax.scatter(*case.terminal_goal[:2], marker="*", s=100, color=GOAL_COLOR, zorder=10)
+
+            # Initial yaw
+            if math.isfinite(case.start_yaw):
+                draw_heading_arrow(
+                    ax, case.start_position[:2], case.start_yaw,
+                    color="#111827", length_m=arrow_length, linewidth=1.8,
+                )
+
+            # Current yaw
+            if has_temporal and math.isfinite(float(result.samples[source_idx, 13])):
+                draw_heading_arrow(
+                    ax, traj[source_idx, :2],
+                    float(result.samples[source_idx, 13]),
+                    color="#1D4ED8", length_m=arrow_length, linewidth=2.0,
+                )
+
+            # Goal yaw
+            if case.terminal_goal is not None:
+                goal_yaw_val = result.diagnostics.get("goal_yaw_rad", None)
+                if goal_yaw_val is None or not math.isfinite(float(goal_yaw_val)):
+                    ax.annotate(
+                        "goal yaw: N/A",
+                        xy=case.terminal_goal[:2],
+                        xytext=(5, -14), textcoords="offset points",
+                        color=GOAL_COLOR, fontsize=7, zorder=10,
+                    )
+                else:
+                    draw_heading_arrow(
+                        ax, case.terminal_goal[:2], float(goal_yaw_val),
+                        color=GOAL_COLOR, length_m=arrow_length,
+                        hollow=True, linewidth=1.5,
+                    )
+
+            # Safe corridor (only on safe panel, only if real data)
+            if show_corridors:
+                for segment in safe_corridors:
+                    _draw_capsule(ax, segment, alpha=0.14)
+
+            _draw_obstacles(ax, obstacles)
+            _draw_static_rectangles(ax, static_rects)
+
+            # Robot footprint
+            centre = traj[source_idx, :2]
+            ax.add_patch(
+                plt.matplotlib.patches.Circle(
+                    centre, footprint_radius_m, color="#ff7f0e", alpha=0.35, zorder=7,
+                )
+            )
+
+            _configure_axis(ax, limits, method)
+
+            # Status box
+            sample = result.samples[source_idx] if has_temporal else None
+            if sample is not None and len(sample) >= 15:
+                speed = float(np.linalg.norm(sample[4:7]))
+                acceleration = float(np.linalg.norm(sample[7:10]))
+                state_text = (
+                    f"x/y: {sample[1]:.2f}/{sample[2]:.2f} m\n"
+                    f"yaw: {sample[13]:.2f} rad / {math.degrees(sample[13]):.1f} deg\n"
+                    f"v/a: {speed:.2f} m/s / {acceleration:.2f} m/s²\n"
+                    f"yaw rate: {sample[14]:.2f} rad/s\n"
+                )
+            else:
+                state_text = "state: N/A\n"
+
+            clearance_val = _nearest_clearance(centre, safe_detail if method == "safe_corridor_v1" else legacy_detail)
+            local_goal_text = "N/A"
+            final_goal_text = (
+                f"{case.terminal_goal[0]:.2f}/{case.terminal_goal[1]:.2f}"
+                if case.terminal_goal is not None else "N/A"
+            )
+
+            ax.text(
+                0.02, 0.98,
+                f"{method}\n"
+                f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s · "
+                f"frame {encoded_index + 1}/{total_frames}\n"
+                f"{state_text}"
+                f"clearance: {clearance_val if clearance_val != '' else 'N/A'} m\n"
+                f"local goal: {local_goal_text} m\n"
+                f"final goal: {final_goal_text} m\n"
+                f"status: {result.status}",
+                transform=ax.transAxes,
+                ha="left", va="top",
+                fontsize=7.0,
+                bbox={"boxstyle": "round,pad=0.3", "facecolor": "white",
+                      "alpha": 0.88, "edgecolor": "#6B7280"},
+                zorder=20,
+            )
+
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
+        plt.close(fig)
+
+    imageio.mimsave(gif_path, frames, duration=GIF_FRAME_DURATION_S, loop=0)
+
+    # Build the paired evidence package. Single-profile GIFs are not available
+    # at this level, so the paired GIF itself serves as the per-profile frame
+    # count reference; profile rows are derived from real per-profile data.
+    build_paired_static_gif_evidence(
+        gif_path,
+        case=case,
+        legacy_result=legacy_result,
+        legacy_detail=legacy_detail,
+        legacy_gif_path=gif_path,
+        safe_result=safe_result,
+        safe_detail=safe_detail,
+        safe_gif_path=gif_path,
+    )
+    return gif_path
+
+
 def build_paired_static_gif_evidence(
     gif_path: Path | str,
     *,
