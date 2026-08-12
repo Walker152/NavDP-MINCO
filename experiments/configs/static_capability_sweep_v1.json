@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "suite_id": "static_capability_sweep_v1",
+  "base_case_config": "static_legacy_suite.json",
+  "robot_calibration": "../../configs/robots/dingo_calibration_v1.json",
+  "profile_assembly": "profiles.NAME holds ONLY the treatment differences; the validation, dynamic_limits, minco, and metric_limits blocks are shared verbatim by both profiles and are merged with the per-profile differences by the sweep runner.",
+  "validation": {
+    "validation_safe_distance_m": 0.2793079057,
+    "start_validation_exemption_radius_m": 0.35,
+    "validation_dynamic_scale": 1.0,
+    "enable_strict_validation": true,
+    "enable_yaw_wheel_validation": true,
+    "analytic_gradient": true,
+    "adaptive_max_spatial_step_m": 0.025,
+    "adaptive_near_clearance_m": 0.05,
+    "adaptive_max_depth": 14,
+    "adaptive_sample_budget": 20000,
+    "max_jerk_mps3": 20.0,
+    "wheel_radius_m": 0.0612499984,
+    "wheel_base_m": 0.2261615992,
+    "max_wheel_speed_radps": 100.0
+  },
+  "dynamic_limits": {
+    "max_velocity_mps": 1.0,
+    "max_acceleration_mps2": 1.5,
+    "max_yaw_rate_radps": 0.5
+  },
+  "minco": {
+    "max_velocity_mps": 1.0,
+    "max_acceleration_mps2": 1.5,
+    "max_yaw_rate_radps": 0.5,
+    "penalty_weight_pos": 10000.0,
+    "penalty_weight_vel": 1000.0,
+    "penalty_weight_acc": 1000.0,
+    "penalty_weight_attractor": 20.0,
+    "time_weight": 0.1,
+    "time_barrier_weight": 10.0,
+    "max_iterations": 128,
+    "sample_dt_s": 0.05
+  },
+  "metric_limits": {
+    "safe_distance_m": 0.2793079057,
+    "max_velocity_mps": 1.0,
+    "max_acceleration_mps2": 1.5,
+    "max_jerk_mps3": 20.0,
+    "max_yaw_rate_radps": 0.5,
+    "sample_ds_m": 0.025
+  },
+  "profiles": {
+    "legacy": {
+      "constraint_profile": "legacy",
+      "optimization_safe_distance_m": 0.3,
+      "guide_corridor_weight": 0.0
+    },
+    "safe_corridor_v1": {
+      "constraint_profile": "safe_corridor_v1",
+      "optimization_safe_distance_m": 0.4293079057,
+      "guide_corridor_weight": 2000.0,
+      "corridor_max_radius_m": 0.45,
+      "corridor_min_radius_m": 0.04,
+      "corridor_sample_step_m": 0.025
+    }
+  },
+  "calibration_status": {
+    "source": "configs/robots/dingo_calibration_v1.json",
+    "verified": ["circumscribed_radius", "esdf_half_cell", "static_model_uncertainty"],
+    "placeholder": [
+      {"component": "tracking_margin_0.05m", "reason": "command_delay not measured"}
+    ]
+  },
+  "state_variants": [
+    {"case_uid":"state_v_zero","source_case_uid":"syn_straight","velocity_xyz_mps":[0.0,0.0,0.0],"factor_name":"initial_speed_mps","factor_level":0.0,"tags":["velocity_zero"]},
+    {"case_uid":"state_v_low","source_case_uid":"syn_straight","velocity_xyz_mps":[0.25,0.0,0.0],"factor_name":"initial_speed_mps","factor_level":0.25,"tags":["velocity_low"]},
+    {"case_uid":"state_v_mid","source_case_uid":"syn_straight","velocity_xyz_mps":[0.5,0.0,0.0],"factor_name":"initial_speed_mps","factor_level":0.5,"tags":["velocity_mid"]},
+    {"case_uid":"state_v_high","source_case_uid":"syn_straight","velocity_xyz_mps":[0.8,0.0,0.0],"factor_name":"initial_speed_mps","factor_level":0.8,"tags":["velocity_high"]},
+    {"case_uid":"state_v_limit","source_case_uid":"syn_straight","velocity_xyz_mps":[0.95,0.0,0.0],"factor_name":"initial_speed_mps","factor_level":0.95,"tags":["velocity_near_limit"]},
+    {"case_uid":"state_v_reverse","source_case_uid":"syn_straight","velocity_xyz_mps":[-0.5,0.0,0.0],"factor_name":"initial_speed_mps","factor_level":-0.5,"tags":["velocity_reverse"]},
+    {"case_uid":"state_v_lateral","source_case_uid":"syn_straight","velocity_xyz_mps":[0.0,0.5,0.0],"factor_name":"initial_lateral_speed_mps","factor_level":0.5,"tags":["velocity_lateral"]},
+    {"case_uid":"state_a_along","source_case_uid":"syn_straight","acceleration_xyz_mps2":[0.75,0.0,0.0],"factor_name":"initial_acceleration_x_mps2","factor_level":0.75,"tags":["initial_acceleration_only"]},
+    {"case_uid":"state_a_reverse","source_case_uid":"syn_straight","acceleration_xyz_mps2":[-0.75,0.0,0.0],"factor_name":"initial_acceleration_x_mps2","factor_level":-0.75,"tags":["initial_acceleration_only"]},
+    {"case_uid":"state_a_lateral","source_case_uid":"syn_straight","acceleration_xyz_mps2":[0.0,0.75,0.0],"factor_name":"initial_acceleration_y_mps2","factor_level":0.75,"tags":["initial_acceleration_only"]},
+    {"case_uid":"state_yaw_small","source_case_uid":"syn_straight","yaw_rad":0.25,"factor_name":"yaw_error_rad","factor_level":0.25,"tags":["yaw_small"]},
+    {"case_uid":"state_yaw_mid","source_case_uid":"syn_straight","yaw_rad":1.2,"factor_name":"yaw_error_rad","factor_level":1.2,"tags":["yaw_mid"]},
+    {"case_uid":"state_yaw_large","source_case_uid":"syn_straight","yaw_rad":2.6,"factor_name":"yaw_error_rad","factor_level":2.6,"tags":["yaw_large"]},
+    {"case_uid":"state_yaw_reverse","source_case_uid":"syn_straight","yaw_rad":3.1,"factor_name":"yaw_error_rad","factor_level":3.1,"tags":["yaw_near_reverse"]},
+    {"case_uid":"state_yawrate_normal","source_case_uid":"syn_straight","yaw_rate_radps":0.25,"factor_name":"initial_yaw_rate_radps","factor_level":0.25,"tags":["yaw_rate_normal"]},
+    {"case_uid":"state_yawrate_limit","source_case_uid":"syn_straight","yaw_rate_radps":0.48,"factor_name":"initial_yaw_rate_radps","factor_level":0.48,"tags":["yaw_rate_near_limit"]},
+    {"case_uid":"state_yawrate_over","source_case_uid":"syn_straight","yaw_rate_radps":0.6,"factor_name":"initial_yaw_rate_radps","factor_level":0.6,"tags":["yaw_rate_over_limit"]},
+    {"case_uid":"state_offset_small","source_case_uid":"syn_straight","lateral_offset_m":0.15,"factor_name":"initial_lateral_offset_m","factor_level":0.15,"tags":["guide_offset_small"]},
+    {"case_uid":"state_offset_large","source_case_uid":"syn_straight","lateral_offset_m":0.35,"factor_name":"initial_lateral_offset_m","factor_level":0.35,"tags":["guide_offset_large"]}
+  ],
+  "obstacle_variants": [
+    {
+      "source_case_uid": "syn_l90",
+      "variants": [
+        {"case_uid_suffix": "sparse", "density": "sparse", "clearance_target_m": 0.60},
+        {"case_uid_suffix": "dense", "density": "dense", "clearance_target_m": 0.32}
+      ]
+    },
+    {
+      "source_case_uid": "syn_s_curve",
+      "variants": [
+        {"case_uid_suffix": "sparse", "density": "sparse", "clearance_target_m": 0.60},
+        {"case_uid_suffix": "dense", "density": "dense", "clearance_target_m": 0.32}
+      ]
+    },
+    {
+      "source_case_uid": "syn_straight",
+      "variants": [
+        {"case_uid_suffix": "sparse", "density": "sparse", "clearance_target_m": 0.60},
+        {"case_uid_suffix": "dense", "density": "dense", "clearance_target_m": 0.32}
+      ]
+    }
+  ],
+  "factor_grids": [
+    {
+      "grid_uid": "grid_speed_yaw_on_s_curve",
+      "factor_scale": "continuous",
+      "source_case_uid": "syn_s_curve",
+      "x_factor": {
+        "name": "initial_speed_mps",
+        "field": "velocity_x_mps",
+        "levels": [0.0, 0.5, 0.95]
+      },
+      "y_factor": {
+        "name": "yaw_error_rad",
+        "field": "yaw_rad",
+        "levels": [0.0, 1.2, 2.6]
+      }
+    },
+    {
+      "grid_uid": "grid_speed_yaw_on_l90",
+      "factor_scale": "continuous",
+      "source_case_uid": "syn_l90",
+      "x_factor": {
+        "name": "initial_speed_mps",
+        "field": "velocity_x_mps",
+        "levels": [0.0, 0.5, 0.95]
+      },
+      "y_factor": {
+        "name": "yaw_error_rad",
+        "field": "yaw_rad",
+        "levels": [0.0, 1.2, 2.6]
+      }
+    },
+    {
+      "grid_uid": "grid_speed_yaw_on_narrow",
+      "factor_scale": "continuous",
+      "source_case_uid": "syn_narrow_channel",
+      "x_factor": {
+        "name": "initial_speed_mps",
+        "field": "velocity_x_mps",
+        "levels": [0.0, 0.3, 0.6]
+      },
+      "y_factor": {
+        "name": "yaw_error_rad",
+        "field": "yaw_rad",
+        "levels": [0.0, 0.5, 1.2]
+      }
+    },
+    {
+      "grid_uid": "grid_yawrate_speed_on_l90",
+      "factor_scale": "continuous",
+      "source_case_uid": "syn_l90",
+      "x_factor": {
+        "name": "initial_yaw_rate_radps",
+        "field": "yaw_rate_radps",
+        "levels": [0.0, 0.25, 0.48]
+      },
+      "y_factor": {
+        "name": "initial_speed_mps",
+        "field": "velocity_x_mps",
+        "levels": [0.0, 0.5, 0.95]
+      }
+    },
+    {
+      "grid_uid": "grid_accel_yaw_on_l90",
+      "factor_scale": "continuous",
+      "source_case_uid": "syn_l90",
+      "x_factor": {
+        "name": "initial_acceleration_x_mps2",
+        "field": "acceleration_x_mps2",
+        "levels": [0.0, 0.5, 0.75]
+      },
+      "y_factor": {
+        "name": "yaw_error_rad",
+        "field": "yaw_rad",
+        "levels": [0.0, 1.2, 2.6]
+      }
+    }
+  ]
+}

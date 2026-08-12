@@ -1129,15 +1129,17 @@ bool MincoPipeline::validateTrajectory(
         ++diagnostics->validation_start_exempt_count;
       }
       prior_clearance = node.clearance;
-      int matched_segment = corridor_segment;
-      double corridor_margin = 0.0;
-      if (!corridor_.contains(
-          node.pos, corridor_segment, &matched_segment, &corridor_margin))
-      {
-        return reject(
-          "VALIDATION_CORRIDOR", sample_index, node.t, node.pos, corridor_margin, 0.0);
+      if (config_.constraint_profile == "safe_corridor_v1") {
+        int matched_segment = corridor_segment;
+        double corridor_margin = 0.0;
+        if (!corridor_.contains(
+            node.pos, corridor_segment, &matched_segment, &corridor_margin))
+        {
+          return reject(
+            "VALIDATION_CORRIDOR", sample_index, node.t, node.pos, corridor_margin, 0.0);
+        }
+        corridor_segment = matched_segment;
       }
-      corridor_segment = matched_segment;
       const double speed = node.vel.head<2>().norm();
       const double acceleration = node.acc.head<2>().norm();
       const double jerk = node.jerk.head<2>().norm();
