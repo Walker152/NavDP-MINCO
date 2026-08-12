@@ -803,7 +803,6 @@ def _render_selected_artifacts(
     output_dir: Path,
     frozen: dict[str, Any],
 ) -> None:
-    import imageio.v2 as imageio
     from PIL import Image, ImageOps, ImageDraw
 
     root = output_dir / "selected_artifacts"
@@ -876,44 +875,26 @@ def _render_selected_artifacts(
         card.save(card_path)
         artifacts.append(str(card_path.relative_to(output_dir)))
 
-        gifs = [
-            next(profile_dirs[profile].glob("*_animation.gif"))
-            for profile in ("legacy", "safe_corridor_v1")
-        ]
-        frames = [imageio.mimread(path) for path in gifs]
-        frame_count = max(len(sequence) for sequence in frames)
-        paired_frames = []
-        for index in range(frame_count):
-            left = np.asarray(frames[0][min(index, len(frames[0]) - 1)])
-            right = np.asarray(frames[1][min(index, len(frames[1]) - 1)])
-            height = max(left.shape[0], right.shape[0])
-            if left.shape[0] != height:
-                left = np.pad(
-                    left, ((0, height - left.shape[0]), (0, 0), (0, 0)),
-                    constant_values=255,
-                )
-            if right.shape[0] != height:
-                right = np.pad(
-                    right, ((0, height - right.shape[0]), (0, 0), (0, 0)),
-                    constant_values=255,
-                )
-            paired_frames.append(np.concatenate((left, right), axis=1))
-        paired_gif = root / uid / f"{uid}_legacy_vs_safe.gif"
-        imageio.mimsave(paired_gif, paired_frames, duration=0.1, loop=0)
-        artifacts.append(str(paired_gif.relative_to(output_dir)))
         legacy_case, legacy_result, _, legacy_detail = per_case[(uid, "legacy")]
         _, safe_result, _, safe_detail = per_case[(uid, "safe_corridor_v1")]
-        paired_evidence = build_paired_static_gif_evidence(
+
+        paired_gif = root / uid / f"{uid}_legacy_vs_safe.gif"
+        from experiments.visualizers.static_benchmark import render_paired_static_gif
+        render_paired_static_gif(
             paired_gif,
             case=legacy_case,
             legacy_result=legacy_result,
             legacy_detail=legacy_detail,
-            legacy_gif_path=gifs[0],
             safe_result=safe_result,
             safe_detail=safe_detail,
-            safe_gif_path=gifs[1],
         )
+        artifacts.append(str(paired_gif.relative_to(output_dir)))
+
+        # render_paired_static_gif builds the evidence package internally;
+        # register its files as artifacts for receipting.
+        paired_evidence_dir = paired_gif.with_name(f"{paired_gif.stem}_evidence")
         artifacts.extend(
-            str(path.relative_to(output_dir)) for path in paired_evidence
+            str(path.relative_to(output_dir))
+            for path in sorted(paired_evidence_dir.iterdir())
         )
         frozen["cases"][uid]["artifact_paths"] = artifacts
