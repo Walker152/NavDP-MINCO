@@ -629,10 +629,10 @@ def render_static_case(
             linestyle="--",
             label="safe distance",
         )
+        ax.legend(loc="best")
     else:
         ax.text(0.5, 0.5, "ESDF/path evidence unavailable", ha="center", va="center")
     ax.set(xlabel="arc length (m)", ylabel="clearance (m)", title=f"{case.case_uid} clearance")
-    ax.legend(loc="best")
     figure.savefig(clearance, dpi=300, facecolor="white")
     figure.savefig(
         clearance_pdf,
