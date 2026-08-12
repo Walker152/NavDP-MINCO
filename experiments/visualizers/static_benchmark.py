@@ -560,21 +560,13 @@ def render_paired_static_gif(
                 state_text = "state: N/A\n"
 
             clearance_val = _nearest_clearance(centre, safe_detail if method == "safe_corridor_v1" else legacy_detail)
-            local_goal_text = "N/A"
-            final_goal_text = (
-                f"{case.terminal_goal[0]:.2f}/{case.terminal_goal[1]:.2f}"
-                if case.terminal_goal is not None else "N/A"
-            )
 
             ax.text(
                 0.02, 0.98,
                 f"{method}\n"
-                f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s · "
-                f"frame {encoded_index + 1}/{total_frames}\n"
+                f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s\n"
                 f"{state_text}"
                 f"clearance: {clearance_val if clearance_val != '' else 'N/A'} m\n"
-                f"local goal: {local_goal_text} m\n"
-                f"final goal: {final_goal_text} m\n"
                 f"status: {result.status}",
                 transform=ax.transAxes,
                 ha="left", va="top",
@@ -1155,21 +1147,13 @@ def render_static_case(
             state_text = "state: N/A\n"
 
         clearance_val = _nearest_clearance(centre, detail)
-        local_goal_text = "N/A"
-        final_goal_text = (
-            f"{case.terminal_goal[0]:.2f}/{case.terminal_goal[1]:.2f}"
-            if case.terminal_goal is not None else "N/A"
-        )
 
         ax.text(
             0.02, 0.98,
             f"{case.constraint_profile}\n"
-            f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s · "
-            f"frame {encoded_index + 1}/{total_frames}\n"
+            f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s\n"
             f"{state_text}"
             f"clearance: {clearance_val if clearance_val != '' else 'N/A'} m\n"
-            f"local goal: {local_goal_text} m\n"
-            f"final goal: {final_goal_text} m\n"
             f"status: {result.status}",
             transform=ax.transAxes,
             ha="left", va="top",
