@@ -30,6 +30,10 @@ from experiments.static.benchmark import (
     validate_static_benchmark,
 )
 from experiments.static.selection import run_boundary_selection
+from experiments.rolling.showcase import (
+    run_rolling_showcase,
+    validate_showcase,
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,8 @@ class WorkflowOptions:
     allow_real_simulation: bool = False
     full_suite: bool = False
     skip_video: bool = False
+    skip_rolling_showcase: bool = False
+    rolling_showcase_config: Path | None = None
     legacy_config: Path | None = None
     safe_config: Path | None = None
     selection_config: Path | None = None
@@ -130,6 +136,11 @@ def _resolve_options(repo_root: Path, options: WorkflowOptions) -> WorkflowOptio
         allow_real_simulation=options.allow_real_simulation,
         full_suite=options.full_suite,
         skip_video=options.skip_video,
+        skip_rolling_showcase=options.skip_rolling_showcase,
+        rolling_showcase_config=Path(
+            options.rolling_showcase_config
+            or config_dir / "rolling_showcase_v1.json"
+        ).resolve(),
         legacy_config=Path(
             options.legacy_config or config_dir / "static_legacy_suite.json"
         ).resolve(),
@@ -491,6 +502,31 @@ def _paper(input_root: Path, output: Path) -> dict[str, object]:
     return generate_paper_report(input_root, output)
 
 
+def _run_rolling_showcase_stage(
+    *,
+    output_root: Path,
+    options: WorkflowOptions,
+    input_paths: Sequence[Path],
+) -> dict[str, object]:
+    output = output_root / "paper_showcase"
+
+    def action() -> None:
+        run_rolling_showcase(options.rolling_showcase_config, output)
+        errors = validate_showcase(output)
+        if errors:
+            raise RuntimeError("rolling showcase validation failed: " + "; ".join(errors))
+
+    return _run_stage(
+        output_root=output_root,
+        options=options,
+        name="rolling_showcase",
+        command=("rolling-showcase", str(options.rolling_showcase_config)),
+        input_paths=input_paths,
+        output_paths=(output,),
+        action=action,
+    )
+
+
 def _validate_inventory(root: Path) -> list[str]:
     path = root / "artifact_receipt.json"
     try:
@@ -504,7 +540,9 @@ def _validate_inventory(root: Path) -> list[str]:
     ]
 
 
-def _static_validation(output_root: Path) -> None:
+def _static_validation(
+    output_root: Path, *, require_rolling_showcase: bool = True
+) -> None:
     errors = []
     errors.extend(validate_static_benchmark(output_root / "static" / "legacy"))
     errors.extend(
@@ -512,6 +550,8 @@ def _static_validation(output_root: Path) -> None:
     )
     errors.extend(_validate_inventory(output_root / "paper"))
     errors.extend(validate_paper_artifact_manifest(output_root / "paper"))
+    if require_rolling_showcase:
+        errors.extend(validate_showcase(output_root / "paper_showcase"))
     selection = output_root / "boundary" / "selected_dynamic_cases.json"
     try:
         frozen = json.loads(selection.read_text(encoding="utf-8"))
@@ -566,7 +606,7 @@ def _write_artifact_manifest(output_root: Path) -> dict[str, object]:
 
 
 def _workflow_inputs(repo_root: Path, options: WorkflowOptions) -> list[Path]:
-    return [
+    paths = [
         options.legacy_config,
         options.safe_config,
         options.selection_config,
@@ -575,6 +615,9 @@ def _workflow_inputs(repo_root: Path, options: WorkflowOptions) -> list[Path]:
         options.robot_usd,
         repo_root / "configs" / "robots" / "dingo_config.py",
     ]
+    if not options.skip_rolling_showcase:
+        paths.append(options.rolling_showcase_config)
+    return paths
 
 
 def _prepare_root(output_root: Path, resume: bool) -> None:
@@ -665,6 +708,12 @@ def run_static_workflow(
             options.selection_config, boundary_output
         ),
     )
+    if not options.skip_rolling_showcase:
+        stages["rolling_showcase"] = _run_rolling_showcase_stage(
+            output_root=output_root,
+            options=options,
+            input_paths=common_inputs,
+        )
     paper_output = output_root / "paper"
     stages["paper_report"] = _run_stage(
         output_root=output_root,
@@ -687,7 +736,10 @@ def run_static_workflow(
         command=("validate-static-workflow",),
         input_paths=common_inputs,
         output_paths=(validation_output,),
-        action=lambda: _static_validation(output_root),
+        action=lambda: _static_validation(
+            output_root,
+            require_rolling_showcase=not options.skip_rolling_showcase,
+        ),
     )
     manifest = _write_artifact_manifest(output_root)
     receipt = {
@@ -701,6 +753,8 @@ def run_static_workflow(
             "resume": options.resume,
             "retry_failed": options.retry_failed,
             "skip_video": options.skip_video,
+            "skip_rolling_showcase": options.skip_rolling_showcase,
+            "rolling_showcase_config": str(options.rolling_showcase_config),
         },
         "stages": stages,
         "validation_errors": [],

@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "showcase_id": "rolling_showcase_v1",
+  "data_source": "STATIC_SYNTHETIC",
+  "methods": ["legacy", "safe_corridor_v1"],
+  "rollout": {
+    "planning_period_s": 0.5,
+    "execute_duration_s": 0.5,
+    "local_horizon_m": 2.0,
+    "max_cycles": 40,
+    "max_time_s": 20.0,
+    "stall_window_cycles": 4,
+    "stall_distance_m": 0.02,
+    "collision_distance_m": 0.0,
+    "goal_tolerance_m": 0.1
+  },
+  "visual": {"fps": 8, "dpi": 300, "yaw_arrow_spacing_m": 0.75},
+  "scenarios": [
+    {
+      "scenario_uid": "unobstructed", "family": "unobstructed", "world_bounds_xy": [-1, -3, 9, 4], "resolution_m": 0.1,
+      "guide_path_xyz": [[0,0,0],[2,0.5,0],[4,0,0],[6,-0.5,0],[8,0,0]], "final_goal_xyz": [8,0,0],
+      "initial_state": {"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},
+      "static_rectangles": [], "moving_discs": [], "max_experiment_time_s": 20, "seed": 101
+    },
+    {
+      "scenario_uid": "static_sparse", "family": "static_sparse", "world_bounds_xy": [-1,-3,9,4], "resolution_m": 0.1,
+      "guide_path_xyz": [[0,0,0],[2,0.8,0],[4,-0.6,0],[6,0.7,0],[8,0,0]], "final_goal_xyz":[8,0,0],
+      "initial_state":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},
+      "static_rectangles":[{"obstacle_uid":"sparse_a","bounds_xy":[2.7,-0.2,3.3,0.7]},{"obstacle_uid":"sparse_b","bounds_xy":[5.0,-1.2,5.7,-0.3]}], "moving_discs":[], "max_experiment_time_s":20, "seed":102
+    },
+    {
+      "scenario_uid": "static_dense", "family": "static_dense", "world_bounds_xy": [-1,-3,9,4], "resolution_m": 0.1,
+      "guide_path_xyz": [[0,0,0],[1.5,1.1,0],[3,-1.0,0],[4.5,1.2,0],[6,-1,0],[8,0,0]], "final_goal_xyz":[8,0,0],
+      "initial_state":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},
+      "static_rectangles":[{"obstacle_uid":"dense_a","bounds_xy":[1.6,-0.5,2.3,0.4]},{"obstacle_uid":"dense_b","bounds_xy":[2.8,0.2,3.6,1.2]},{"obstacle_uid":"dense_c","bounds_xy":[4.1,-1.3,4.9,-0.3]},{"obstacle_uid":"dense_d","bounds_xy":[5.4,0.2,6.2,1.3]},{"obstacle_uid":"dense_e","bounds_xy":[6.5,-1.2,7.2,-0.2]}], "moving_discs":[], "max_experiment_time_s":20, "seed":103
+    },
+    {
+      "scenario_uid":"narrow_passage","family":"narrow_passage","world_bounds_xy":[-1,-3,9,4],"resolution_m":0.1,
+      "guide_path_xyz":[[0,0,0],[2,0,0],[4,0,0],[6,0,0],[8,0,0]],"final_goal_xyz":[8,0,0],
+      "initial_state":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},
+      "static_rectangles":[{"obstacle_uid":"narrow_upper","bounds_xy":[2.5,0.55,5.5,3.5]},{"obstacle_uid":"narrow_lower","bounds_xy":[2.5,-2.5,5.5,-0.55]}],"moving_discs":[],"max_experiment_time_s":20,"seed":104
+    },
+    {
+      "scenario_uid":"malformed_detour","family":"malformed_detour","world_bounds_xy":[-1,-3,9,4],"resolution_m":0.1,
+      "guide_path_xyz":[[0,0,0],[2,1.7,0],[3.2,-1.7,0],[4.4,1.7,0],[6,-1.5,0],[8,0,0]],"final_goal_xyz":[8,0,0],
+      "initial_state":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},
+      "static_rectangles":[{"obstacle_uid":"detour_a","bounds_xy":[2.2,-0.7,2.9,0.7]},{"obstacle_uid":"detour_b","bounds_xy":[4.0,-0.8,4.8,0.8]},{"obstacle_uid":"detour_c","bounds_xy":[5.8,-0.6,6.5,0.9]}],"moving_discs":[],"max_experiment_time_s":20,"seed":105
+    },
+    {
+      "scenario_uid":"dynamic_crossing","family":"dynamic_crossing","world_bounds_xy":[-1,-3,9,4],"resolution_m":0.1,
+      "guide_path_xyz":[[0,0,0],[2,0,0],[4,0,0],[6,0,0],[8,0,0]],"final_goal_xyz":[8,0,0],
+      "initial_state":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},"static_rectangles":[],
+      "moving_discs":[{"obstacle_uid":"crossing_disc","radius_m":0.35,"keyframes":[[0,4,-2],[4,4,2],[20,4,2]]}],"max_experiment_time_s":20,"seed":106
+    },
+    {
+      "scenario_uid":"dynamic_head_on","family":"dynamic_head_on","world_bounds_xy":[-1,-3,9,4],"resolution_m":0.1,
+      "guide_path_xyz":[[0,0,0],[2,0,0],[4,0,0],[6,0,0],[8,0,0]],"final_goal_xyz":[8,0,0],
+      "initial_state":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},"static_rectangles":[],
+      "moving_discs":[{"obstacle_uid":"head_on_disc","radius_m":0.35,"keyframes":[[0,7.5,0],[8,1.5,0],[20,1.5,0]]}],"max_experiment_time_s":20,"seed":107
+    },
+    {
+      "scenario_uid":"dynamic_sudden_appearance","family":"dynamic_sudden_appearance","world_bounds_xy":[-1,-3,9,4],"resolution_m":0.1,
+      "guide_path_xyz":[[0,0,0],[2,0.4,0],[4,0,0],[6,-0.4,0],[8,0,0]],"final_goal_xyz":[8,0,0],
+      "initial_state":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},"static_rectangles":[],
+      "moving_discs":[{"obstacle_uid":"sudden_disc","radius_m":0.4,"active_from_s":2.0,"keyframes":[[0,4.5,0.7],[2,4.5,0.7],[5,4.5,-0.7],[20,4.5,-0.7]]}],"max_experiment_time_s":20,"seed":108
+    }
+  ],
+  "initial_state_sweeps": [
+    {"sweep_uid":"initial_position","factor":"position_xyz","baseline":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},"variants":[{"position_xyz":[0,0.25,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0}]},
+    {"sweep_uid":"initial_velocity","factor":"velocity_xyz_mps","baseline":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},"variants":[{"position_xyz":[0,0,0],"velocity_xyz_mps":[0.4,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0}]},
+    {"sweep_uid":"initial_acceleration","factor":"acceleration_xyz_mps2","baseline":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0.3,0,0],"yaw_rad":0,"yaw_rate_radps":0},"variants":[{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[-0.3,0,0],"yaw_rad":0,"yaw_rate_radps":0}]},
+    {"sweep_uid":"initial_yaw","factor":"yaw_rad","baseline":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},"variants":[{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0.35,"yaw_rate_radps":0}]},
+    {"sweep_uid":"initial_yaw_rate","factor":"yaw_rate_radps","baseline":{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0},"variants":[{"position_xyz":[0,0,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0.3}]}
+  ]
+}

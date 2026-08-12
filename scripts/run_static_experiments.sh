@@ -13,6 +13,10 @@ Options:
   --resume          Reuse hash-compatible completed stages
   --retry-failed    Retry previously failed stages
   --skip-video      Disable video work where applicable
+  --rolling-showcase-config PATH
+                    Override the deterministic rolling showcase configuration
+  --skip-rolling-showcase
+                    Skip the paper showcase stage explicitly
   -h, --help        Show this help
 EOF
 }

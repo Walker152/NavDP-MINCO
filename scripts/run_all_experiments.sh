@@ -14,6 +14,9 @@ Options:
   --resume                  Reuse hash-compatible completed stages
   --retry-failed            Retry previously failed stages
   --skip-video              Disable video capture for authorized real runs
+  --rolling-showcase-config PATH
+                            Override rolling showcase configuration
+  --skip-rolling-showcase   Skip deterministic paper showcase generation
   --allow-real-simulation   Explicitly authorize the dynamic Isaac pilot
   --full-suite              With authorization, also run the full Isaac suite
   -h, --help                Show this help

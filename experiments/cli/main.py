@@ -83,6 +83,8 @@ def build_parser():
         workflow.add_argument("--allow-real-simulation", action="store_true")
         workflow.add_argument("--full-suite", action="store_true")
         workflow.add_argument("--skip-video", action="store_true")
+        workflow.add_argument("--skip-rolling-showcase", action="store_true")
+        workflow.add_argument("--rolling-showcase-config")
     return parser
 
 
@@ -98,6 +100,12 @@ def _workflow_options(args) -> WorkflowOptions:
         allow_real_simulation=args.allow_real_simulation,
         full_suite=args.full_suite,
         skip_video=args.skip_video,
+        skip_rolling_showcase=args.skip_rolling_showcase,
+        rolling_showcase_config=(
+            None
+            if args.rolling_showcase_config is None
+            else Path(args.rolling_showcase_config)
+        ),
     )
 
 
