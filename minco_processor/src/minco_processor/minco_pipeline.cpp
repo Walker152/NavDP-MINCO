@@ -652,11 +652,13 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
     result.yaw_trajectory.emplace_back(std::max(0.02, result.trajectory.getTotalDuration()), cMat);
   }
   result.timing_ms["yaw_ms"] = elapsedMs(stage_start);
-  if (config_.constraint_profile == "safe_corridor_v1" &&
-    !validateYawAndWheels(result.trajectory, result.yaw_trajectory, &result))
-  {
-    result.failure_reason = result.validation_failure_reason;
-    return finish();
+  if (config_.enable_yaw_wheel_validation ||
+      config_.constraint_profile == "safe_corridor_v1") {
+    if (!validateYawAndWheels(result.trajectory, result.yaw_trajectory, &result))
+    {
+      result.failure_reason = result.validation_failure_reason;
+      return finish();
+    }
   }
 
   result.trajectory.start_WT = request.now;
@@ -962,7 +964,10 @@ bool MincoPipeline::validateTrajectory(
   const geometry_utils::Trajectory & trajectory, const Eigen::Vector3d & expected_end_pos,
   Result * diagnostics) const
 {
-  if (config_.constraint_profile == "safe_corridor_v1") {
+  const bool use_strict_validation =
+      config_.enable_strict_validation ||
+      config_.constraint_profile == "safe_corridor_v1";
+  if (use_strict_validation) {
     auto reject = [diagnostics](
       const std::string & reason, int index, double t, const Eigen::Vector3d & position,
       double measured, double limit)
@@ -982,7 +987,8 @@ bool MincoPipeline::validateTrajectory(
       return reject(
         "VALIDATION_INVALID_DURATION", 0, 0.0, Eigen::Vector3d::Zero(), duration, 0.0);
     }
-    if (!map_ || corridor_.segments().empty()) {
+    if (config_.constraint_profile == "safe_corridor_v1" &&
+        (!map_ || corridor_.segments().empty())) {
       return reject(
         "VALIDATION_CORRIDOR", 0, 0.0, trajectory.getPos(0.0), -1.0, 0.0);
     }

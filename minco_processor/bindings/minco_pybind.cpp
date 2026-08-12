@@ -89,10 +89,23 @@ public:
     config_.max_wheel_speed = max_wheel_speed;
     pipeline_.setConfig(config_);
     if (map_) {
-      map_->setAnalyticGradient(
-        config_.constraint_profile == "safe_corridor_v1");
+      pipeline_.setMap(map_);
     }
-    pipeline_.setMap(map_);
+  }
+
+  void configureValidation(
+    double validation_dynamic_scale,
+    bool enable_strict_validation,
+    bool enable_yaw_wheel_validation,
+    bool analytic_gradient)
+  {
+    config_.validation_dynamic_scale = validation_dynamic_scale;
+    config_.enable_strict_validation = enable_strict_validation;
+    config_.enable_yaw_wheel_validation = enable_yaw_wheel_validation;
+    if (map_) {
+      map_->setAnalyticGradient(analytic_gradient);
+    }
+    pipeline_.setConfig(config_);
   }
 
   void set_static_esdf_2d(
@@ -346,6 +359,11 @@ PYBIND11_MODULE(_minco_processor, m)
       py::arg("wheel_radius"),
       py::arg("wheel_base"),
       py::arg("max_wheel_speed"))
+    .def("configure_validation", &MincoProcessorPy::configureValidation,
+      py::arg("validation_dynamic_scale"),
+      py::arg("enable_strict_validation"),
+      py::arg("enable_yaw_wheel_validation"),
+      py::arg("analytic_gradient"))
     .def("set_static_esdf_2d", &MincoProcessorPy::set_static_esdf_2d,
       py::arg("distance"), py::arg("free"), py::arg("origin"), py::arg("resolution"))
     .def("optimize", &MincoProcessorPy::optimize,

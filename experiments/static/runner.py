@@ -110,6 +110,16 @@ def _configure_processor(processor: object, profile: Mapping[str, Any]) -> None:
         float(profile["time_weight"]),
         float(profile["time_barrier_weight"]),
     )
+    # Apply shared validation configuration when present (unified sweep)
+    validation_dynamic_scale = float(profile.get("validation_dynamic_scale", 1.5))
+    enable_strict = bool(profile.get("enable_strict_validation", False))
+    enable_yaw_wheel = bool(profile.get("enable_yaw_wheel_validation", False))
+    analytic_gradient = bool(profile.get("analytic_gradient", False))
+    if enable_strict or enable_yaw_wheel or profile.get("validation_dynamic_scale") is not None:
+        if hasattr(processor, "configure_validation"):
+            processor.configure_validation(
+                validation_dynamic_scale, enable_strict, enable_yaw_wheel, analytic_gradient)
+
     constraint_profile = str(profile.get("constraint_profile", "legacy"))
     if constraint_profile == "safe_corridor_v1":
         processor.configure_safety_profile(

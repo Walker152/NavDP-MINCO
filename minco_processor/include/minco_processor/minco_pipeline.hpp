@@ -40,6 +40,8 @@ public:
     double sample_dt{0.05};
     double validation_dynamic_scale{1.5};
     double start_validation_exemption_radius{0.35};
+    bool enable_strict_validation{false};
+    bool enable_yaw_wheel_validation{false};
     bool enable_yaw_opt{true};
     double max_yaw_rate{0.5};
     std::string constraint_profile{"legacy"};
