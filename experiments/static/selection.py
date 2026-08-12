@@ -702,6 +702,9 @@ def run_boundary_selection(
         frozen["best2"] + frozen["worst2"], per_case, output_dir, frozen
     )
 
+    # Render factor grid comparison GIFs for each scan group
+    _render_factor_grid_gifs(config, per_case, output_dir)
+
     (output_dir / "selection_policy.json").write_text(
         json.dumps(policy, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -793,6 +796,65 @@ def run_boundary_selection(
         encoding="utf-8",
     )
     return frozen
+
+
+def _render_factor_grid_gifs(
+    config: Mapping[str, Any],
+    per_case: Mapping[
+        tuple[str, str], tuple[StaticCase, Any, dict[str, Any], dict[str, Any]]
+    ],
+    output_dir: Path,
+) -> None:
+    """Render factor-grid comparison GIFs for each factor_grid in the config."""
+    from experiments.visualizers.static_benchmark import render_factor_grid_gif
+
+    for grid in config.get("factor_grids", []):
+        grid_uid = str(grid["grid_uid"])
+        x_factor = grid["x_factor"]
+        y_factor = grid["y_factor"]
+        x_levels = list(x_factor["levels"])
+        y_levels = list(y_factor["levels"])
+
+        grid_cells: list[list[dict[str, object]]] = []
+        for yi, y_level in enumerate(y_levels):
+            row_cells: list[dict[str, object]] = []
+            for xi, x_level in enumerate(x_levels):
+                case_uid = f"{grid_uid}_x{xi:02d}_y{yi:02d}"
+                profile = "safe_corridor_v1"
+                key = (case_uid, profile)
+                if key not in per_case:
+                    profile = "legacy"
+                    key = (case_uid, profile)
+                if key not in per_case:
+                    raise ValueError(
+                        f"factor grid case not found: {case_uid}"
+                    )
+                case, result, metrics, detail = per_case[key]
+                row_cells.append({
+                    "case": case,
+                    "result": result,
+                    "detail": detail,
+                })
+            grid_cells.append(row_cells)
+
+        grid_dir = output_dir / "factor_grids" / grid_uid
+        grid_dir.mkdir(parents=True, exist_ok=True)
+        gif_path = grid_dir / f"{grid_uid}_comparison.gif"
+
+        render_factor_grid_gif(
+            gif_path,
+            grid_cells=grid_cells,
+            row_factor={
+                "name": str(y_factor["name"]),
+                "levels": y_levels,
+                "label": str(y_factor["name"]),
+            },
+            col_factor={
+                "name": str(x_factor["name"]),
+                "levels": x_levels,
+                "label": str(x_factor["name"]),
+            },
+        )
 
 
 def _render_selected_artifacts(

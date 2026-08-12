@@ -598,6 +598,208 @@ def render_paired_static_gif(
     return gif_path
 
 
+def render_factor_grid_gif(
+    gif_path: Path | str,
+    *,
+    grid_cells: list[list[dict[str, object]]],
+    row_factor: dict[str, object],
+    col_factor: dict[str, object],
+    footprint_radius_m: float = 0.2,
+) -> Path:
+    """Render a factor-grid comparison GIF showing multiple initial-condition variants.
+
+    Args:
+        gif_path: Output path for the grid GIF.
+        grid_cells: 2D list (rows × cols) of dicts, each containing:
+            - case: StaticCase
+            - result: StaticRunResult
+            - detail: detail dict from compute_static_case_metrics
+        row_factor: {"name": str, "levels": list[float], "label": str}
+        col_factor: {"name": str, "levels": list[float], "label": str}
+        footprint_radius_m: Robot footprint radius in metres.
+
+    Returns:
+        Resolved Path to the grid GIF.
+    """
+    gif_path = Path(gif_path).resolve()
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+
+    n_rows = len(grid_cells)
+    n_cols = len(grid_cells[0]) if grid_cells else 0
+    if n_rows == 0 or n_cols == 0:
+        raise ValueError("grid_cells must be non-empty 2D")
+
+    # Determine base frames and compute shared view limits
+    all_points = []
+    cell_data: list[list[dict[str, object]]] = []
+    max_frames = 0
+    for ri, row_cells in enumerate(grid_cells):
+        cell_row: list[dict[str, object]] = []
+        for ci, cell in enumerate(row_cells):
+            case = cell["case"]
+            result = cell["result"]
+            path = _path(result)
+            if len(path) == 0:
+                path = case.guide_path_xyz
+            base_frames = min(16, len(path))
+            frame_indices = np.rint(
+                np.linspace(0, len(path) - 1, base_frames)
+            ).astype(int)
+            max_frames = max(max_frames, base_frames)
+            all_points.append(case.guide_path_xyz[:, :2])
+            all_points.append(path[:, :2])
+            if case.terminal_goal is not None:
+                all_points.append(case.terminal_goal[:2].reshape(1, 2))
+            cell_row.append({
+                "case": case,
+                "result": result,
+                "path": path,
+                "frame_indices": frame_indices,
+                "base_frames": base_frames,
+                "has_temporal": len(result.samples) == len(path) and len(result.samples) > 0,
+            })
+        cell_data.append(cell_row)
+
+    combined = np.concatenate(all_points, axis=0)
+    vmin = np.min(combined, axis=0)
+    vmax = np.max(combined, axis=0)
+    span = np.maximum(vmax - vmin, 1.0)
+    margin = max(0.3, 0.06 * float(max(span)))
+    limits = [
+        float(vmin[0] - margin), float(vmax[0] + margin),
+        float(vmin[1] - margin), float(vmax[1] + margin),
+    ]
+
+    # Panel dimensions
+    panel_size = 2.2  # inches per cell
+    label_width = 0.8
+    label_height = 0.3
+    fig_width = label_width + n_cols * panel_size
+    fig_height = label_height + n_rows * panel_size
+
+    row_label = str(row_factor.get("label", row_factor.get("name", "")))
+    col_label = str(col_factor.get("label", col_factor.get("name", "")))
+    row_levels = list(row_factor.get("levels", []))
+    col_levels = list(col_factor.get("levels", []))
+
+    frames = []
+    for encoded_index in range(max_frames):
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(fig_width, fig_height),
+            constrained_layout=True,
+            squeeze=False,
+        )
+
+        for ri in range(n_rows):
+            for ci in range(n_cols):
+                ax = axes[ri, ci]
+                data = cell_data[ri][ci]
+                case = data["case"]
+                result = data["result"]
+                path = data["path"]
+                frame_indices = data["frame_indices"]
+                base_frames = data["base_frames"]
+
+                progress_index = min(encoded_index, base_frames - 1)
+                source_idx = int(frame_indices[progress_index])
+
+                _draw_map(ax, case)
+
+                # Guide path (thin)
+                ax.plot(
+                    case.guide_path_xyz[:, 0], case.guide_path_xyz[:, 1],
+                    "--", color="#9CA3AF", linewidth=0.6, alpha=0.7,
+                )
+
+                # Trajectory so far
+                ax.plot(
+                    path[: source_idx + 1, 0],
+                    path[: source_idx + 1, 1],
+                    color="#ff7f0e", linewidth=1.5,
+                )
+
+                # Start
+                ax.scatter(*case.start_position[:2], marker="s", color="green", s=30, zorder=8)
+
+                # Goal
+                if case.terminal_goal is not None:
+                    ax.scatter(*case.terminal_goal[:2], marker="*", s=60, color=GOAL_COLOR, zorder=10)
+
+                # Initial yaw arrow
+                arrow_len = 0.06 * max(limits[1] - limits[0], limits[3] - limits[2])
+                if math.isfinite(case.start_yaw):
+                    draw_heading_arrow(
+                        ax, case.start_position[:2], case.start_yaw,
+                        color="#111827", length_m=arrow_len, linewidth=1.2,
+                    )
+
+                # Current yaw
+                if data["has_temporal"] and math.isfinite(float(result.samples[source_idx, 13])):
+                    draw_heading_arrow(
+                        ax, path[source_idx, :2],
+                        float(result.samples[source_idx, 13]),
+                        color="#1D4ED8", length_m=arrow_len, linewidth=1.5,
+                    )
+
+                # Goal yaw
+                if case.terminal_goal is not None:
+                    goal_yaw_val = result.diagnostics.get("goal_yaw_rad", None)
+                    if goal_yaw_val is None or not math.isfinite(float(goal_yaw_val)):
+                        ax.annotate(
+                            "goal yaw: N/A", xy=case.terminal_goal[:2],
+                            xytext=(3, -10), textcoords="offset points",
+                            color=GOAL_COLOR, fontsize=5, zorder=10,
+                        )
+                    else:
+                        draw_heading_arrow(
+                            ax, case.terminal_goal[:2], float(goal_yaw_val),
+                            color=GOAL_COLOR, length_m=arrow_len,
+                            hollow=True, linewidth=1.0,
+                        )
+
+                # Robot footprint
+                centre = path[source_idx, :2]
+                ax.add_patch(
+                    plt.matplotlib.patches.Circle(
+                        centre, footprint_radius_m, color="#ff7f0e", alpha=0.3, zorder=7,
+                    )
+                )
+
+                _configure_axis(ax, limits, "")
+                ax.set_xticklabels([])
+                ax.set_yticklabels([])
+                ax.set_xlabel("")
+                ax.set_ylabel("")
+
+        # Row labels (y-axis factor)
+        for ri in range(n_rows):
+            ax = axes[ri, 0]
+            level_text = f"{row_levels[ri]:.2g}" if ri < len(row_levels) else ""
+            ax.set_ylabel(f"{row_label}\n{level_text}", fontsize=7, labelpad=2)
+
+        # Column labels (x-axis factor) — only on top row
+        for ci in range(n_cols):
+            ax = axes[0, ci]
+            level_text = f"{col_levels[ci]:.2g}" if ci < len(col_levels) else ""
+            ax.set_title(f"{col_label}={level_text}", fontsize=7, pad=2)
+
+        # Suptitle
+        fig.suptitle(
+            f"{row_label} × {col_label}  |  "
+            f"frame {encoded_index + 1}/{max_frames}  |  "
+            f"t={encoded_index * GIF_FRAME_DURATION_S:.1f}s",
+            fontsize=8, y=0.995,
+        )
+
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
+        plt.close(fig)
+
+    imageio.mimsave(gif_path, frames, duration=GIF_FRAME_DURATION_S, loop=0)
+    return gif_path
+
+
 def build_paired_static_gif_evidence(
     gif_path: Path | str,
     *,
