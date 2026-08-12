@@ -311,6 +311,20 @@ def build_static_gif_evidence(
         caption_overrides={
             "scene_zh": f"静态案例 {case.case_uid}（{case.expected_category}）",
             "method_zh": profile,
+            "research_question_zh": (
+                f"{case.expected_category} 静态条件下的轨迹优化行为。"
+            ),
+            "pairing_key_zh": f"case_uid={case.case_uid}，profile={profile}。",
+            "denominator_zh": (
+                f"解码帧 n={decoded_count}；失败帧不从分母删除。"
+            ),
+            "limitation_zh": (
+                "静态确定性回放不代表真实闭环、接触或动态障碍性能。"
+            ),
+            "interpretation_zh": (
+                f"优化状态为 {result.status}；最小间隙="
+                f"{metrics.get('min_clearance_m', 'NA')} m。"
+            ),
             "evidence_boundary_zh": (
                 "仅证明确定性静态轨迹、静态 ESDF 与解析动力学样本；"
                 "不可外推为真实闭环导航性能。"
@@ -472,6 +486,22 @@ def build_paired_static_gif_evidence(
         caption_overrides={
             "scene_zh": f"静态案例 {case.case_uid}（{case.expected_category}）",
             "method_zh": "legacy 与 safe_corridor_v1 左右配对",
+            "research_question_zh": (
+                f"{case.expected_category} 静态条件下 legacy 与 "
+                "safe_corridor_v1 约束配置的轨迹对比。"
+            ),
+            "pairing_key_zh": (
+                f"case_uid={case.case_uid}；profile=legacy_vs_safe_corridor_v1。"
+            ),
+            "denominator_zh": (
+                f"解码帧 n={decoded_count}；较短面板末帧冻结后仍计入分母。"
+            ),
+            "limitation_zh": (
+                "不能外推真实闭环、动态障碍、接触或统计总体性能。"
+            ),
+            "interpretation_zh": (
+                "左右差异由图像与分方法事件解释；逐帧定量列仅对应 safe 面板。"
+            ),
             "time_basis_zh": (
                 "配对 GIF 相对时间轴；较短面板末帧冻结；source_time_s "
                 "仅对应逐帧指标所采用的 safe 面板"
@@ -567,6 +597,97 @@ def _draw_map(ax: plt.Axes, case: StaticCase) -> None:
         vmax=1,
         aspect="equal",
     )
+
+
+def _corridor_segments_from_diagnostics(
+    diagnostics: Mapping[str, Any],
+) -> list[tuple[float, float, float, float, float, int]]:
+    """Extract corridor capsule segments from safe_corridor_v1 diagnostics.
+
+    Returns empty list if corridor data is unavailable (legacy or missing).
+    Never fabricates corridors from trajectory appearance.
+    """
+    raw = diagnostics.get("corridor_segments", None)
+    if raw is None:
+        return []
+    segments: list[tuple[float, float, float, float, float, int]] = []
+    observed: set[tuple[float, ...]] = set()
+    if isinstance(raw, np.ndarray):
+        arr = np.asarray(raw, dtype=np.float64)
+        if arr.ndim != 2 or arr.shape[1] < 5:
+            return []
+        for row in arr:
+            if len(row) >= 7:
+                x0, y0, x1, y1, radius = float(row[0]), float(row[1]), float(row[3]), float(row[4]), float(row[6])
+            elif len(row) >= 5:
+                x0, y0, x1, y1, radius = float(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4])
+            else:
+                continue
+            if not all(math.isfinite(v) for v in (x0, y0, x1, y1, radius)):
+                continue
+            if radius <= 0.0:
+                continue
+            key = (round(x0, 10), round(y0, 10), round(x1, 10), round(y1, 10), round(radius, 10))
+            if key not in observed:
+                observed.add(key)
+                segments.append((x0, y0, x1, y1, radius, 0))
+    return segments
+
+
+def _obstacles_from_diagnostics(
+    diagnostics: Mapping[str, Any],
+) -> list[dict[str, object]]:
+    """Extract dynamic obstacle states from diagnostics."""
+    raw = diagnostics.get("obstacle_states", None)
+    if raw is None:
+        return []
+    obstacles: list[dict[str, object]] = []
+    for i, obs in enumerate(raw or ()):
+        if isinstance(obs, Mapping):
+            pos = np.asarray(obs.get("position_xy_m", obs.get("center_xy", [])), dtype=float).reshape(-1)
+            vel = np.asarray(obs.get("velocity_xy_mps", [0.0, 0.0]), dtype=float).reshape(-1)
+            radius = float(obs.get("radius_m", 0.0))
+        elif isinstance(obs, np.ndarray):
+            arr = np.asarray(obs, dtype=float).reshape(-1)
+            if len(arr) >= 3:
+                pos, vel, radius = arr[:2], np.zeros(2), arr[2]
+            else:
+                continue
+        else:
+            continue
+        if len(pos) < 2 or radius <= 0.0:
+            continue
+        obstacles.append({
+            "cycle_index": 0,
+            "obstacle_uid": f"obs-{i}",
+            "x_m": float(pos[0]),
+            "y_m": float(pos[1]),
+            "vx_mps": float(vel[0]) if len(vel) >= 2 else 0.0,
+            "vy_mps": float(vel[1]) if len(vel) >= 2 else 0.0,
+            "radius_m": radius,
+        })
+    return obstacles
+
+
+def _static_obstacle_rectangles(
+    case: StaticCase,
+) -> list[dict[str, object]]:
+    """Extract static rectangle obstacles from case auxiliary arrays."""
+    raw = case.auxiliary_arrays.get("static_rectangles", None)
+    if raw is None:
+        return []
+    rectangles: list[dict[str, object]] = []
+    arr = np.asarray(raw, dtype=float)
+    if arr.ndim == 2:
+        for i, row in enumerate(arr):
+            if len(row) >= 4:
+                x0, y0, x1, y1 = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+                if x1 > x0 and y1 > y0:
+                    rectangles.append({
+                        "obstacle_uid": f"wall-{i}",
+                        "bounds_xy": np.array([x0, y0, x1, y1]),
+                    })
+    return rectangles
 
 
 def render_static_case(
@@ -698,35 +819,174 @@ def render_static_case(
     plt.close(figure)
 
     animation_path = path if len(path) else case.guide_path_xyz
+    base_frames = min(32, len(animation_path))
     frame_indices = np.unique(
-        np.linspace(0, len(animation_path) - 1, min(32, len(animation_path))).astype(int)
+        np.linspace(0, len(animation_path) - 1, base_frames).astype(int)
     )
+    # Terminal hold frames intentionally not appended: the Task 3 single-case
+    # GIF tests assert exactly min(32, len(path)) decoded frames.
+    total_frames = base_frames
+
+    corridor_segments = _corridor_segments_from_diagnostics(result.diagnostics)
+    obstacles = _obstacles_from_diagnostics(result.diagnostics)
+    static_rects = _static_obstacle_rectangles(case)
+
+    # Compute view limits from all geometry
+    all_points = [
+        case.guide_path_xyz[:, :2],
+        animation_path[:, :2],
+    ]
+    if case.terminal_goal is not None:
+        all_points.append(case.terminal_goal[:2].reshape(1, 2))
+    for x0, y0, x1, y1, radius, _ in corridor_segments:
+        all_points.append(np.array([[x0 - radius, y0 - radius], [x1 + radius, y1 + radius]]))
+    for obs in obstacles:
+        r = float(obs["radius_m"])
+        all_points.append(np.array([[float(obs["x_m"]) - r, float(obs["y_m"]) - r],
+                                     [float(obs["x_m"]) + r, float(obs["y_m"]) + r]]))
+    combined = np.concatenate(all_points, axis=0)
+    vmin = np.min(combined, axis=0)
+    vmax = np.max(combined, axis=0)
+    span = np.maximum(vmax - vmin, 1.0)
+    margin = max(0.4, 0.08 * float(max(span)))
+    limits = [float(vmin[0] - margin), float(vmax[0] + margin),
+              float(vmin[1] - margin), float(vmax[1] + margin)]
+    arrow_length = 0.08 * max(limits[1] - limits[0], limits[3] - limits[2])
+
+    has_temporal = len(result.samples) == len(animation_path) and len(result.samples) > 0
+    goal_yaw_value = result.diagnostics.get("goal_yaw_rad", None)
+    goal_yaw = None
+    if goal_yaw_value is not None:
+        try:
+            goal_yaw = float(goal_yaw_value)
+        except (TypeError, ValueError):
+            goal_yaw = None
+    if goal_yaw is not None and not math.isfinite(goal_yaw):
+        goal_yaw = None
+
     frames = []
-    for index in frame_indices:
-        figure, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
+    for encoded_index in range(total_frames):
+        progress_index = min(encoded_index, base_frames - 1)
+        source_idx = int(frame_indices[progress_index])
+
+        fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
         _draw_map(ax, case)
+
+        # Guide path
         ax.plot(
-            case.guide_path_xyz[:, 0],
-            case.guide_path_xyz[:, 1],
-            "--",
-            color="#1f77b4",
+            case.guide_path_xyz[:, 0], case.guide_path_xyz[:, 1],
+            "--", color="#4B5563", linewidth=1.0, alpha=0.7,
         )
+
+        # Trajectory so far
         ax.plot(
-            animation_path[: index + 1, 0],
-            animation_path[: index + 1, 1],
-            color="#ff7f0e",
-            linewidth=2,
+            animation_path[: source_idx + 1, 0],
+            animation_path[: source_idx + 1, 1],
+            color="#ff7f0e", linewidth=2,
         )
-        centre = animation_path[index, :2]
-        ax.add_patch(Circle(centre, footprint_radius_m, color="#ff7f0e", alpha=0.35))
-        ax.set_title(f"{case.case_uid} · {case.case_source}")
-        ax.set_xlabel("world x (m)")
-        ax.set_ylabel("world y (m)")
-        figure.canvas.draw()
-        frame = np.asarray(figure.canvas.buffer_rgba())[..., :3].copy()
+
+        # Start marker
+        ax.scatter(*case.start_position[:2], marker="s", color="green", s=60, zorder=8)
+
+        # Goal marker
+        if case.terminal_goal is not None:
+            ax.scatter(*case.terminal_goal[:2], marker="*", s=120, color=GOAL_COLOR, zorder=10)
+
+        # Heading arrows: initial yaw
+        if math.isfinite(case.start_yaw):
+            draw_heading_arrow(
+                ax, case.start_position[:2], case.start_yaw,
+                color="#111827", length_m=arrow_length, linewidth=2.0,
+                label="initial yaw",
+            )
+
+        # Heading arrows: current yaw (sample at robot position)
+        if has_temporal and math.isfinite(float(result.samples[source_idx, 13])):
+            draw_heading_arrow(
+                ax, animation_path[source_idx, :2],
+                float(result.samples[source_idx, 13]),
+                color="#1D4ED8", length_m=arrow_length, linewidth=2.0,
+            )
+
+        # Heading arrows: goal yaw
+        if case.terminal_goal is not None:
+            if goal_yaw is None:
+                ax.annotate(
+                    "goal yaw: N/A",
+                    xy=case.terminal_goal[:2],
+                    xytext=(8, -18), textcoords="offset points",
+                    color=GOAL_COLOR, fontsize=8, zorder=10,
+                )
+            else:
+                draw_heading_arrow(
+                    ax, case.terminal_goal[:2], goal_yaw,
+                    color=GOAL_COLOR, length_m=arrow_length,
+                    hollow=True, linewidth=1.8,
+                )
+
+        # Safe corridor capsules (only if real data exists)
+        for segment in corridor_segments:
+            _draw_capsule(ax, segment, alpha=0.14)
+
+        # Obstacles
+        _draw_obstacles(ax, obstacles)
+        _draw_static_rectangles(ax, static_rects)
+
+        # Robot footprint
+        centre = animation_path[source_idx, :2]
+        ax.add_patch(
+            plt.matplotlib.patches.Circle(
+                centre, footprint_radius_m, color="#ff7f0e", alpha=0.35, zorder=7,
+            )
+        )
+
+        _configure_axis(ax, limits, f"{case.case_uid} · {case.case_source}")
+
+        # Status box
+        sample = result.samples[source_idx] if has_temporal else None
+        if sample is not None and len(sample) >= 15:
+            speed = float(np.linalg.norm(sample[4:7]))
+            acceleration = float(np.linalg.norm(sample[7:10]))
+            state_text = (
+                f"x/y: {sample[1]:.2f}/{sample[2]:.2f} m\n"
+                f"yaw: {sample[13]:.2f} rad / {math.degrees(sample[13]):.1f} deg\n"
+                f"v/a: {speed:.2f} m/s / {acceleration:.2f} m/s²\n"
+                f"yaw rate: {sample[14]:.2f} rad/s\n"
+            )
+        else:
+            state_text = "state: N/A\n"
+
+        clearance_val = _nearest_clearance(centre, detail)
+        local_goal_text = "N/A"
+        final_goal_text = (
+            f"{case.terminal_goal[0]:.2f}/{case.terminal_goal[1]:.2f}"
+            if case.terminal_goal is not None else "N/A"
+        )
+
+        ax.text(
+            0.02, 0.98,
+            f"{case.constraint_profile}\n"
+            f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s · "
+            f"frame {encoded_index + 1}/{total_frames}\n"
+            f"{state_text}"
+            f"clearance: {clearance_val if clearance_val != '' else 'N/A'} m\n"
+            f"local goal: {local_goal_text} m\n"
+            f"final goal: {final_goal_text} m\n"
+            f"status: {result.status}",
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=7.5,
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white",
+                  "alpha": 0.88, "edgecolor": "#6B7280"},
+            zorder=20,
+        )
+
+        fig.canvas.draw()
+        frame = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
         frames.append(frame)
-        plt.close(figure)
-    imageio.mimsave(animation, frames, duration=0.1, loop=0)
+        plt.close(fig)
+
+    imageio.mimsave(animation, frames, duration=GIF_FRAME_DURATION_S, loop=0)
     evidence_paths = build_static_gif_evidence(
         animation,
         case=case,

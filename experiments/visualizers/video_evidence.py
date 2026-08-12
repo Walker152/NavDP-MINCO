@@ -81,18 +81,23 @@ CAPTION_FIELDS = (
     "证据编号",
     "媒体编号",
     "对象编号",
+    "配对键",
     "数据来源",
+    "研究问题",
     "媒体类型",
     "场景与方法",
     "时间基准",
     "帧与样本",
+    "分母",
     "指标与单位",
     "事件定义",
     "同步与误差",
     "缺失数据",
     "失败与终止",
     "证据边界",
+    "局限性",
     "结论限制",
+    "解读",
 )
 
 _CAPTION_DEFAULTS = {
@@ -106,6 +111,11 @@ _CAPTION_DEFAULTS = {
     "failure_handling_zh": "失败与终止事件保留在时间轴和分母中",
     "evidence_boundary_zh": "仅支持清单所列数据源和媒体内容",
     "conclusion_limit_zh": "不得超出数据来源与同步精度作性能推断",
+    "research_question_zh": "未单独声明研究问题；以证据编号与对象编号标识的研究对象为准",
+    "pairing_key_zh": "未单独声明配对键；以对象编号（case_uid/episode_uid）为键",
+    "denominator_zh": "分母为全部解码帧；失败与终止帧不从分母删除",
+    "limitation_zh": "证据仅支持清单所列数据源与媒体内容；不得外推至未测量条件",
+    "interpretation_zh": "解读需结合媒体、逐帧指标与事件时间线；单字段不构成结论",
 }
 
 
@@ -359,18 +369,23 @@ def _caption_values(
         "证据编号": evidence_uid,
         "媒体编号": media_uid,
         "对象编号": object_uid,
+        "配对键": values["pairing_key_zh"],
         "数据来源": data_source,
+        "研究问题": values["research_question_zh"],
         "媒体类型": media_type,
         "场景与方法": f"{values['scene_zh']}；{values['method_zh']}",
         "时间基准": values["time_basis_zh"],
         "帧与样本": f"解码帧 {frame_count}；逐帧记录 {frame_count}；事件 {event_count}",
+        "分母": values["denominator_zh"],
         "指标与单位": values["metrics_units_zh"],
         "事件定义": values["event_definition_zh"],
         "同步与误差": values["synchronization_zh"],
         "缺失数据": values["missing_data_zh"],
         "失败与终止": values["failure_handling_zh"],
         "证据边界": values["evidence_boundary_zh"],
+        "局限性": values["limitation_zh"],
         "结论限制": values["conclusion_limit_zh"],
+        "解读": values["interpretation_zh"],
     }
 
 
