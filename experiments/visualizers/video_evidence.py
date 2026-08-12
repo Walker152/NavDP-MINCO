@@ -46,8 +46,11 @@ FRAME_METRICS_FIELDS = (
     "optimizer_state",
     "control_state",
     "planning_state",
+    "termination_state",
     "collision",
     "goal_reached",
+    "local_goal_x_m",
+    "local_goal_y_m",
     "event_tags",
     "data_availability",
 )

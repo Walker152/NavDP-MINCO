@@ -102,6 +102,7 @@ def _static_frame_rows(
     for frame_index, source_index in enumerate(frame_source_indices):
         source_index = min(max(0, int(source_index)), len(path) - 1)
         point = path[source_index]
+        clearance = _nearest_clearance(point[:2], detail)
         row: dict[str, object] = {
             "frame_index": frame_index,
             "time_s": frame_index * GIF_FRAME_DURATION_S,
@@ -113,10 +114,18 @@ def _static_frame_rows(
             ),
             "x_m": _finite_or_blank(point[0]),
             "y_m": _finite_or_blank(point[1]),
+            "yaw_rad": "",
             "progress_ratio": (
                 float(source_index) / float(max(1, len(path) - 1))
             ),
-            "clearance_m": _nearest_clearance(point[:2], detail),
+            "clearance_m": clearance,
+            "speed_mps": "",
+            "acceleration_mps2": "",
+            "yaw_rate_rps": "",
+            "planning_state": str(result.status),
+            "termination_state": str(result.status),
+            "local_goal_x_m": "",
+            "local_goal_y_m": "",
             "data_availability": (
                 "MEASURED_STATIC" if has_temporal else "STATIC_GEOMETRY_ONLY"
             ),
@@ -134,6 +143,9 @@ def _static_frame_rows(
                     "yaw_rate_rps": _finite_or_blank(sample[14]),
                 }
             )
+        if case.terminal_goal is not None and len(case.terminal_goal) >= 2:
+            row["local_goal_x_m"] = ""
+            row["local_goal_y_m"] = ""
         rows.append(row)
     return rows
 
