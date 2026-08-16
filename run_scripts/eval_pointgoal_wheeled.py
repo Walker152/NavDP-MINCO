@@ -52,13 +52,16 @@ parser.add_argument("--minco_time_weight", type=float, default=0.1)
 parser.add_argument("--minco_time_barrier_weight", type=float, default=10.0)
 parser.add_argument(
     "--minco_constraint_profile",
-    choices=("legacy", "safe_corridor_v1"),
+    choices=("legacy", "superplanner_sfc_v1"),
     default="legacy",
 )
 parser.add_argument("--minco_guide_corridor_weight", type=float, default=2000.0)
 parser.add_argument("--minco_corridor_max_radius", type=float, default=0.45)
 parser.add_argument("--minco_corridor_min_radius", type=float, default=0.04)
 parser.add_argument("--minco_corridor_sample_step", type=float, default=0.025)
+parser.add_argument("--minco_sfc_bound_distance", type=float, default=0.8)
+parser.add_argument("--minco_sfc_seed_line_max_length", type=float, default=2.0)
+parser.add_argument("--minco_sfc_min_overlap_depth", type=float, default=0.02)
 parser.add_argument("--minco_adaptive_max_spatial_step", type=float, default=0.025)
 parser.add_argument("--minco_adaptive_near_clearance", type=float, default=0.05)
 parser.add_argument("--minco_adaptive_max_depth", type=int, default=14)
@@ -757,7 +760,11 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             cycle_info.get("constraint_profile", args_cli.minco_constraint_profile)
                             if used_minco else "raw"
                         ),
-                        constraint_profile_version="safe-corridor-v1",
+                        constraint_profile_version=(
+                            "superplanner-sfc-2d-v1"
+                            if args_cli.minco_constraint_profile == "superplanner_sfc_v1"
+                            else "legacy-no-corridor-v1"
+                        ),
                         calibration_sha256=robot_calibration.calibration_sha256,
                         static_selected_case_uid=(
                             dynamic_case_spec.get("case_uid", "")
@@ -769,7 +776,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                         corridor_min_clearance_m=cycle_info.get("corridor_min_clearance", ""),
                         corridor_min_overlap_m=cycle_info.get("corridor_min_overlap", ""),
                         corridor_generation_ms=cycle_info.get("timing_ms", {}).get(
-                            "corridor_generation_ms", ""
+                            "sfc_generation_ms",
+                            cycle_info.get("timing_ms", {}).get("corridor_generation_ms", ""),
                         ),
                         adaptive_validation_sample_count=cycle_info.get(
                             "adaptive_validation_sample_count", ""
@@ -820,7 +828,11 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             constraint_profile=cycle_info.get(
                                 "constraint_profile", args_cli.minco_constraint_profile
                             ),
-                            constraint_profile_version="safe-corridor-v1",
+                            constraint_profile_version=(
+                                "superplanner-sfc-2d-v1"
+                                if args_cli.minco_constraint_profile == "superplanner_sfc_v1"
+                                else "legacy-no-corridor-v1"
+                            ),
                             calibration_sha256=robot_calibration.calibration_sha256,
                             static_selected_case_uid=(
                                 dynamic_case_spec.get("case_uid", "")
@@ -832,7 +844,8 @@ def planning_thread(env, camera_intrinsic, minco_adapter=None):
                             corridor_min_clearance_m=cycle_info.get("corridor_min_clearance", ""),
                             corridor_min_overlap_m=cycle_info.get("corridor_min_overlap", ""),
                             corridor_generation_ms=cycle_info.get("timing_ms", {}).get(
-                                "corridor_generation_ms", ""
+                                "sfc_generation_ms",
+                                cycle_info.get("timing_ms", {}).get("corridor_generation_ms", ""),
                             ),
                             adaptive_validation_sample_count=cycle_info.get(
                                 "adaptive_validation_sample_count", ""
@@ -1204,6 +1217,9 @@ if args_cli.enable_minco or args_cli.eval_monitor:
             corridor_max_radius=args_cli.minco_corridor_max_radius,
             corridor_min_radius=args_cli.minco_corridor_min_radius,
             corridor_sample_step=args_cli.minco_corridor_sample_step,
+            sfc_bound_distance=args_cli.minco_sfc_bound_distance,
+            sfc_seed_line_max_length=args_cli.minco_sfc_seed_line_max_length,
+            sfc_min_overlap_depth=args_cli.minco_sfc_min_overlap_depth,
             adaptive_max_spatial_step=args_cli.minco_adaptive_max_spatial_step,
             adaptive_near_clearance=args_cli.minco_adaptive_near_clearance,
             adaptive_max_depth=args_cli.minco_adaptive_max_depth,
@@ -1609,20 +1625,45 @@ try:
                         vis_image, speed_max=max(1.0, float(args_cli.speed) * 1.5)
                     )
                     with control_timer.section("text_overlay_ms"):
-                        vis_image = draw_box_with_text(vis_image,0,0,650,50,f"state: {control_states[i]}")
-                        vis_image = draw_box_with_text(vis_image,0,50,650,50,f"episode: {episode_num} generation: {episode_generation[i]}")
-                        vis_image = draw_box_with_text(vis_image,0,100,430,50,"desired lin.:%.2f ang.:%.2f"%(cmd_v_batch[i],cmd_w_batch[i]))
-                        vis_image = draw_box_with_text(vis_image,0,150,430,50,"actual lin.:%.2f ang.:%.2f"%(robot_vel_batch[i],robot_ang_vel_batch[i]))
-                        vis_image = draw_box_with_text(vis_image,0,820,430,50,"point goal:(%.2f, %.2f)"%(goals[i][0],goals[i][1]))
+                        row_h = max(30, min(42, vis_image.shape[0] // 14))
+                        row_y = [0]
+                        def _overlay(image, text, width=650):
+                            if row_y[0] + row_h <= image.shape[0]:
+                                image = draw_box_with_text(
+                                    image, 0, row_y[0], min(width, image.shape[1]),
+                                    row_h, text, font_scale=0.55,
+                                )
+                                row_y[0] += row_h
+                            return image
+                        vis_image = _overlay(vis_image, f"state: {control_states[i]}")
+                        vis_image = _overlay(vis_image, f"episode: {episode_num} generation: {episode_generation[i]}")
+                        vis_image = _overlay(
+                            vis_image,
+                            "robot world: x=%.2f y=%.2f yaw=%.1f deg" % (
+                                x0[i, 0], x0[i, 1], np.degrees(x0[i, 2])
+                            )
+                        )
+                        vis_image = _overlay(vis_image, "point goal(local): x=%.2f y=%.2f" % (goals[i][0], goals[i][1]))
+                        vis_image = _overlay(vis_image, "desired: v=%.2f m/s w=%.2f rad/s" % (cmd_v_batch[i], cmd_w_batch[i]), 520)
+                        vis_image = _overlay(vis_image, "actual: v=%.2f m/s w=%.2f rad/s" % (robot_vel_batch[i], robot_ang_vel_batch[i]), 520)
                         if current_all_values is not None:
-                            vis_image = draw_box_with_text(vis_image,0,770,430,50,"critic max:%.2f min:%.2f"%(np.max(current_all_values[i]), np.min(current_all_values[i])))
+                            vis_image = _overlay(vis_image, "critic: max=%.2f min=%.2f" % (np.max(current_all_values[i]), np.min(current_all_values[i])), 520)
                         if current_minco_info is not None and isinstance(current_minco_info[i], dict):
                             info = current_minco_info[i]
-                            vis_image = draw_box_with_text(
-                                vis_image,0,870,520,50,"%s idx:%d esdf:%.2f cost:%.1f" % (
+                            vis_image = _overlay(
+                                vis_image,
+                                "%s profile=%s cells=%d" % (
                                     info.get("status", "MINCO_OK" if info.get("success", False) else "MINCO_STOP"),
-                                    info.get("selected_index", -1), info.get("min_esdf", float("nan")),
-                                    info.get("objective", float("inf")),
+                                    info.get("constraint_profile", "legacy"),
+                                    len(info.get("sfc_cells", ()) or ()),
+                                )
+                            )
+                            vis_image = _overlay(
+                                vis_image,
+                                "MINCO: idx=%d ESDF=%.2f SFC-margin=%.3f" % (
+                                    info.get("selected_index", -1),
+                                    info.get("min_esdf", float("nan")),
+                                    info.get("sfc_min_margin", float("nan")),
                                 )
                             )
                     control_timing = control_timer.snapshot()

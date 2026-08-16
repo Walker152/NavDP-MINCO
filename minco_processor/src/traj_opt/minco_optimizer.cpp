@@ -59,6 +59,45 @@ double MincoOptimizer::evaluateTimeBarrierTerm(
   return weight * violation * violation * violation;
 }
 
+double MincoOptimizer::evaluateSfcCellTerm(
+  const Eigen::Vector3d & point,
+  const minco_processor::SfcCell2D & cell,
+  double smooth_eps,
+  double weight,
+  Eigen::Vector3d * gradient,
+  double * max_violation)
+{
+  if (gradient) {
+    gradient->setZero();
+  }
+  if (max_violation) {
+    *max_violation = -std::numeric_limits<double>::infinity();
+  }
+  if (!(point.allFinite() && std::isfinite(smooth_eps) && smooth_eps > 0.0 &&
+    std::isfinite(weight) && weight > 0.0))
+  {
+    return 0.0;
+  }
+
+  double total = 0.0;
+  for (const auto & face : cell.halfspaces) {
+    const double violation = face.normal.dot(point.head<2>()) + face.offset;
+    if (max_violation) {
+      *max_violation = std::max(*max_violation, violation);
+    }
+    double penalty = 0.0;
+    double derivative = 0.0;
+    if (!gcopter::smoothedL1(violation, smooth_eps, penalty, derivative)) {
+      continue;
+    }
+    if (gradient) {
+      gradient->head<2>() += weight * derivative * face.normal;
+    }
+    total += weight * penalty;
+  }
+  return total;
+}
+
 double MincoOptimizer::optimize(const std::vector<Eigen::Vector3d> & waypoints,
   const Eigen::Matrix3d & start_state,
   const Eigen::Matrix3d & end_state,
@@ -221,6 +260,8 @@ double MincoOptimizer::costFunctional(void * ptr, const VecDf & x, VecDf & g)
     waypoint_attractor,
     opt_vars_.guide_path,
     opt_vars_.guide_corridor_radius,
+    opt_vars_.sfc_cells,
+    opt_vars_.sfc_piece_to_cell,
     map,
     smooth_eps,
     integral_res,
@@ -309,6 +350,8 @@ void MincoOptimizer::constraintsFunctional(const VecDf & T,
   const Mat3Df & waypoint_attractor,
   const std::vector<Eigen::Vector3d> & guide_path,
   double guide_corridor_radius,
+  const std::vector<minco_processor::SfcCell2D> & sfc_cells,
+  const std::vector<int> & sfc_piece_to_cell,
   const std::shared_ptr<minco_processor::EsdfMapInterface> & map,
   const double & smooth_eps,
   const int & integral_res,
@@ -432,6 +475,23 @@ void MincoOptimizer::constraintsFunctional(const VecDf & T,
         }
       }
 
+      // SuperPlanner-style ordered convex-cell constraint.  Piece i is bound
+      // to exactly one corridor cell; it may not jump to an unrelated cell
+      // merely because that cell has a smaller violation at this sample.
+      if (weightGuide > 0.0 && !sfc_cells.empty()) {
+        const int cell_index = i < static_cast<int>(sfc_piece_to_cell.size()) ?
+          sfc_piece_to_cell[static_cast<size_t>(i)] : -1;
+        if (cell_index >= 0 && cell_index < static_cast<int>(sfc_cells.size())) {
+          Eigen::Vector3d sfc_gradient = Eigen::Vector3d::Zero();
+          double max_violation = -std::numeric_limits<double>::infinity();
+          tmp_cost += evaluateSfcCellTerm(
+            pos, sfc_cells[static_cast<size_t>(cell_index)], smooth_eps,
+            weightGuide, &sfc_gradient, &max_violation);
+          gradPos += sfc_gradient;
+          max_pena(GUIDE_IDX) = std::max(max_pena(GUIDE_IDX), max_violation);
+        }
+      }
+
       // For acceleration cost
       const auto & violaAcc = acc.squaredNorm() - amaxSqr;
       double violaAccPena, violaAccPenaD;
@@ -493,6 +553,16 @@ bool MincoOptimizer::setupProblemAndCheck(const std::vector<Eigen::Vector3d> & w
   int N = waypoints.size() - 1;
   if (N <= 0) {
     return false;
+  }
+  if (!opt_vars_.sfc_cells.empty()) {
+    if (opt_vars_.sfc_piece_to_cell.size() != static_cast<size_t>(N)) {
+      return false;
+    }
+    for (const int cell_index : opt_vars_.sfc_piece_to_cell) {
+      if (cell_index < 0 || cell_index >= static_cast<int>(opt_vars_.sfc_cells.size())) {
+        return false;
+      }
+    }
   }
 
   // 2. Allocate optimization context

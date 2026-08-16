@@ -19,9 +19,15 @@ ROLLOUT_STATUSES = frozenset(
         "TIMEOUT",
     }
 )
-ROLLOUT_METHODS = frozenset({"legacy", "safe_corridor_v1"})
+# ``safe_corridor_v1`` is accepted only to read historical rollout receipts;
+# no current experiment configuration schedules it.
+ROLLOUT_METHODS = frozenset({"legacy", "superplanner_sfc_v1", "safe_corridor_v1"})
 MINCO_SAMPLE_COLUMNS = 15
-HOT_START_STATE_TOLERANCE = 5e-4
+# Native polynomial sampling and the next planning request use distinct
+# floating-point evaluations.  1e-3 is tight relative to the calibrated
+# dynamics yet avoids falsely classifying sub-millimetre/sub-milliradian
+# numerical round-off as a discontinuity.
+HOT_START_STATE_TOLERANCE = 1e-3
 
 
 def readonly_array(

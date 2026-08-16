@@ -9,6 +9,76 @@ from unittest.mock import patch
 
 
 class ResearchWorkflowTests(unittest.TestCase):
+    def test_retry_failed_rebuilds_missing_outputs_from_completed_receipt(self):
+        from experiments.orchestrators.research_workflow import (
+            WorkflowOptions,
+            _run_stage,
+        )
+
+        output = self.output
+        target = output / "stage-output.txt"
+        calls = []
+        first = _run_stage(
+            output_root=output,
+            options=WorkflowOptions(output_root=output),
+            name="recoverable",
+            command=("fixture",),
+            input_paths=(),
+            output_paths=(target,),
+            action=lambda: (
+                calls.append("first"), target.parent.mkdir(parents=True, exist_ok=True),
+                target.write_text("first\n", encoding="utf-8"),
+            ),
+        )
+        self.assertEqual(first["status"], "COMPLETE")
+        target.unlink()
+        second = _run_stage(
+            output_root=output,
+            options=WorkflowOptions(
+                output_root=output, resume=True, retry_failed=True
+            ),
+            name="recoverable",
+            command=("fixture",),
+            input_paths=(),
+            output_paths=(target,),
+            action=lambda: (
+                calls.append("rebuild"), target.write_text("rebuild\n", encoding="utf-8"),
+            ),
+        )
+        self.assertEqual(second["status"], "COMPLETE")
+        self.assertEqual(calls, ["first", "rebuild"])
+
+    def test_retry_failed_rebuilds_completed_stage_after_input_changes(self):
+        from experiments.orchestrators.research_workflow import (
+            WorkflowOptions,
+            _run_stage,
+        )
+
+        input_path = self.root / "input.txt"
+        input_path.write_text("v1\n", encoding="utf-8")
+        target = self.output / "stage-output.txt"
+        calls = []
+        for expected in ("first", "rebuild"):
+            _run_stage(
+                output_root=self.output,
+                options=WorkflowOptions(
+                    output_root=self.output,
+                    resume=bool(calls),
+                    retry_failed=bool(calls),
+                ),
+                name="input-recoverable",
+                command=("fixture",),
+                input_paths=(input_path,),
+                output_paths=(target,),
+                action=lambda expected=expected: (
+                    calls.append(expected),
+                    target.write_text(expected + "\n", encoding="utf-8"),
+                ),
+            )
+            if expected == "first":
+                input_path.write_text("v2\n", encoding="utf-8")
+        self.assertEqual(calls, ["first", "rebuild"])
+
     def setUp(self):
         self.repo = Path(__file__).parents[2].resolve()
         self.root = Path(tempfile.mkdtemp())
@@ -18,6 +88,7 @@ class ResearchWorkflowTests(unittest.TestCase):
         for name in (
             "static_legacy_suite.json",
             "static_safe_corridor_suite.json",
+            "static_superplanner_sfc_suite.json",
             "static_boundary_selection_v1.json",
         ):
             shutil.copy2(
@@ -34,7 +105,7 @@ class ResearchWorkflowTests(unittest.TestCase):
         options = WorkflowOptions(
             output_root=self.output,
             legacy_config=self.config_dir / "static_legacy_suite.json",
-            safe_config=self.config_dir / "static_safe_corridor_suite.json",
+            safe_config=self.config_dir / "static_superplanner_sfc_suite.json",
             selection_config=(
                 self.config_dir / "static_boundary_selection_v1.json"
             ),
@@ -46,7 +117,7 @@ class ResearchWorkflowTests(unittest.TestCase):
             receipt["stages"]["legacy_benchmark"]["status"], "COMPLETE"
         )
         self.assertEqual(
-            receipt["stages"]["safe_benchmark"]["status"], "COMPLETE"
+            receipt["stages"]["superplanner_sfc_benchmark"]["status"], "COMPLETE"
         )
         self.assertTrue((self.output / "paper" / "report.md").is_file())
         self.assertTrue(
@@ -197,6 +268,51 @@ class ResearchWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "missing heading arrows"):
                 _static_validation(self.output)
 
+    def test_dynamic_real_stage_uses_the_prepared_suite_id(self):
+        from experiments.orchestrators.research_workflow import _dynamic_suite_dir
+
+        dynamic = self.output / "dynamic_readiness"
+        dynamic.mkdir(parents=True)
+        suite = dynamic / "dynamic_suite.json"
+        expected = dynamic / "dry_run_results" / "task06_dynamic_sparse_dense_narrow_folded_v1"
+        suite.write_text(
+            json.dumps(
+                {
+                    "suite_id": "task06_dynamic_sparse_dense_narrow_folded_v1",
+                    "output_root": str(dynamic / "dry_run_results"),
+                }
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(_dynamic_suite_dir(suite), expected)
+
+    def test_simulation_validation_accepts_three_method_twelve_run_plan(self):
+        from experiments.orchestrators.research_workflow import _simulation_validation
+
+        readiness = self.output / "dynamic_readiness"
+        readiness.mkdir(parents=True)
+        plan = readiness / "dry_run_plan.json"
+        plan.write_text(json.dumps({"run_count": 12, "started_processes": 0}) + "\n")
+        from experiments.core.artifact_receipt import sha256_file
+        (readiness / "dynamic_readiness_receipt.json").write_text(
+            json.dumps({
+                "run_count": 12, "started_processes": 0,
+                "dry_run_plan": str(plan), "dry_run_plan_sha256": sha256_file(plan),
+            }) + "\n", encoding="utf-8"
+        )
+        mock = self.output / "simulation" / "mock_smoke"
+        mock.mkdir(parents=True)
+        (mock / "mock_smoke_receipt.json").write_text(
+            json.dumps({"status": "COMPLETE", "failed_runs": 0}) + "\n",
+            encoding="utf-8",
+        )
+
+        _simulation_validation(self.output)
+
+        payload = json.loads((self.output / "validation" / "simulation_validation.json").read_text())
+        self.assertTrue(payload["valid"], payload)
+
     def test_paper_stage_uses_unified_data_driven_report_generator(self):
         from experiments.orchestrators.research_workflow import _paper
 
@@ -208,6 +324,18 @@ class ResearchWorkflowTests(unittest.TestCase):
         self.assertTrue((paper_dir / "paper_manifest.json").is_file())
         self.assertTrue((paper_dir / "artifact_receipt.json").is_file())
         self.assertIn("UNAVAILABLE", (paper_dir / "report.md").read_text())
+
+    def test_dynamic_paper_stage_has_an_independent_immutable_output(self):
+        from experiments.orchestrators.research_workflow import _dynamic_paper
+
+        dynamic_suite = self.root / "real_dynamic_suite"
+        dynamic_suite.mkdir()
+        output = self.root / "paper" / "dynamic_report"
+        manifest = _dynamic_paper(dynamic_suite, output)
+
+        self.assertEqual(manifest["data_source"], "STATIC_ONLY")
+        self.assertTrue((output / "paper_manifest.json").is_file())
+        self.assertTrue((output / "tables" / "data_quality.csv").is_file())
 
     def test_mock_smoke_stage_runs_locally_and_completes(self):
         from experiments.orchestrators.research_workflow import (
@@ -297,6 +425,23 @@ class ResearchWorkflowTests(unittest.TestCase):
         self.assertEqual(
             receipt["real_simulation"]["status"], "PENDING_REAL_SIMULATION"
         )
+
+    def test_real_simulation_requires_verified_autodl_runtime(self):
+        """A local Isaac interpreter must never authorize a real rollout."""
+        from experiments.orchestrators.research_workflow import (
+            WorkflowOptions,
+            run_simulation_workflow,
+        )
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "AutoDL server runtime"):
+                run_simulation_workflow(
+                    repo_root=self.repo,
+                    options=WorkflowOptions(
+                        output_root=self.output,
+                        allow_real_simulation=True,
+                    ),
+                )
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from experiments.core.artifact_receipt import file_receipt, sha256_file
 
 PAPER_COLORS = {
     "legacy": "#6B7280",
-    "safe_corridor_v1": "#0072B2",
+    "superplanner_sfc_v1": "#0072B2",
     "success": "#009E73",
     "failure": "#D55E00",
     "degraded": "#E69F00",
@@ -49,7 +49,7 @@ def scientific_caption(
     sample_count: int,
     missing_failed: str,
     interpretation: str,
-    profile: str = "legacy paired with safe_corridor_v1",
+    profile: str = "legacy paired with SuperPlanner 2-D SFC",
     paired_key: str = (
         "case_uid; profile is the within-case condition where applicable"
     ),

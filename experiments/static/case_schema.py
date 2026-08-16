@@ -14,7 +14,11 @@ import numpy as np
 
 STATIC_CASE_SCHEMA_VERSION = 1
 CASE_SOURCES = frozenset({"STATIC_SYNTHETIC", "STATIC_REPLAY_REAL_TRACE"})
-CONSTRAINT_PROFILES = frozenset({"legacy", "safe_corridor_v1"})
+CONSTRAINT_PROFILES = frozenset({
+    "legacy",
+    "safe_corridor_v1",  # retained for historical result reproducibility
+    "superplanner_sfc_v1",
+})
 STATE_FIELDS = (
     "position",
     "velocity",

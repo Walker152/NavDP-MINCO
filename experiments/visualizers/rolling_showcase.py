@@ -27,6 +27,7 @@ OBSTACLE_COLOR = "#991B1B"
 VELOCITY_COLOR = "#009E73"
 FRAME_DURATION_S = 0.15
 TERMINAL_HOLD_FRAMES = 4
+SCENE_MANIFEST_SCHEMA_VERSION = 2
 
 FIGURE_DATA_FIELDS = (
     "record_type",
@@ -184,6 +185,25 @@ def _goal(paired: object, safe: object, guide: np.ndarray) -> np.ndarray:
     return array[:2]
 
 
+def _terminal_guide_yaw(guide: np.ndarray) -> float:
+    """Return the terminal heading declared by the final nonzero guide edge.
+
+    Point-goal scenarios often do not record a terminal orientation.  The
+    visual contract still needs a target heading arrow, so it uses the only
+    reproducible geometric reference available: the tangent of the last
+    non-degenerate guide segment.  This is tagged as derived evidence rather
+    than as a measured robot target pose.
+    """
+    if len(guide) < 2:
+        raise ValueError("guide must contain at least two points for terminal heading")
+    endpoint = guide[-1]
+    for candidate in guide[-2::-1]:
+        delta = endpoint - candidate
+        if float(np.linalg.norm(delta)) > 1e-10:
+            return float(math.atan2(delta[1], delta[0]))
+    raise ValueError("guide has no non-degenerate terminal heading")
+
+
 def _initial_state(paired: object, legacy: object, safe: object) -> object:
     direct = _value(paired, "initial_state", None)
     if direct is not None:
@@ -200,7 +220,7 @@ def _initial_state(paired: object, legacy: object, safe: object) -> object:
 def _normalise_pair(paired: object) -> tuple[str, object, object]:
     scenario_uid = str(_value(paired, "scenario_uid", "")).strip()
     legacy = _first(paired, ("legacy", "legacy_result"))
-    safe = _first(paired, ("safe_corridor_v1", "safe", "safe_result"))
+    safe = _first(paired, ("superplanner_sfc_v1", "safe_corridor_v1", "safe", "safe_result"))
     if legacy is None or safe is None:
         try:
             values = tuple(paired)  # type: ignore[arg-type]
@@ -252,9 +272,38 @@ def _corridors(safe: object) -> list[tuple[float, float, float, float, float, in
             if key not in observed:
                 observed.add(key)
                 output.append(item)
-    if not output or any(not math.isfinite(row[4]) or row[4] <= 0.0 for row in output):
-        raise ValueError("safe corridor figure requires real corridor evidence")
+    if any(not math.isfinite(row[4]) or row[4] <= 0.0 for row in output):
+        raise ValueError("recorded historical corridor evidence is invalid")
     return output
+
+
+def _sfc_cells(safe: object) -> list[tuple[np.ndarray, int]]:
+    """Read native 2-D SFC vertices from per-cycle planner diagnostics only."""
+    output: list[tuple[np.ndarray, int]] = []
+    seen: set[bytes] = set()
+    for fallback, cycle in enumerate(_cycles(safe)):
+        cycle_index = int(_value(cycle, "cycle_index", fallback))
+        diagnostics = _value(cycle, "diagnostics", {})
+        raw = _value(diagnostics, "sfc_cells", ())
+        for cell in raw or ():
+            vertices = np.asarray(_first(cell, ("vertices_xy_m", "vertices"), []), dtype=float)
+            if vertices.ndim != 2 or vertices.shape[0] < 3 or vertices.shape[1] < 2 or not np.all(np.isfinite(vertices[:, :2])):
+                raise ValueError("SuperPlanner SFC visualisation requires native finite 2-D vertices")
+            vertices = vertices[:, :2]
+            key = np.ascontiguousarray(np.round(vertices, 10)).tobytes()
+            if key not in seen:
+                seen.add(key)
+                output.append((vertices, cycle_index))
+    if not output:
+        raise ValueError(
+            "SuperPlanner SFC corridor evidence requires recorded native SFC cells"
+        )
+    return output
+
+
+def _draw_sfc_cells(ax: plt.Axes, cells: Sequence[tuple[np.ndarray, int]], *, label: str | None = None) -> None:
+    for index, (vertices, _) in enumerate(cells):
+        ax.add_patch(Polygon(vertices, closed=True, facecolor="#14B8A6", edgecolor="#047857", alpha=0.20, linewidth=1.1, zorder=1, label=label if index == 0 else None))
 
 
 def _obstacles(safe: object) -> list[dict[str, object]]:
@@ -322,7 +371,7 @@ def _static_rectangles(paired: object) -> list[dict[str, object]]:
 
 def _draw_static_rectangles(
     ax: plt.Axes, rectangles: Sequence[Mapping[str, object]]
-) -> None:
+) -> plt.Text:
     for rectangle in rectangles:
         x0, y0, x1, y1 = np.asarray(rectangle["bounds_xy"], dtype=float)
         ax.add_patch(
@@ -607,6 +656,7 @@ def _figure_rows(
     initial_state: object,
     goal: np.ndarray,
     goal_yaw: float | None,
+    goal_yaw_source: str,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     initial_xy = _state_xy(initial_state)
@@ -640,11 +690,7 @@ def _figure_rows(
             "x_m": goal[0],
             "y_m": goal[1],
             "yaw_rad": _finite_or_blank(goal_yaw),
-            "data_availability": (
-                "RECORDED_ROLLOUT"
-                if goal_yaw is not None
-                else "GOAL_YAW_NOT_AVAILABLE"
-            ),
+            "data_availability": goal_yaw_source,
         }
     )
     for sample_index, point in enumerate(guide):
@@ -660,7 +706,7 @@ def _figure_rows(
                 "data_availability": "RECORDED_ROLLOUT",
             }
         )
-    for method, result in (("legacy", legacy), ("safe_corridor_v1", safe)):
+    for method, result in (("legacy", legacy), ("superplanner_sfc_v1", safe)):
         samples = _samples(result)
         xy = _sample_xy(samples)
         yaw = _sample_yaw(samples)
@@ -689,8 +735,8 @@ def _figure_rows(
             {
                 "record_type": "CORRIDOR_SEGMENT",
                 "scenario_uid": scenario_uid,
-                "panel": "safe_corridor",
-                "method": "safe_corridor_v1",
+                "panel": "superplanner_sfc_v1",
+                "method": "superplanner_sfc_v1",
                 "cycle_index": cycle_index,
                 "segment_start_x_m": x0,
                 "segment_start_y_m": y0,
@@ -700,6 +746,21 @@ def _figure_rows(
                 "data_availability": "RECORDED_ROLLOUT",
             }
         )
+    for cell_index, (vertices, cycle_index) in enumerate(_sfc_cells(safe)):
+        for vertex_index, vertex in enumerate(vertices):
+            rows.append(
+                {
+                    "record_type": "SFC_CELL_VERTEX",
+                    "scenario_uid": scenario_uid,
+                    "panel": "superplanner_sfc_v1",
+                    "method": "superplanner_sfc_v1",
+                    "cycle_index": cycle_index,
+                    "sample_index": f"{cell_index}:{vertex_index}",
+                    "x_m": vertex[0],
+                    "y_m": vertex[1],
+                    "data_availability": "RECORDED_NATIVE_SFC",
+                }
+            )
     for obstacle in obstacles:
         rows.append(
             {
@@ -738,6 +799,8 @@ def _status_box(
     sample: np.ndarray | None,
     local_goal: np.ndarray | None,
     final_goal: np.ndarray,
+    clearance_m: object = None,
+    sfc_margin_m: object = None,
 ) -> None:
     if sample is not None and len(sample) >= 15:
         speed = float(np.linalg.norm(sample[4:7]))
@@ -753,13 +816,17 @@ def _status_box(
     local_text = (
         "N/A" if local_goal is None else f"{local_goal[0]:.2f}/{local_goal[1]:.2f}"
     )
-    ax.text(
+    clearance = _finite_or_blank(clearance_m)
+    sfc_margin = _finite_or_blank(sfc_margin_m)
+    return ax.text(
         0.02,
-        0.98,
+        -0.035,
         f"{method}\ncycle: {cycle if cycle is not None else 'N/A'} · "
         f"time: {frame * FRAME_DURATION_S:.2f} s\n"
         f"{state}local goal: {local_text} m\n"
         f"final goal: {final_goal[0]:.2f}/{final_goal[1]:.2f} m\n"
+        f"clearance: {clearance if clearance != '' else 'N/A'} m\n"
+        f"SFC margin: {sfc_margin if sfc_margin != '' else 'N/A'} m\n"
         f"frame {frame + 1}/{total} · status: {status}",
         transform=ax.transAxes,
         ha="left",
@@ -767,6 +834,7 @@ def _status_box(
         fontsize=7.5,
         bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.88, "edgecolor": "#6B7280"},
         zorder=20,
+        clip_on=False,
     )
 
 
@@ -788,11 +856,12 @@ def _animation(
     legacy_samples = _samples(legacy)
     safe_samples = _samples(safe)
     legacy_xy, safe_xy = _sample_xy(legacy_samples), _sample_xy(safe_samples)
+    sfc_cells = _sfc_cells(safe)
     base_frames = max(8, min(32, max(len(guide), len(legacy_xy), len(safe_xy))))
     source_indices = {
         "guide": np.rint(np.linspace(0, len(guide) - 1, base_frames)).astype(int),
         "legacy": np.rint(np.linspace(0, len(legacy_xy) - 1, base_frames)).astype(int),
-        "safe_corridor_v1": np.rint(np.linspace(0, len(safe_xy) - 1, base_frames)).astype(int),
+        "superplanner_sfc_v1": np.rint(np.linspace(0, len(safe_xy) - 1, base_frames)).astype(int),
     }
     cycle_indices = sorted(
         {
@@ -808,7 +877,10 @@ def _animation(
     arrow_length = 0.08 * max(limits[1] - limits[0], limits[3] - limits[2])
     for encoded_index in range(total_frames):
         progress_index = min(encoded_index, base_frames - 1)
-        figure, axes = plt.subplots(1, 3, figsize=(11.4, 4.0), constrained_layout=True)
+        figure, axes = plt.subplots(1, 3, figsize=(11.4, 5.2))
+        # Reserve a dedicated status band below the shared map area.  Status
+        # text must not obscure the trajectory, obstacles, yaw arrows, or SFC.
+        figure.subplots_adjust(left=0.055, right=0.99, top=0.93, bottom=0.27, wspace=0.20)
         latest_cycle = (
             cycle_indices[
                 min(
@@ -829,10 +901,10 @@ def _animation(
             ("guide", guide, GUIDE_STYLE, "guide_reference", "REFERENCE"),
             ("legacy", legacy_xy, LEGACY_STYLE, "legacy", str(_value(legacy, "status", "UNKNOWN"))),
             (
-                "safe_corridor_v1",
+                "superplanner_sfc_v1",
                 safe_xy,
                 SAFE_STYLE,
-                "safe_corridor_v1",
+                "superplanner_sfc_v1",
                 str(_value(safe, "status", "UNKNOWN")),
             ),
         )
@@ -841,14 +913,13 @@ def _animation(
             last = int(source_indices[panel][progress_index]) + 1
             if panel != "guide":
                 axis.plot(trajectory[:last, 0], trajectory[:last, 1], label=method, **style)
-            if panel == "safe_corridor_v1":
-                for segment in corridor_snapshot:
-                    _draw_capsule(axis, segment, alpha=0.14)
+            if panel == "superplanner_sfc_v1":
+                _draw_sfc_cells(axis, sfc_cells, label="native 2-D SFC")
             axis.scatter(goal[0], goal[1], marker="*", s=90, color=GOAL_COLOR, label="goal", zorder=10)
             current_xy = trajectory[max(0, last - 1)]
             if panel == "legacy":
                 yaw_values = _sample_yaw(legacy_samples)
-            elif panel == "safe_corridor_v1":
+            elif panel == "superplanner_sfc_v1":
                 yaw_values = _sample_yaw(safe_samples)
             else:
                 yaw_values = np.full(len(guide), np.nan)
@@ -867,7 +938,7 @@ def _animation(
             if panel == "legacy":
                 sample = legacy_samples[current_source]
                 cycles = _cycles(legacy)
-            elif panel == "safe_corridor_v1":
+            elif panel == "superplanner_sfc_v1":
                 sample = safe_samples[current_source]
                 cycles = _cycles(safe)
             else:
@@ -898,6 +969,12 @@ def _animation(
             _draw_obstacles(axis, obstacle_snapshot)
             _draw_static_rectangles(axis, rectangles)
             _configure_axis(axis, limits, method)
+            sfc_margin = None
+            clearance = None
+            if cycles:
+                diagnostics = _value(cycles[min(len(cycles)-1, int(progress_index * len(cycles) / max(1, base_frames)))], "diagnostics", {})
+                clearance = _value(diagnostics, "validation_min_clearance", None)
+                sfc_margin = _value(diagnostics, "sfc_min_margin", None)
             _status_box(
                 axis,
                 method=method,
@@ -908,6 +985,8 @@ def _animation(
                 sample=sample,
                 local_goal=local_goal,
                 final_goal=goal,
+                clearance_m=clearance,
+                sfc_margin_m=sfc_margin,
             )
         figure.canvas.draw()
         frames.append(np.asarray(figure.canvas.buffer_rgba())[..., :3].copy())
@@ -916,7 +995,7 @@ def _animation(
             {
                 "record_type": "ANIMATION_FRAME",
                 "scenario_uid": scenario_uid,
-                "panel": "guide|legacy|safe_corridor_v1",
+                "panel": "guide|legacy|superplanner_sfc_v1",
                 "frame_index": encoded_index,
                 "time_s": encoded_index * FRAME_DURATION_S,
                 "cycle_index": latest_cycle if latest_cycle is not None else "",
@@ -977,7 +1056,14 @@ def render_scene_package(
     goal_yaw = None if goal_yaw_value is None else float(goal_yaw_value)
     if goal_yaw is not None and not math.isfinite(goal_yaw):
         goal_yaw = None
-    corridors = _corridors(safe)
+    goal_yaw_source = "RECORDED_GOAL_YAW"
+    if goal_yaw is None:
+        goal_yaw = _terminal_guide_yaw(guide)
+        goal_yaw_source = "DERIVED_GUIDE_TERMINAL_TANGENT"
+    # Formal experiments use only the native SuperPlanner 2-D convex cells.
+    # Historical capsule fields are deliberately not used as a fallback.
+    corridors: list[tuple[float, float, float, float, float, int]] = []
+    sfc_cells = _sfc_cells(safe)
     obstacles = _obstacles(safe)
     rectangles = _static_rectangles(paired_results)
     limits = _limits(
@@ -1003,7 +1089,7 @@ def render_scene_package(
             np.empty((0, 15), dtype=float),
         ),
         (axes[1], "Legacy rollout", legacy_xy, LEGACY_STYLE, legacy_samples),
-        (axes[2], "Safe-corridor rollout", safe_xy, SAFE_STYLE, safe_samples),
+        (axes[2], "SuperPlanner 2-D SFC rollout", safe_xy, SAFE_STYLE, safe_samples),
     )
     for axis, title, trajectory, style, orientation_samples in panels:
         axis.plot(guide[:, 0], guide[:, 1], label="guide", **GUIDE_STYLE)
@@ -1019,6 +1105,8 @@ def render_scene_package(
             arrow_length=arrow_length,
         )
         obstacle_arrow_count += _draw_obstacles(axis, latest_obstacles)
+        if title.startswith("SuperPlanner"):
+            _draw_sfc_cells(axis, sfc_cells, label="native 2-D SFC")
         _draw_static_rectangles(axis, rectangles)
         _configure_axis(axis, limits, title)
     handles: list[Any] = []
@@ -1044,7 +1132,7 @@ def render_scene_package(
     overlay, axis = plt.subplots(figsize=(7.0, 5.2), constrained_layout=True)
     axis.plot(guide[:, 0], guide[:, 1], label="guide", **GUIDE_STYLE)
     axis.plot(legacy_xy[:, 0], legacy_xy[:, 1], label="legacy", **LEGACY_STYLE)
-    axis.plot(safe_xy[:, 0], safe_xy[:, 1], label="safe_corridor_v1", **SAFE_STYLE)
+    axis.plot(safe_xy[:, 0], safe_xy[:, 1], label="superplanner_sfc_v1", **SAFE_STYLE)
     axis.scatter(goal[0], goal[1], marker="*", s=100, color=GOAL_COLOR, label="goal", zorder=10)
     heading_count += _draw_orientation_contract(
         axis,
@@ -1061,14 +1149,9 @@ def render_scene_package(
     _save_figure(overlay, output_dir / "overlay.png", output_dir / "overlay.pdf")
 
     corridor_figure, axis = plt.subplots(figsize=(7.0, 5.2), constrained_layout=True)
-    for index, segment in enumerate(corridors):
-        _draw_capsule(
-            axis,
-            segment,
-            label="recorded corridor capsule" if index == 0 else None,
-        )
+    _draw_sfc_cells(axis, sfc_cells, label="native 2-D SFC")
     axis.plot(guide[:, 0], guide[:, 1], label="guide", **GUIDE_STYLE)
-    axis.plot(safe_xy[:, 0], safe_xy[:, 1], label="safe_corridor_v1", **SAFE_STYLE)
+    axis.plot(safe_xy[:, 0], safe_xy[:, 1], label="superplanner_sfc_v1", **SAFE_STYLE)
     axis.scatter(goal[0], goal[1], marker="*", s=100, color=GOAL_COLOR, label="goal", zorder=10)
     heading_count += _draw_orientation_contract(
         axis,
@@ -1080,12 +1163,12 @@ def render_scene_package(
     )
     obstacle_arrow_count += _draw_obstacles(axis, latest_obstacles)
     _draw_static_rectangles(axis, rectangles)
-    _configure_axis(axis, limits, "Recorded safe-corridor capsule union")
+    _configure_axis(axis, limits, "Recorded SuperPlanner 2-D SFC")
     axis.legend(loc="best", fontsize=8, frameon=False)
     _save_figure(
         corridor_figure,
-        output_dir / "safe_corridor.png",
-        output_dir / "safe_corridor.pdf",
+        output_dir / "superplanner_sfc.png",
+        output_dir / "superplanner_sfc.pdf",
     )
 
     rows = _figure_rows(
@@ -1098,6 +1181,7 @@ def render_scene_package(
         initial_state,
         goal,
         goal_yaw,
+        goal_yaw_source,
     )
     animation_rows = _animation(
         output_dir / "three_way.gif",
@@ -1117,15 +1201,15 @@ def render_scene_package(
     _write_csv(output_dir / "figure_data.csv", rows)
 
     sample_count = len(guide) + len(legacy_xy) + len(safe_xy)
-    paired_key = f"scenario_uid={scenario_uid}; methods=legacy|safe_corridor_v1"
+    paired_key = f"scenario_uid={scenario_uid}; methods=legacy|superplanner_sfc_v1"
     (output_dir / "caption.md").write_text(
         "# Rolling MINCO scene evidence\n\n"
         f"- Source: Recorded rolling cycles and executed trajectories for `{scenario_uid}`.\n"
         f"- Paired key: {paired_key}.\n"
-        f"- Denominator: {len(_cycles(legacy))} legacy cycles and {len(_cycles(safe))} safe cycles; failures are retained.\n"
+        f"- Denominator: {len(_cycles(legacy))} legacy cycles and {len(_cycles(safe))} SuperPlanner-SFC cycles; failures are retained.\n"
         "- Units: world XY and corridor radii in m; time in s; yaw in rad; velocity in m/s.\n"
-        f"- Sample size: n={sample_count} plotted guide/executed samples, {len(corridors)} recorded corridor capsules.\n"
-        "- Missing data: unavailable recorded values remain blank; missing goal yaw is explicitly N/A.\n"
+        f"- Sample size: n={sample_count} plotted guide/executed samples, {len(sfc_cells)} recorded native 2-D SFC cells.\n"
+        "- Missing data: unavailable recorded values remain blank. Goal heading uses recorded goal yaw when available; otherwise the final non-degenerate guide tangent is shown as a derived hollow arrow.\n"
         "- Interpretation: the three panels and overlay compare the same recorded guide and paired full-route rollouts.\n"
         "- Limitations: deterministic rolling evidence does not establish real sensor, contact, or simulator performance.\n",
         encoding="utf-8",
@@ -1134,10 +1218,10 @@ def render_scene_package(
         "# 滚动 MINCO 场景证据\n\n"
         f"- 数据来源：`{scenario_uid}` 的已记录滚动周期、候选与执行轨迹。\n"
         f"- 配对键：{paired_key}。\n"
-        f"- 分母：legacy {len(_cycles(legacy))} 个周期，safe {len(_cycles(safe))} 个周期；失败不删除。\n"
+        f"- 分母：legacy {len(_cycles(legacy))} 个周期，SuperPlanner-SFC {len(_cycles(safe))} 个周期；失败不删除。\n"
         "- 单位：世界坐标与走廊半径为 m，时间为 s，yaw 为 rad，速度为 m/s。\n"
-        f"- 样本量：n={sample_count} 个 guide/执行轨迹样本，{len(corridors)} 个真实记录胶囊。\n"
-        "- 缺失数据：未记录量保持空白；未提供目标 yaw 时明确标记 N/A。\n"
+        f"- 样本量：n={sample_count} 个 guide/执行轨迹样本，{len(sfc_cells)} 个原生二维 SFC 单元。\n"
+        "- 缺失数据：未记录量保持空白。目标方位优先显示记录的目标 yaw；未记录时以 guide 末段非退化切向作为推导空心箭头，并在数据表中标注来源。\n"
         "- 解读：三栏图与叠加图比较同一 guide 下的成对完整路线滚动结果。\n"
         "- 局限性：确定性滚动证据不能证明真实传感器、接触或仿真闭环性能。\n",
         encoding="utf-8",
@@ -1145,10 +1229,10 @@ def render_scene_package(
 
     gif_frames = imageio.mimread(output_dir / "three_way.gif")
     manifest = {
-        "schema_version": 1,
+        "schema_version": SCENE_MANIFEST_SCHEMA_VERSION,
         "scenario_uid": scenario_uid,
         "paired_key": ["scenario_uid", "method"],
-        "methods": ["guide_reference", "legacy", "safe_corridor_v1"],
+        "methods": ["guide_reference", "legacy", "superplanner_sfc_v1"],
         "source": "RECORDED_ROLLING_EVIDENCE",
         "visual_contract": {
             "axis_aspect": "equal",
@@ -1156,25 +1240,26 @@ def render_scene_package(
             "panel_xy_limits": [limits, limits, limits],
             "robot_heading": "ARROW",
             "initial_yaw": "ARROW" if _state_yaw(initial_state) is not None else "N/A",
-            "goal_yaw": "N/A" if goal_yaw is None else "HOLLOW_ARROW",
+            "goal_yaw": "HOLLOW_ARROW",
+            "goal_yaw_source": goal_yaw_source,
             "velocity": "ARROW" if _state_velocity(initial_state) is not None else "N/A",
             "dynamic_obstacle_velocity": "ARROW" if obstacle_arrow_count else "N/A",
             "sampled_heading_arrow_count": heading_count,
-            "corridor_geometry": "RECORDED_CAPSULE_UNION",
-            "corridor_capsule_count": len(corridors),
+            "corridor_geometry": "RECORDED_NATIVE_SUPERPLANNER_2D_SFC",
+            "sfc_cell_count": len(sfc_cells),
             "static_rectangle_count": len(rectangles),
             "unavailable_values_are_zero": False,
         },
         "animation": {
             "path": "three_way.gif",
-            "panels": ["guide", "legacy", "safe_corridor_v1"],
+            "panels": ["guide", "legacy", "superplanner_sfc_v1"],
             "frame_count": len(gif_frames),
             "frame_duration_s": FRAME_DURATION_S,
             "terminal_hold_frames": TERMINAL_HOLD_FRAMES,
             "status_box": True,
             "shows_current_state": True,
             "shows_final_goal": True,
-            "shows_safe_corridor": True,
+            "shows_superplanner_2d_sfc": True,
             "state_box_fields": [
                 "cycle",
                 "time_s",
@@ -1185,6 +1270,8 @@ def render_scene_package(
                 "speed_mps",
                 "acceleration_mps2",
                 "yaw_rate_radps",
+                "clearance_m",
+                "sfc_margin_m",
                 "local_goal_xy_m",
                 "final_goal_xy_m",
                 "status",
@@ -1243,8 +1330,8 @@ def validate_scene_package(output_dir: Path | str) -> list[str]:
         "three_panel.pdf",
         "overlay.png",
         "overlay.pdf",
-        "safe_corridor.png",
-        "safe_corridor.pdf",
+        "superplanner_sfc.png",
+        "superplanner_sfc.pdf",
         "three_way.gif",
         "figure_data.csv",
         "caption.md",
@@ -1260,7 +1347,7 @@ def validate_scene_package(output_dir: Path | str) -> list[str]:
         manifest = json.loads((root / "scene_manifest.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         return [*errors, f"unreadable scene_manifest.json: {error}"]
-    if manifest.get("schema_version") != 1:
+    if manifest.get("schema_version") != SCENE_MANIFEST_SCHEMA_VERSION:
         errors.append("scene manifest schema mismatch")
     contract = manifest.get("visual_contract", {})
     if not isinstance(contract, Mapping):
@@ -1277,14 +1364,14 @@ def validate_scene_package(output_dir: Path | str) -> list[str]:
         panel_limits = []
     if any(panel != limits for panel in panel_limits):
         errors.append("three-panel XY limits are not shared")
-    capsule_count = contract.get("corridor_capsule_count")
-    if not isinstance(capsule_count, int) or isinstance(capsule_count, bool):
-        capsule_count = 0
+    sfc_count = contract.get("sfc_cell_count")
+    if not isinstance(sfc_count, int) or isinstance(sfc_count, bool):
+        sfc_count = 0
     if (
-        contract.get("corridor_geometry") != "RECORDED_CAPSULE_UNION"
-        or capsule_count <= 0
+        contract.get("corridor_geometry") != "RECORDED_NATIVE_SUPERPLANNER_2D_SFC"
+        or sfc_count <= 0
     ):
-        errors.append("safe corridor lacks recorded capsule evidence")
+        errors.append("SuperPlanner visual package lacks recorded native 2-D SFC evidence")
     try:
         with (root / "figure_data.csv").open(newline="", encoding="utf-8") as stream:
             reader = csv.DictReader(stream)

@@ -11,6 +11,9 @@ from typing import Any
 import numpy as np
 
 
+PROFILES = ("legacy", "superplanner_sfc_v1")
+
+
 def _read_sweep_rows(sweep_csv: Path) -> list[dict[str, str]]:
     with sweep_csv.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
@@ -55,7 +58,7 @@ def generate_sweep_comparison(sweep_dir: Path | str) -> dict[str, Any]:
     delta_rows: list[dict[str, Any]] = []
     for uid in case_uids:
         legacy = by_key.get((uid, "legacy"))
-        safe = by_key.get((uid, "safe_corridor_v1"))
+        safe = by_key.get((uid, "superplanner_sfc_v1"))
         if legacy is None or safe is None:
             continue
         row: dict[str, Any] = {
@@ -87,7 +90,7 @@ def generate_sweep_comparison(sweep_dir: Path | str) -> dict[str, Any]:
         "guide_deviation_p95_m", "yaw_rate_violation_ratio",
     ]
     agg_rows: list[dict[str, Any]] = []
-    for profile in ("legacy", "safe_corridor_v1"):
+    for profile in PROFILES:
         prof_rows = [row for row in rows if row["profile"] == profile]
         summary: dict[str, Any] = {"profile": profile, "n": len(prof_rows)}
         succeeded = [row for row in prof_rows if row["status"] == "SUCCEEDED"]
@@ -147,7 +150,7 @@ def _render_factor_charts(rows: list[dict[str, str]], out_dir: Path) -> None:
         subset = [row for row in factor_rows if row["factor_name"] == factor]
         fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
         for profile, style in (("legacy", {"ls": "--", "marker": "o"}),
-                               ("safe_corridor_v1", {"ls": "-", "marker": "s"})):
+                               ("superplanner_sfc_v1", {"ls": "-", "marker": "s"})):
             prof_rows = [row for row in subset if row["profile"] == profile]
             if not prof_rows:
                 continue
@@ -163,7 +166,7 @@ def _render_factor_charts(rows: list[dict[str, str]], out_dir: Path) -> None:
         ax.axhline(0.0, color="red", linewidth=0.8, linestyle=":")
         ax.set_xlabel(factor)
         ax.set_ylabel("min normalized margin (0 = fail)")
-        ax.set_title(f"{factor}: legacy vs safe_corridor_v1")
+        ax.set_title(f"{factor}: legacy vs superplanner_sfc_v1")
         ax.legend()
         fig.savefig(out_dir / f"factor_{factor}_both_profiles.png", dpi=150,
                     facecolor="white")
@@ -171,7 +174,7 @@ def _render_factor_charts(rows: list[dict[str, str]], out_dir: Path) -> None:
 
     # Margin distribution comparison
     fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
-    for profile, color in (("legacy", "#D55E00"), ("safe_corridor_v1", "#0072B2")):
+    for profile, color in (("legacy", "#D55E00"), ("superplanner_sfc_v1", "#0072B2")):
         values = [
             _num(row.get("min_normalized_margin"))
             for row in rows

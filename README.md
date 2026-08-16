@@ -191,10 +191,39 @@ the repository can create the isolated `navdp` and `isaaclab` environments autom
 bash scripts/setup_autodl.sh
 ```
 
+To deploy, validate, run the complete static study, and then execute the
+authorized 12-run NavDP/legacy-MINCO/SFC Isaac study in one command:
+
+```bash
+bash scripts/setup_autodl.sh --run-real-experiments \
+  --output results/navdp_superplanner_final
+```
+
+Without `--run-real-experiments`, setup never starts a real experiment.
+
 The script installs Isaac Sim `4.2.0.2`, checks out IsaacLab `v1.2.0`, installs
 the NavDP model and benchmark requirements, performs headless smoke checks, and
 exports the installed packages to `requirements/autodl/`. It does not download
 Scene-N1 assets, model checkpoints, or GPU drivers.
+
+Before compiling the native MINCO/SFC extension, setup checks for CMake, a C++
+compiler, and the Eigen3 headers. Missing components are installed through the
+Ubuntu packages `cmake`, `build-essential`, and `libeigen3-dev`; the latter
+provides the `Eigen3Config.cmake` required by `find_package(Eigen3 REQUIRED)`.
+Existing packages are reused, so repeated setup does not reinstall them.
+
+AutoDL headless containers may ship an NVIDIA Vulkan ICD that points to
+`libGLX_nvidia.so.0`; that desktop-oriented ICD can fail with
+`ERROR_INCOMPATIBLE_DRIVER` and leave only CPU `llvmpipe`. During preflight the
+setup now follows the [official AutoDL Vulkan guidance](https://www.autodl.com/docs/vulkan/):
+if the default probe has no NVIDIA device, it locates `libEGL_nvidia.so.0`,
+creates an independent managed EGL ICD at
+`/etc/vulkan/icd.d/navdp_nvidia_headless_icd.json`, selects it through both
+`VK_ICD_FILENAMES` and `VK_DRIVER_FILES`, and probes again. The original system
+ICD is never overwritten. Repair succeeds only when the isolated probe exposes
+NVIDIA and no `llvmpipe`; otherwise setup stops before creating environments.
+`--check-only` performs the same probe with a temporary manifest and leaves no
+persistent ICD file.
 
 On AutoDL, `/root/autodl-tmp/navdp` is selected automatically when the data disk
 is available. Conda environments and package caches, pip downloads, IsaacLab,
@@ -237,8 +266,9 @@ ensuring the uploaded source is version `v1.2.0`.
 
 The AutoDL setup installs IsaacLab with `isaaclab.sh -i none`. This installs the
 core and task extensions required by the NavDP benchmark while skipping optional
-reinforcement-learning frameworks. In particular, it avoids the obsolete
-`rsl-rl` Git dependency in IsaacLab `v1.2.0`; NavDP evaluation does not use it.
+training frameworks. It avoids IsaacLab's unreliable `rsl-rl` Git installation,
+then installs the published `rsl-rl-lib==2.3.1` package required by the
+evaluation vector-environment wrapper.
 The setup also excludes IsaacLab 2.x simulator-stack pins found in the root
 environment freeze (`isaaclab`, `rsl-rl-lib`, `triton`, and `warp-lang`), restores
 the v1.2.0-compatible `torch==2.4.0`/`triton==3.0.0` pair, and runs `pip check`.
@@ -332,9 +362,19 @@ real simulation and therefore remains a separate user action:
 
 ```bash
 source /root/.config/navdp/autodl-runtime.env
-bash scripts/run_all_experiments.sh configs/experiments/full_suite.json \
-  --backend isaac --allow-real-simulation --resume --retry-failed
+bash scripts/run_all_experiments.sh \
+  --output results/navdp_superplanner_final \
+  --allow-real-simulation --resume --retry-failed
 ```
+
+The static study compares multiple initial velocities (including near-zero,
+near-limit, reverse, and lateral), matched-velocity accelerations, yaw and
+yaw-rate extremes, and straight/L/S/U/zigzag/backtracking/self-intersecting
+guides. The constrained profile uses ordered native 2-D convex SFC cells:
+MINCO piece `i` is bound to cell `i`, and publication validation checks the
+same binding fail-closed. Real dynamic runs retain each individual episode
+video and additionally generate synchronized three-panel NavDP / legacy MINCO /
+MINCO+SFC videos with live state and speed/clearance/tracking curves.
 
 ```bash
 # create the environment

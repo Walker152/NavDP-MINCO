@@ -61,16 +61,17 @@ def native_environment_diagnostics() -> dict[str, Any]:
         "remediation": remediation,
     }
     try:
+        # Import the package first: its initializer prepends the repository
+        # build directory before loading the extension.  Importing the bare
+        # module first can silently select an older site-packages build whose
+        # profile/schema differs from the current source tree.
+        importlib.import_module("minco_processor")
         extension = importlib.import_module("_minco_processor")
-    except ImportError:
-        try:
-            importlib.import_module("minco_processor")
-            extension = importlib.import_module("_minco_processor")
-        except ImportError as error:
-            diagnostics["import_error"] = str(error)
-            raise RuntimeError(
-                "native MINCO extension unavailable; run: " + remediation
-            ) from error
+    except ImportError as error:
+        diagnostics["import_error"] = str(error)
+        raise RuntimeError(
+            "native MINCO extension unavailable; run: " + remediation
+        ) from error
     extension_path = Path(extension.__file__).resolve()
     diagnostics.update(
         {
@@ -90,6 +91,8 @@ def _normalise_native_value(value: Any) -> Any:
         return value
     if isinstance(value, Mapping):
         return {str(k): _normalise_native_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalise_native_value(item) for item in value]
     return str(value)
 
 
@@ -121,7 +124,7 @@ def _configure_processor(processor: object, profile: Mapping[str, Any]) -> None:
                 validation_dynamic_scale, enable_strict, enable_yaw_wheel, analytic_gradient)
 
     constraint_profile = str(profile.get("constraint_profile", "legacy"))
-    if constraint_profile == "safe_corridor_v1":
+    if constraint_profile in {"safe_corridor_v1", "superplanner_sfc_v1"}:
         processor.configure_safety_profile(
             constraint_profile,
             float(profile["guide_corridor_weight"]),
@@ -136,6 +139,9 @@ def _configure_processor(processor: object, profile: Mapping[str, Any]) -> None:
             float(profile["wheel_radius_m"]),
             float(profile["wheel_base_m"]),
             float(profile["max_wheel_speed_radps"]),
+            float(profile.get("sfc_bound_distance_m", 0.8)),
+            float(profile.get("sfc_seed_line_max_length_m", 2.0)),
+            float(profile.get("sfc_min_overlap_depth_m", 0.02)),
         )
 
 

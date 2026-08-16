@@ -13,9 +13,9 @@
   "minco": {
     "max_velocity_mps": 1.0,
     "max_acceleration_mps2": 1.5,
-    "optimization_safe_distance_m": 0.3,
-    "validation_safe_distance_m": 0.15,
-    "start_validation_exemption_radius_m": 0.35,
+    "optimization_safe_distance_m": 0.4293079057,
+    "validation_safe_distance_m": 0.2793079057,
+    "start_validation_exemption_radius_m": 0.2,
     "sample_dt_s": 0.05,
     "max_iterations": 128,
     "max_yaw_rate_radps": 0.5,
@@ -31,7 +31,7 @@
     "max_acceleration_mps2": 1.5,
     "max_jerk_mps3": 20.0,
     "max_yaw_rate_radps": 0.5,
-    "safe_distance_m": 0.15,
+    "safe_distance_m": 0.2793079057,
     "sample_ds_m": 0.025
   },
   "cases": [
@@ -50,5 +50,28 @@
     {"case_uid":"syn_negative_start","category":"negative_start","tags":["EXPECTED_FAILURE","NEGATIVE_ESDF"],"guide_path_xyz_m":[[0,1,0],[4,1,0]],"obstacle_rectangles_xyxy_m":[[-0.1,0.8,0.2,1.2]],"start_state":{"position_xyz_m":[0,1,0],"velocity_xyz_mps":[0,0,0],"acceleration_xyz_mps2":[0,0,0],"yaw_rad":0,"yaw_rate_radps":0}},
     {"case_uid":"syn_self_intersection","category":"self_intersection","tags":["SELF_INTERSECTION"],"guide_path_xyz_m":[[0,1,0],[5,5,0],[0,5,0],[5,1,0],[8,3,0]],"obstacle_rectangles_xyxy_m":[]},
     {"case_uid":"syn_backtracking","category":"backtracking","tags":["BACKTRACKING"],"guide_path_xyz_m":[[0,1,0],[5,1,0],[2,1,0],[7,1,0]],"obstacle_rectangles_xyxy_m":[]}
+  ],
+  "obstacle_variants": [
+    {
+      "source_case_uid": "syn_l90",
+      "variants": [
+        {"case_uid_suffix": "sparse", "density": "sparse", "clearance_target_m": 0.60},
+        {"case_uid_suffix": "dense", "density": "dense", "clearance_target_m": 0.45, "obstacle_rectangles_xyxy_m": [[2.40,1.55,3.55,3.95],[4.45,3.55,6.10,4.55]]}
+      ]
+    },
+    {
+      "source_case_uid": "syn_s_curve",
+      "variants": [
+        {"case_uid_suffix": "sparse", "density": "sparse", "clearance_target_m": 0.60},
+        {"case_uid_suffix": "dense", "density": "dense", "clearance_target_m": 0.32}
+      ]
+    },
+    {
+      "source_case_uid": "syn_straight",
+      "variants": [
+        {"case_uid_suffix": "sparse", "density": "sparse", "clearance_target_m": 0.60},
+        {"case_uid_suffix": "dense", "density": "dense", "clearance_target_m": 0.32}
+      ]
+    }
   ]
 }

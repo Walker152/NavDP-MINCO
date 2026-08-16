@@ -7,13 +7,14 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import shutil
 from typing import Any, Iterable, Mapping
 
 import numpy as np
 
 from experiments.static.case_schema import StaticCase
 from experiments.static.metrics import compute_static_case_metrics
-from experiments.static.runner import load_legacy_profile, run_static_case
+from experiments.static.runner import StaticRunResult, load_legacy_profile, run_static_case
 from experiments.static.synthetic import generate_catalogue
 from experiments.visualizers.static_benchmark import (
     build_paired_static_gif_evidence,
@@ -23,6 +24,24 @@ from experiments.core.artifact_receipt import inventory_receipts
 
 
 POLICY_VERSION = "best-worst-lexicographic-v1"
+CORRIDOR_SHOWCASE_CASES = (
+    "syn_l90",
+    "syn_s_curve_sparse",
+    "syn_l90_dense",
+)
+# Full-route evidence is deliberately a compact, interpretable matrix rather
+# than every one-shot sweep cell.  It contains the nominal baseline, two
+# isolated initial-condition extremes, and sparse/dense obstacle geometries.
+# Each case is rolled from start to final goal under both profiles; a failed
+# hard constraint is retained with its recorded terminal reason.
+FULL_ROUTE_SHOWCASE_CASES = (
+    "syn_straight",
+    "state_v_reverse",
+    "state_a_along",
+    "state_yaw_reverse",
+    "syn_s_curve_sparse",
+    "syn_l90_dense",
+)
 
 
 def _canonical_hash(value: Any) -> str:
@@ -73,6 +92,8 @@ def _json_safe(value: Any) -> Any:
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
     if isinstance(value, (np.integer,)):
         return int(value)
     if isinstance(value, (float, np.floating)):
@@ -84,6 +105,9 @@ def _json_safe(value: Any) -> Any:
 def default_selection_policy() -> dict[str, Any]:
     policy = {
         "policy_version": POLICY_VERSION,
+        # Library callers that do not supply a research configuration keep the
+        # historical fixture default.  All formal configs explicitly set the
+        # SuperPlanner SFC selection profile.
         "eligible_profile": "safe_corridor_v1",
         "best_order": [
             "hard_validation_pass",
@@ -109,6 +133,10 @@ def default_selection_policy() -> dict[str, Any]:
             "VALIDATION_ACCELERATION",
             "VALIDATION_VELOCITY",
             "VALIDATION_CORRIDOR",
+            "VALIDATION_SFC",
+            "SFC_GUIDE_NEGATIVE_ESDF",
+            "SFC_GUIDE_UNSAFE",
+            "SFC_DISCONNECTED",
             "CORRIDOR_GUIDE_NEGATIVE_ESDF",
             "CORRIDOR_GUIDE_UNSAFE",
             "CORRIDOR_DISCONNECTED",
@@ -333,6 +361,7 @@ def _expanded_variant_specs(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "factor_level_secondary": y_level,
                     "scan_group": grid["grid_uid"],
                     "tags": ["TWO_FACTOR_GRID", str(grid["grid_uid"])],
+                    **dict(grid.get("fixed_state", {})),
                 }
                 _apply_factor_field(
                     specification, str(first["field"]), float(x_level)
@@ -381,13 +410,33 @@ def _state_variant(case: StaticCase, specification: Mapping[str, Any]) -> Static
         specification.get("acceleration_xyz_mps2", case.start_acceleration),
         dtype=np.float64,
     )
+    position = case.start_position
+    if "position_xyz_m" in specification:
+        position = np.asarray(specification["position_xyz_m"], dtype=np.float64)
+    elif "lateral_offset_m" in specification:
+        # Pure lateral offset from the guide start: zero longitudinal
+        # displacement along the guide direction.
+        offset = float(specification["lateral_offset_m"])
+        if not math.isfinite(offset):
+            raise ValueError("lateral_offset_m must be finite")
+        start_direction = (
+            case.guide_path_xyz[1, :2] - case.guide_path_xyz[0, :2]
+        )
+        length = float(np.linalg.norm(start_direction))
+        if length <= 1e-9:
+            raise ValueError(
+                "cannot compute lateral normal from zero-length guide "
+                "start segment"
+            )
+        lateral_normal = np.array(
+            [-start_direction[1], start_direction[0]], dtype=np.float64
+        ) / length
+        position = np.asarray(case.guide_path_xyz[0], dtype=np.float64).copy()
+        position[:2] = position[:2] + lateral_normal * offset
     return replace(
         case,
         case_uid=str(specification["case_uid"]),
-        start_position=np.asarray(
-            specification.get("position_xyz_m", case.start_position),
-            dtype=np.float64,
-        ),
+        start_position=position,
         start_velocity=velocity,
         start_acceleration=acceleration,
         start_yaw=float(specification.get("yaw_rad", case.start_yaw)),
@@ -482,13 +531,152 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _boundary_result_cache_paths(
+    root: Path, case_uid: str, profile_name: str
+) -> tuple[Path, Path]:
+    stem = root / "run_cache" / case_uid / profile_name
+    return stem.with_suffix(".json"), stem.with_suffix(".npz")
+
+
+def _load_cached_boundary_result(
+    root: Path,
+    case: StaticCase,
+    profile_name: str,
+    profile_hash: str,
+) -> StaticRunResult | None:
+    metadata_path, arrays_path = _boundary_result_cache_paths(
+        root, case.case_uid, profile_name
+    )
+    if not metadata_path.is_file() or not arrays_path.is_file():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if (
+            payload.get("case_hash") != case.case_hash
+            or payload.get("profile_name") != profile_name
+            or payload.get("profile_sha256") != profile_hash
+        ):
+            return None
+        with np.load(arrays_path, allow_pickle=False) as arrays:
+            samples = np.asarray(arrays["samples"], dtype=np.float64)
+            waypoints = np.asarray(arrays["waypoints"], dtype=np.float64)
+        return StaticRunResult(
+            case_uid=case.case_uid,
+            case_hash=case.case_hash,
+            mode=str(payload["mode"]),
+            status=str(payload["status"]),
+            engine=str(payload["engine"]),
+            native_extension_path=str(payload["native_extension_path"]),
+            native_extension_sha256=str(payload["native_extension_sha256"]),
+            diagnostics=payload["diagnostics"],
+            samples=samples,
+            waypoints=waypoints,
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _cache_boundary_result(
+    root: Path,
+    case: StaticCase,
+    profile_name: str,
+    profile_hash: str,
+    result: StaticRunResult,
+) -> None:
+    metadata_path, arrays_path = _boundary_result_cache_paths(
+        root, case.case_uid, profile_name
+    )
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        arrays_path,
+        samples=np.asarray(result.samples, dtype=np.float64),
+        waypoints=np.asarray(result.waypoints, dtype=np.float64),
+    )
+    metadata_path.write_text(
+        json.dumps(
+            _json_safe(
+                {
+                    "schema_version": 1,
+                    "case_hash": case.case_hash,
+                    "profile_name": profile_name,
+                    "profile_sha256": profile_hash,
+                    "mode": result.mode,
+                    "status": result.status,
+                    "engine": result.engine,
+                    "native_extension_path": result.native_extension_path,
+                    "native_extension_sha256": result.native_extension_sha256,
+                    "diagnostics": result.diagnostics,
+                }
+            ),
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+
 def run_boundary_selection(
-    config_path: Path | str, output_dir: Path | str
+    config_path: Path | str, output_dir: Path | str, *, resume: bool = False
 ) -> dict[str, Any]:
     config_path = Path(config_path).resolve()
     output_dir = Path(output_dir).resolve()
+    checkpoint_path = output_dir / "selection_checkpoint.json"
     if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f"selection output already exists: {output_dir}")
+        expected_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        if checkpoint_path.is_file():
+            try:
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise ValueError(f"unreadable selection checkpoint: {error}") from error
+            if checkpoint.get("input_config_sha256") != expected_hash:
+                raise ValueError("selection checkpoint config hash mismatch")
+            if checkpoint.get("status") == "COMPLETE":
+                errors = validate_boundary_selection(output_dir)
+                if errors:
+                    raise RuntimeError(
+                        "completed boundary selection is invalid: " + "; ".join(errors)
+                    )
+                try:
+                    frozen = json.loads(
+                        (output_dir / "selected_dynamic_cases.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                except (OSError, json.JSONDecodeError) as error:
+                    raise ValueError(
+                        f"completed boundary selection is unreadable: {error}"
+                    ) from error
+                return frozen
+        else:
+            # One-time recovery for an interruption between the first cached
+            # native result and checkpoint creation. Every cache entry embeds
+            # profile/case hashes, so only a matching config cache is accepted.
+            cached = list((output_dir / "run_cache").rglob("*.json"))
+            if not resume or not cached:
+                raise FileExistsError(
+                    f"selection output already exists without a resumable checkpoint: {output_dir}"
+                )
+            for path in cached:
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as error:
+                    raise ValueError(f"unreadable early boundary cache {path}: {error}") from error
+                if not payload.get("case_hash") or not payload.get("profile_sha256"):
+                    raise ValueError("early boundary cache is not hash-receipted")
+            checkpoint_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "RUNNING",
+                        "input_config_sha256": expected_hash,
+                        "selected_uids": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ) + "\n",
+                encoding="utf-8",
+            )
     output_dir.mkdir(parents=True, exist_ok=True)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     for key in ("base_case_config",):
@@ -504,19 +692,37 @@ def run_boundary_selection(
         profile_paths[name] = (
             value if value.is_absolute() else (config_path.parent / value).resolve()
         )
+    profile_hashes = {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in profile_paths.items()
+    }
     rows: list[dict[str, Any]] = []
     per_case: dict[
         tuple[str, str], tuple[StaticCase, Any, dict[str, Any], dict[str, Any]]
     ] = {}
     replayability = config.get("dynamic_replayability", {})
     for case in cases:
-        for profile_name in ("legacy", "safe_corridor_v1"):
+        # Formal experiments compare exactly the raw legacy optimizer against
+        # the native 2-D SuperPlanner SFC implementation.  The retired
+        # capsule profile is deliberately not recomputed here.
+        for profile_name in ("legacy", "superplanner_sfc_v1"):
             profile_path = profile_paths[profile_name]
             profile_config = json.loads(profile_path.read_text(encoding="utf-8"))
             run_case = replace(case, constraint_profile=profile_name)
-            result = run_static_case(
-                run_case, load_legacy_profile(profile_path), "recompute"
+            result = _load_cached_boundary_result(
+                output_dir, run_case, profile_name, profile_hashes[profile_name]
             )
+            if result is None:
+                result = run_static_case(
+                    run_case, load_legacy_profile(profile_path), "recompute"
+                )
+                _cache_boundary_result(
+                    output_dir,
+                    run_case,
+                    profile_name,
+                    profile_hashes[profile_name],
+                    result,
+                )
             metrics, detail = compute_static_case_metrics(
                 run_case, result, profile_config["metric_limits"]
             )
@@ -603,9 +809,7 @@ def run_boundary_selection(
                     ).tolist(),
                     separators=(",", ":"),
                 ),
-                "config_sha256": hashlib.sha256(
-                    profile_path.read_bytes()
-                ).hexdigest(),
+                "config_sha256": profile_hashes[profile_name],
                 "native_extension_path": result.native_extension_path,
                 "native_extension_sha256": result.native_extension_sha256,
                 **factor_metadata.get(
@@ -626,6 +830,10 @@ def run_boundary_selection(
                 "corridor_min_radius",
                 "corridor_min_clearance",
                 "corridor_min_overlap",
+                "sfc_generation_reason",
+                "sfc_min_overlap",
+                "sfc_min_margin",
+                "sfc_cells",
                 "adaptive_validation_sample_count",
                 "adaptive_validation_subdivision_count",
                 "validation_offending_sample_index",
@@ -643,6 +851,14 @@ def run_boundary_selection(
             )
 
     policy = default_selection_policy()
+    requested_profile = str(config.get("selection_profile", policy["eligible_profile"]))
+    if requested_profile not in profile_paths:
+        raise ValueError(f"selection_profile missing from profiles: {requested_profile}")
+    policy["eligible_profile"] = requested_profile
+    policy["factor_grid_uids"] = [
+        str(grid["grid_uid"]) for grid in config.get("factor_grids", [])
+    ]
+    policy["policy_sha256"] = _canonical_hash({key: value for key, value in policy.items() if key != "policy_sha256"})
     selection = select_cases(rows, policy)
     backup_count = int(policy["backup_count_per_side"])
     frozen = {
@@ -683,11 +899,11 @@ def run_boundary_selection(
             "selection_content_hash": boundary_case_content_hash(case),
             "expected_category": case.expected_category,
             "legacy_static": row_lookup[(uid, "legacy")],
-            "safe_corridor_v1_static": row_lookup[
-                (uid, "safe_corridor_v1")
+            "superplanner_sfc_v1_static": row_lookup[
+                (uid, "superplanner_sfc_v1")
             ],
             "materialization": {
-                key: row_lookup[(uid, "safe_corridor_v1")][key]
+                key: row_lookup[(uid, "superplanner_sfc_v1")][key]
                 for key in (
                     "dynamic_replayable",
                     "required_scene",
@@ -702,8 +918,46 @@ def run_boundary_selection(
                 )
             },
         }
+    # Persist the frozen numerical study before any expensive rendering.  A
+    # resumed run recomputes deterministic native plans, but never changes the
+    # selected identities or overwrites a completed visual package.
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "RENDERING",
+                "input_config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                "selected_uids": selected_uids,
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
     _render_selected_artifacts(
         frozen["best2"] + frozen["worst2"], per_case, output_dir, frozen
+    )
+    corridor_showcase = {
+        "schema_version": 1,
+        "purpose_zh": (
+            "走廊硬约束实证：前两例为完成的约束正例，最后一例为 "
+            "SuperPlanner 2-D SFC 拒绝不满足凸单元约束轨迹的 fail-closed 反例。"
+        ),
+        "case_uids": list(CORRIDOR_SHOWCASE_CASES),
+        "profiles": ["legacy", "superplanner_sfc_v1"],
+        "cases": {uid: {} for uid in CORRIDOR_SHOWCASE_CASES},
+    }
+    _render_selected_artifacts(
+        list(CORRIDOR_SHOWCASE_CASES),
+        per_case,
+        output_dir,
+        corridor_showcase,
+        artifact_directory="corridor_showcase",
+    )
+    _render_full_route_showcase(output_dir, case_lookup, profile_paths)
+    (output_dir / "corridor_showcase.json").write_text(
+        json.dumps(corridor_showcase, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
 
     # Render factor grid comparison GIFs for each scan group
@@ -783,6 +1037,19 @@ def run_boundary_selection(
     )
 
     generate_static_paper_outputs(output_dir, output_dir / "paper")
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "COMPLETE",
+                "input_config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                "selected_uids": selected_uids,
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
     selection_receipt_path = output_dir / "artifact_receipt.json"
     selection_receipt_path.write_text(
         json.dumps(
@@ -800,6 +1067,94 @@ def run_boundary_selection(
         encoding="utf-8",
     )
     return frozen
+
+
+def validate_boundary_selection(output_dir: Path | str) -> list[str]:
+    """Fail closed unless a complete, hash-receipted boundary study exists."""
+    from experiments.core.artifact_receipt import validate_file_receipt
+
+    root = Path(output_dir).resolve()
+    errors: list[str] = []
+    required = (
+        "selection_policy.json",
+        "selected_dynamic_cases.json",
+        "static_runs.csv",
+        "case_selection.csv",
+        "complete_case_rankings.csv",
+        "selection_report.md",
+        "corridor_showcase.json",
+        "full_route_showcase/full_route_index.json",
+        "artifact_receipt.json",
+    )
+    for relative in required:
+        if not (root / relative).is_file():
+            errors.append(f"missing boundary artifact: {relative}")
+    if errors:
+        return errors
+    try:
+        selected = json.loads((root / "selected_dynamic_cases.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"unreadable selected_dynamic_cases.json: {error}"]
+    selected_uids = list(selected.get("best2", [])) + list(selected.get("worst2", []))
+    if len(selected_uids) != 4 or len(set(selected_uids)) != 4:
+        errors.append("boundary selection does not contain four unique Best2/Worst2 cases")
+    try:
+        with (root / "static_runs.csv").open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+    except OSError as error:
+        errors.append(f"unreadable static_runs.csv: {error}")
+        rows = []
+    profiles = {row.get("profile", "") for row in rows}
+    if profiles != {"legacy", "superplanner_sfc_v1"}:
+        errors.append(f"boundary profiles are incomplete or unexpected: {sorted(profiles)}")
+    for grid in json.loads((root / "selection_policy.json").read_text(encoding="utf-8")).get("factor_grid_uids", []):
+        if not (root / "factor_grids" / str(grid) / f"{grid}_comparison.gif").is_file():
+            errors.append(f"missing factor-grid GIF: {grid}")
+    for uid in selected_uids:
+        paired = root / "selected_artifacts" / uid / f"{uid}_legacy_vs_superplanner_sfc.gif"
+        card = root / "selected_artifacts" / uid / f"{uid}_paired_card.png"
+        if not paired.is_file():
+            errors.append(f"missing selected paired GIF: {uid}")
+        if not card.is_file():
+            errors.append(f"missing selected comparison card: {uid}")
+    try:
+        full_route = json.loads(
+            (root / "full_route_showcase" / "full_route_index.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if tuple(full_route.get("case_uids", ())) != FULL_ROUTE_SHOWCASE_CASES:
+            errors.append("full-route showcase case set is not the frozen evidence matrix")
+        for uid in FULL_ROUTE_SHOWCASE_CASES:
+            visual = root / "full_route_showcase" / uid / "visual"
+            if not (visual / "three_way.gif").is_file():
+                errors.append(f"missing full-route three-way GIF: {uid}")
+            if not (visual / "superplanner_sfc.pdf").is_file():
+                errors.append(f"missing full-route SFC PDF: {uid}")
+    except (OSError, json.JSONDecodeError) as error:
+        errors.append(f"unreadable full-route showcase: {error}")
+    try:
+        corridor = json.loads((root / "corridor_showcase.json").read_text(encoding="utf-8"))
+        if tuple(corridor.get("case_uids", ())) != CORRIDOR_SHOWCASE_CASES:
+            errors.append("corridor showcase case set is not the frozen hard-constraint evidence matrix")
+        for uid in CORRIDOR_SHOWCASE_CASES:
+            package = root / "corridor_showcase" / uid
+            if not (package / f"{uid}_legacy_vs_superplanner_sfc.gif").is_file():
+                errors.append(f"missing corridor showcase paired GIF: {uid}")
+            if not (package / f"{uid}_paired_card.png").is_file():
+                errors.append(f"missing corridor showcase comparison card: {uid}")
+    except (OSError, json.JSONDecodeError) as error:
+        errors.append(f"unreadable corridor showcase: {error}")
+    try:
+        receipt = json.loads((root / "artifact_receipt.json").read_text(encoding="utf-8"))
+        errors.extend(
+            error
+            for row in receipt.get("artifacts", [])
+            for error in validate_file_receipt(root, row)
+        )
+    except (OSError, json.JSONDecodeError, TypeError) as error:
+        errors.append(f"invalid boundary artifact receipt: {error}")
+    return errors
 
 
 def _render_factor_grid_gifs(
@@ -824,7 +1179,7 @@ def _render_factor_grid_gifs(
             row_cells: list[dict[str, object]] = []
             for xi, x_level in enumerate(x_levels):
                 case_uid = f"{grid_uid}_x{xi:02d}_y{yi:02d}"
-                profile = "safe_corridor_v1"
+                profile = "superplanner_sfc_v1"
                 key = (case_uid, profile)
                 if key not in per_case:
                     profile = "legacy"
@@ -845,20 +1200,176 @@ def _render_factor_grid_gifs(
         grid_dir.mkdir(parents=True, exist_ok=True)
         gif_path = grid_dir / f"{grid_uid}_comparison.gif"
 
-        render_factor_grid_gif(
-            gif_path,
-            grid_cells=grid_cells,
-            row_factor={
-                "name": str(y_factor["name"]),
-                "levels": y_levels,
-                "label": str(y_factor["name"]),
-            },
-            col_factor={
-                "name": str(x_factor["name"]),
-                "levels": x_levels,
-                "label": str(x_factor["name"]),
-            },
+        if not gif_path.is_file():
+            render_factor_grid_gif(
+                gif_path,
+                grid_cells=grid_cells,
+                row_factor={
+                    "name": str(y_factor["name"]),
+                    "levels": y_levels,
+                    "label": str(y_factor["name"]),
+                },
+                col_factor={
+                    "name": str(x_factor["name"]),
+                    "levels": x_levels,
+                    "label": str(x_factor["name"]),
+                },
+            )
+
+
+def _static_rectangles_for_rollout(case: StaticCase) -> tuple[object, ...]:
+    """Materialize only recorded static rectangle geometry for a rollout."""
+    from experiments.rolling.scenarios import StaticRectangle
+
+    raw = np.asarray(
+        case.auxiliary_arrays.get(
+            "materialization_obstacle_rectangles_xyxy_m", np.empty((0, 4))
+        ),
+        dtype=np.float64,
+    )
+    if raw.ndim != 2 or raw.shape[1] != 4:
+        return ()
+    return tuple(
+        StaticRectangle(f"static-{index}", row)
+        for index, row in enumerate(raw)
+        if row[2] > row[0] and row[3] > row[1]
+    )
+
+
+def _render_full_route_showcase(
+    output_dir: Path,
+    case_lookup: Mapping[str, StaticCase],
+    profile_paths: Mapping[str, Path],
+) -> None:
+    """Produce hash-validated full-route paired evidence for key static cases."""
+    from experiments.rolling.engine import run_rollout
+    from experiments.rolling.models import RobotState, RolloutConfig
+    from experiments.rolling.scenarios import RollingScenario
+    from experiments.rolling.serialization import load_rollout_result, write_rollout_result
+    from experiments.visualizers.rolling_showcase import (
+        render_scene_package,
+        validate_scene_package,
+    )
+
+    root = output_dir / "full_route_showcase"
+    root.mkdir(parents=True, exist_ok=True)
+    profiles = {
+        name: load_legacy_profile(profile_paths[name])
+        for name in ("legacy", "superplanner_sfc_v1")
+    }
+    # A fixed local horizon is part of the evidence protocol, not a tuned
+    # per-case parameter.  It makes all full-route comparisons comparable.
+    rollout_config = RolloutConfig(
+        planning_period_s=0.5,
+        execute_duration_s=0.5,
+        local_horizon_m=2.0,
+        max_cycles=120,
+        max_time_s=60.0,
+        goal_tolerance_m=0.1,
+    )
+    index: list[dict[str, object]] = []
+    for uid in FULL_ROUTE_SHOWCASE_CASES:
+        case = case_lookup[uid]
+        scene_root = root / uid
+        evidence_root = scene_root / "rollout_evidence"
+        reusable = (
+            (scene_root / "visual").is_dir()
+            and not validate_scene_package(scene_root / "visual")
+            and all(
+                (evidence_root / method / "run_manifest.json").is_file()
+                for method in ("legacy", "superplanner_sfc_v1")
+            )
         )
+        if reusable:
+            results = {
+                method: load_rollout_result(
+                    evidence_root / method / "run_manifest.json"
+                )
+                for method in ("legacy", "superplanner_sfc_v1")
+            }
+        else:
+            if scene_root.exists():
+                shutil.rmtree(scene_root)
+        xmin, ymin = case.esdf_origin
+        height, width = case.occupancy.shape
+        scenario = RollingScenario(
+            scenario_uid=uid,
+            family="static_sparse",
+            world_bounds_xy=(
+                float(xmin), float(ymin),
+                float(xmin + width * case.esdf_resolution),
+                float(ymin + height * case.esdf_resolution),
+            ),
+            resolution_m=case.esdf_resolution,
+            guide_path_xyz=case.guide_path_xyz,
+            final_goal_xyz=(
+                case.terminal_goal
+                if case.terminal_goal is not None
+                else case.guide_path_xyz[-1]
+            ),
+            initial_state=RobotState(
+                case.start_position,
+                case.start_velocity,
+                case.start_acceleration,
+                case.start_yaw,
+                case.start_yaw_rate,
+            ),
+            static_rectangles=_static_rectangles_for_rollout(case),
+            max_experiment_time_s=60.0,
+        )
+        if not reusable:
+            results = {
+                method: run_rollout(
+                    scenario,
+                    method=method,
+                    profile=profiles[method],
+                    config=rollout_config,
+                    reset_history_each_cycle=True,
+                )
+                for method in ("legacy", "superplanner_sfc_v1")
+            }
+            for method, result in results.items():
+                write_rollout_result(result, evidence_root / method)
+            render_scene_package(
+                {
+                    "scenario_uid": uid,
+                    "guide_path_xyz": scenario.guide_path_xyz,
+                    "final_goal_xyz": scenario.final_goal_xyz,
+                    "goal_yaw_rad": None,
+                    "initial_state": scenario.initial_state,
+                    "static_rectangles": scenario.static_rectangles,
+                    **results,
+                },
+                scene_root / "visual",
+            )
+        index.append(
+            {
+                "case_uid": uid,
+                "case_hash": case.case_hash,
+                "protocol": "fixed-horizon cold-replanned full-route v1",
+                "legacy_status": results["legacy"].status,
+                "legacy_final_error_m": results["legacy"].metrics["final_error_m"],
+                "legacy_cycles": results["legacy"].metrics["cycle_count"],
+                "sfc_status": results["superplanner_sfc_v1"].status,
+                "sfc_final_error_m": results["superplanner_sfc_v1"].metrics["final_error_m"],
+                "sfc_cycles": results["superplanner_sfc_v1"].metrics["cycle_count"],
+                "visual_package": f"{uid}/visual",
+            }
+        )
+    (root / "full_route_index.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "purpose_zh": "从起点到终点的真实逐周期冷启动重规划对比；每周期重置原生历史，避免墙钟热启动年龄影响可复现性；失败保留为硬约束或优化拒绝证据。",
+                "case_uids": list(FULL_ROUTE_SHOWCASE_CASES),
+                "rows": index,
+            },
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _render_selected_artifacts(
@@ -868,15 +1379,48 @@ def _render_selected_artifacts(
     ],
     output_dir: Path,
     frozen: dict[str, Any],
+    *,
+    artifact_directory: str = "selected_artifacts",
 ) -> None:
     from PIL import Image, ImageOps, ImageDraw
 
-    root = output_dir / "selected_artifacts"
+    root = output_dir / artifact_directory
     for uid in selected_uids:
+        uid_root = root / uid
+        paired_existing = uid_root / f"{uid}_legacy_vs_superplanner_sfc.gif"
+        card_existing = uid_root / f"{uid}_paired_card.png"
+        evidence_existing = paired_existing.with_name(f"{paired_existing.stem}_evidence")
+        profile_outputs = (
+            "overview.png", "overview.pdf", "clearance.png", "clearance.pdf",
+            "dynamics.png", "dynamics.pdf", "animation.gif", "metrics.json",
+        )
+        complete_profiles = all(
+            all((uid_root / profile / f"{uid}_{suffix}").is_file() for suffix in profile_outputs)
+            for profile in ("legacy", "superplanner_sfc_v1")
+        )
+        complete_paired = (
+            paired_existing.is_file()
+            and card_existing.is_file()
+            and evidence_existing.is_dir()
+            and all(
+                (evidence_existing / name).is_file()
+                for name in ("frame_metrics.csv", "event_timeline.csv", "caption_zh.md", "validation.json")
+            )
+        )
+        if complete_profiles and complete_paired:
+            frozen["cases"][uid]["artifact_paths"] = [
+                str(path.relative_to(output_dir))
+                for path in sorted(uid_root.rglob("*"))
+                if path.is_file()
+            ]
+            continue
+        if uid_root.exists():
+            shutil.rmtree(uid_root)
         profile_dirs: dict[str, Path] = {}
         artifacts: list[str] = []
         trajectory_rows: list[dict[str, Any]] = []
-        for profile in ("legacy", "safe_corridor_v1"):
+        constrained_profile = "superplanner_sfc_v1"
+        for profile in ("legacy", constrained_profile):
             case, result, metrics, detail = per_case[(uid, profile)]
             profile_dir = root / uid / profile
             profile_dirs[profile] = profile_dir
@@ -921,7 +1465,7 @@ def _render_selected_artifacts(
 
         legacy_overview = next(profile_dirs["legacy"].glob("*_overview.png"))
         new_overview = next(
-            profile_dirs["safe_corridor_v1"].glob("*_overview.png")
+            profile_dirs[constrained_profile].glob("*_overview.png")
         )
         images = [Image.open(path).convert("RGB") for path in (legacy_overview, new_overview)]
         target_height = max(image.height for image in images)
@@ -933,7 +1477,7 @@ def _render_selected_artifacts(
             "RGB", (sum(image.width for image in images), target_height + 36), "white"
         )
         x = 0
-        for label, image in zip(("legacy", "safe_corridor_v1"), images):
+        for label, image in zip(("legacy", constrained_profile), images):
             card.paste(image, (x, 36))
             ImageDraw.Draw(card).text((x + 12, 10), label, fill="black")
             x += image.width
@@ -942,9 +1486,10 @@ def _render_selected_artifacts(
         artifacts.append(str(card_path.relative_to(output_dir)))
 
         legacy_case, legacy_result, _, legacy_detail = per_case[(uid, "legacy")]
-        _, safe_result, _, safe_detail = per_case[(uid, "safe_corridor_v1")]
+        _, safe_result, _, safe_detail = per_case[(uid, constrained_profile)]
 
-        paired_gif = root / uid / f"{uid}_legacy_vs_safe.gif"
+        suffix = "superplanner_sfc" if constrained_profile == "superplanner_sfc_v1" else "safe"
+        paired_gif = root / uid / f"{uid}_legacy_vs_{suffix}.gif"
         from experiments.visualizers.static_benchmark import render_paired_static_gif
         render_paired_static_gif(
             paired_gif,

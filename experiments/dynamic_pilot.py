@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import csv
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +13,11 @@ import numpy as np
 from experiments.calibration.profile import load_robot_calibration
 from experiments.orchestrators.suite_runner import run_suite
 from experiments.visualizers.video_evidence import build_video_evidence_package
+from experiments.visualizers.paired_video import (
+    VideoSource,
+    render_paired_episode_video,
+    validate_paired_video_bundle,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -56,6 +62,144 @@ def _write_pending_video_evidence(
         )
         packages.append(str(package))
     return packages
+
+
+def _terminal_state(run_dir: Path, episode_uid: str) -> tuple[str, float | None]:
+    """Read a recorded terminal state when available; never infer one."""
+    for candidate in (run_dir / "episodes.csv", run_dir / "episode_summary.csv"):
+        if not candidate.is_file():
+            continue
+        with candidate.open(newline="", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                if row.get("episode_uid") != episode_uid:
+                    continue
+                status = str(
+                    row.get("termination_state", row.get("status", "UNKNOWN"))
+                ).strip() or "UNKNOWN"
+                for key in ("terminal_time_s", "duration_s", "elapsed_s"):
+                    try:
+                        value = float(row.get(key, ""))
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(value) and value >= 0.0:
+                        return status, value
+                return status, None
+    return "UNKNOWN", None
+
+
+def _find_dynamic_run_dir(
+    suite_dir: Path, experiment_id: str
+) -> Path:
+    matches = []
+    for config_path in suite_dir.rglob("run_config.json"):
+        try:
+            payload = _load_json(config_path)
+        except ValueError:
+            continue
+        if payload.get("experiment_id") == experiment_id:
+            matches.append(config_path.parent)
+    if len(matches) != 1:
+        raise ValueError(
+            f"{experiment_id}: expected exactly one recorded run directory, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def build_dynamic_comparison_videos(
+    dynamic_output: Path | str,
+    *,
+    output_dir: Path | str | None = None,
+) -> dict[str, object]:
+    """Create real three-way videos from completed Isaac run artifacts only.
+
+    This intentionally refuses dry-run, missing-video, or missing-control-data
+    inputs.  It does not draw a surrogate NavDP/MINCO/SFC comparison.
+    """
+    dynamic_output = Path(dynamic_output).resolve()
+    readiness = _load_json(dynamic_output / "dynamic_readiness_receipt.json")
+    suite = _load_json(dynamic_output / "dynamic_suite.json")
+    suite_dir = Path(suite["output_root"]).resolve() / str(suite["suite_id"])
+    suite_status = _load_json(suite_dir / "suite_status.json")
+    if suite_status.get("status") != "COMPLETE" or suite_status.get("data_source") != "REAL":
+        raise RuntimeError("dynamic comparison requires a completed REAL Isaac suite")
+    target = (
+        Path(output_dir).resolve()
+        if output_dir is not None
+        else dynamic_output / "comparison_videos"
+    )
+    if target.exists() and any(target.iterdir()):
+        raise FileExistsError(f"dynamic comparison output already exists: {target}")
+    target.mkdir(parents=True, exist_ok=True)
+    methods = (
+        ("navdp_native", "navdp_native"),
+        ("legacy", "legacy"),
+        ("superplanner_sfc_v1", "superplanner_sfc_v1"),
+    )
+    outputs: list[dict[str, object]] = []
+    for case_uid in readiness.get("case_uids", []):
+        episode_uid = f"dynamic_{case_uid}"
+        sources: dict[str, VideoSource] = {}
+        for panel, suffix in methods:
+            run_dir = _find_dynamic_run_dir(suite_dir, f"DYNAMIC-{case_uid}-{suffix}")
+            config = _load_json(run_dir / "run_config.json")
+            if panel == "navdp_native" and config.get("variant") != "raw":
+                raise ValueError(f"{case_uid}: native NavDP source is not raw")
+            if panel != "navdp_native":
+                profile = (
+                    config.get("effective_parameters", {})
+                    .get("minco", {})
+                    .get("constraint_profile")
+                )
+                if profile != panel:
+                    raise ValueError(f"{case_uid}: {panel} profile mismatch: {profile}")
+            video = run_dir / "videos" / f"{episode_uid}.mp4"
+            video_receipt = run_dir / "videos" / f"{episode_uid}.video_complete.json"
+            controls = run_dir / "control_samples.csv"
+            if not video.is_file() or not video_receipt.is_file() or not controls.is_file():
+                raise FileNotFoundError(
+                    f"{case_uid}/{panel}: require recorded MP4, receipt, and control_samples.csv"
+                )
+            terminal_status, terminal_time = _terminal_state(run_dir, episode_uid)
+            sources[panel] = VideoSource(
+                variant=panel,
+                path=video,
+                receipt_path=video_receipt,
+                control_samples_path=controls,
+                control_episode_uid=episode_uid,
+                terminal_status=terminal_status,
+                terminal_time_s=terminal_time,
+            )
+        output_video = target / f"{case_uid}_navdp_vs_minco_vs_superplanner_sfc.mp4"
+        comparison = render_paired_episode_video(
+            sources,
+            output_video,
+            episode_uid=episode_uid,
+            data_source="REAL_VALIDATED",
+        )
+        errors = validate_paired_video_bundle(comparison.output_path)
+        if errors:
+            raise RuntimeError("paired-video validation failed: " + "; ".join(errors))
+        outputs.append(
+            {
+                "case_uid": case_uid,
+                "episode_uid": episode_uid,
+                "video": str(comparison.output_path),
+                "evidence_package": str(comparison.evidence_package_path),
+                "panel_order": list(comparison.panel_order),
+            }
+        )
+    receipt = {
+        "schema_version": 1,
+        "status": "COMPLETE",
+        "data_source": "REAL_VALIDATED",
+        "methods": [item[0] for item in methods],
+        "suite_dir": str(suite_dir),
+        "outputs": outputs,
+    }
+    (target / "comparison_video_receipt.json").write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return receipt
 
 
 def _decode_vector(value: Any, name: str, length: int = 3) -> list[float]:
@@ -158,6 +302,30 @@ def resolve_materializable_selection(
     return chosen, substitutions
 
 
+SHOWCASE_CASE_UIDS = (
+    "syn_s_curve_sparse",
+    "syn_dense_short",
+    "extreme_yaw_reverse_narrow",
+    "syn_l135",
+)
+
+
+def resolve_showcase_selection(
+    selected: Mapping[str, Any], *, started_processes: int = 0
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Lock dynamic coverage to sparse, dense, narrow-extreme and folded guides."""
+    cases = selected.get("cases", {})
+    chosen: list[str] = []
+    for uid in SHOWCASE_CASE_UIDS:
+        reason = _materialization_failure(cases.get(uid, {}))
+        if reason is not None:
+            raise ValueError(f"required dynamic showcase case {uid}: {reason}")
+        chosen.append(uid)
+    if started_processes or len(chosen) != 4 or len(set(chosen)) != 4:
+        raise RuntimeError("dynamic showcase selection is not a valid frozen four-case matrix")
+    return chosen, []
+
+
 def _usda_scene(rectangles: list[list[float]]) -> str:
     lines = [
         "#usda 1.0",
@@ -225,9 +393,9 @@ def prepare_dynamic_pilot(
     calibration = load_robot_calibration(calibration_path)
     profiles = {
         "legacy": _load_json(legacy_profile_path),
-        "safe_corridor_v1": _load_json(safe_profile_path),
+        "superplanner_sfc_v1": _load_json(safe_profile_path),
     }
-    case_uids, substitutions = resolve_materializable_selection(selected)
+    case_uids, substitutions = resolve_showcase_selection(selected)
     (output_dir / "substitution_receipts.json").write_text(
         json.dumps({
             "schema_version": 1,
@@ -247,7 +415,7 @@ def prepare_dynamic_pilot(
         materialization = case_payload["materialization"]
         if not materialization.get("dynamic_replayable"):
             raise ValueError(f"selected case is not dynamic replayable: {uid}")
-        if case_payload.get("case_hash") != case_payload["safe_corridor_v1_static"].get(
+        if case_payload.get("case_hash") != case_payload["superplanner_sfc_v1_static"].get(
             "case_hash"
         ):
             raise ValueError(f"case hash mismatch: {uid}")
@@ -339,12 +507,24 @@ def prepare_dynamic_pilot(
                         "start_pose": start_pose,
                         "goal_pose": goal,
                         "episode_uid": episode_uid,
-                        "selection_reason": "Task05 frozen Best2/Worst2",
+                        "selection_reason": "frozen sparse+dense+narrow+folded showcase coverage",
                     }
                 ],
             }
         )
-        for profile_name in ("legacy", "safe_corridor_v1"):
+        # Three actual controller conditions: the unmodified NavDP controller,
+        # MINCO without a corridor, and MINCO constrained/validated by native
+        # SuperPlanner 2-D SFC.  ``raw`` is never synthesized from a guide.
+        suite_runs.append(
+            {
+                "experiment_id": f"DYNAMIC-{uid}-navdp_native",
+                "variant": "raw",
+                "warm_start_mode": "cold",
+                "scene_ids": [scene_id],
+                "parameter_overrides": {},
+            }
+        )
+        for profile_name in ("legacy", "superplanner_sfc_v1"):
             minco = dict(profiles[profile_name]["minco"])
             minco.setdefault("constraint_profile", profile_name)
             suite_runs.append(
@@ -359,7 +539,7 @@ def prepare_dynamic_pilot(
 
     manifest = {
         "manifest_version": 1,
-        "manifest_id": "task06_frozen_best2_worst2_v1",
+        "manifest_id": "task06_sparse_dense_narrow_folded_three_method_v1",
         "seed": 6100,
         "scenes": scenes,
     }
@@ -368,10 +548,10 @@ def prepare_dynamic_pilot(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    safe_minco = dict(profiles["safe_corridor_v1"]["minco"])
-    safe_minco.setdefault("constraint_profile", "safe_corridor_v1")
+    safe_minco = dict(profiles["superplanner_sfc_v1"]["minco"])
+    safe_minco.setdefault("constraint_profile", "superplanner_sfc_v1")
     suite = {
-        "suite_id": "task06_dynamic_best2_worst2_v1",
+        "suite_id": "task06_dynamic_sparse_dense_narrow_folded_v1",
         "backend": "isaac",
         "output_root": str(output_dir / "dry_run_results"),
         "scenario_manifest": str(manifest_path),
@@ -417,7 +597,8 @@ def prepare_dynamic_pilot(
     if not dry_plan_path.is_file():
         raise RuntimeError("dry-run plan was not generated")
     dry_plan = _load_json(dry_plan_path)
-    if dry_plan.get("started_processes") != 0 or dry_plan.get("run_count") != 8:
+    expected_run_count = len(case_uids) * 3
+    if dry_plan.get("started_processes") != 0 or dry_plan.get("run_count") != expected_run_count:
         raise RuntimeError("dry-run process/run count mismatch")
 
     real_command = [
@@ -438,7 +619,7 @@ def prepare_dynamic_pilot(
             "profile": profile,
         }
         for uid in case_uids
-        for profile in ("legacy", "safe_corridor_v1")
+        for profile in ("navdp_native", "legacy", "superplanner_sfc_v1")
     ]
     pending_video_evidence = _write_pending_video_evidence(
         output_dir, expected_video_runs
@@ -454,13 +635,13 @@ def prepare_dynamic_pilot(
         "calibration_sha256": calibration.calibration_sha256,
         "profile_hashes": {
             "legacy": _sha256(legacy_profile_path),
-            "safe_corridor_v1": _sha256(safe_profile_path),
+            "superplanner_sfc_v1": _sha256(safe_profile_path),
         },
         "case_uids": case_uids,
         "substitutions": substitutions,
         "substitution_receipts": str(output_dir / "substitution_receipts.json"),
-        "run_count": 8,
-        "profiles": ["legacy", "safe_corridor_v1"],
+        "run_count": expected_run_count,
+        "profiles": ["navdp_native", "legacy", "superplanner_sfc_v1"],
         "warm_start_mode": "gated",
         "suite_seed": 6100,
         "navdp_seeds": [16100 + index for index in range(4)],
@@ -470,8 +651,8 @@ def prepare_dynamic_pilot(
             "isaac_processes_per_run": 1,
             "navdp_server_processes_per_run": 1,
             "runs_sequential": True,
-            "video_count_expected": 8,
-            "planning_trace_count_expected": 8,
+            "video_count_expected": expected_run_count,
+            "planning_trace_count_expected": expected_run_count,
         },
         "materialization_receipts": materialization_receipts,
         "dry_run_plan": str(dry_plan_path),
@@ -479,10 +660,10 @@ def prepare_dynamic_pilot(
         "real_command_argv": real_command,
         "real_command_shell": shlex.join(real_command),
         "expected_artifacts": [
-            "8 episode videos",
-            "8 planning trace archives",
-            "8 machine termination receipts",
-            "4 synchronized legacy-vs-safe videos",
+            f"{expected_run_count} episode videos",
+            f"{expected_run_count} planning trace archives",
+            f"{expected_run_count} machine termination receipts",
+            "4 synchronized NavDP-vs-legacy-MINCO-vs-SuperPlanner-SFC videos",
             "constraint/control/timing CSV tables",
             "static-vs-dynamic case cards",
         ],
@@ -500,7 +681,7 @@ def prepare_dynamic_pilot(
         f"```bash\n{receipt['real_command_shell']}\n```\n\n"
         "Do not change the selected-case, calibration, profile, scene, or seed "
         "hashes after starting. Any infrastructure fix invalidates the pilot "
-        "and requires all eight paired runs to restart.\n",
+        "and requires all twelve three-method runs to restart.\n",
         encoding="utf-8",
     )
     return receipt

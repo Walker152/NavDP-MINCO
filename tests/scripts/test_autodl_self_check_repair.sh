@@ -49,7 +49,7 @@ write_valid_plan() {
   "started_processes": 0,
   "commands": [
     [
-      "conda", "run", "--no-capture-output", "-n", "isaaclab",
+      "/root/miniconda3/bin/conda", "run", "--no-capture-output", "-n", "isaaclab",
       "bash", "/fixture/IsaacLab/isaaclab.sh", "-p", "/fixture/NavDP/run_scripts/eval_pointgoal_wheeled.py",
       "--experiment-variant", "raw",
       "--episode-uids", "ep_0", "ep_1",
@@ -58,12 +58,32 @@ write_valid_plan() {
       "--num_envs", "1", "--num_episodes", "2",
       "--port", "8889",
       "--raw-controller", "original-navdp-mpc",
+      "--robot-calibration", "/root/NavDP/configs/robot_calibration.json",
       "--minco_start_validation_exemption_radius", "0.35",
       "--minco_penalty_weight_attractor", "20.0",
+      "--minco_constraint_profile", "safe_corridor_v1",
+      "--minco_guide_corridor_weight", "2000.0",
+      "--minco_corridor_max_radius", "0.45",
+      "--minco_corridor_min_radius", "0.04",
+      "--minco_corridor_sample_step", "0.025",
+      "--minco_sfc_bound_distance", "0.8",
+      "--minco_sfc_seed_line_max_length", "2.0",
+      "--minco_sfc_min_overlap_depth", "0.02",
+      "--minco_adaptive_max_spatial_step", "0.025",
+      "--minco_adaptive_near_clearance", "0.05",
+      "--minco_adaptive_max_depth", "14",
+      "--minco_adaptive_sample_budget", "20000",
+      "--minco_max_jerk", "20.0",
+      "--threshold-profile-id", "full-real-v3",
+      "--high-turn-curvature-p95", "2.0",
+      "--high-turn-curvature-tv", "100.0",
+      "--jump-position-rmse", "0.5",
+      "--jump-tangent-rad", "0.4",
+      "--planning-deadline-ms", "100.0",
       "--no-enable_minco"
     ],
     [
-      "conda", "run", "--no-capture-output", "-n", "isaaclab",
+      "/root/miniconda3/bin/conda", "run", "--no-capture-output", "-n", "isaaclab",
       "bash", "/fixture/IsaacLab/isaaclab.sh", "-p", "/fixture/NavDP/run_scripts/eval_pointgoal_wheeled.py",
       "--experiment-variant", "minco-hot",
       "--episode-uids", "ep_0", "ep_1",
@@ -72,8 +92,28 @@ write_valid_plan() {
       "--num_envs", "1", "--num_episodes", "2",
       "--port", "8889",
       "--raw-controller", "disabled",
+      "--robot-calibration", "/root/NavDP/configs/robot_calibration.json",
       "--minco_start_validation_exemption_radius", "0.35",
       "--minco_penalty_weight_attractor", "20.0",
+      "--minco_constraint_profile", "safe_corridor_v1",
+      "--minco_guide_corridor_weight", "2000.0",
+      "--minco_corridor_max_radius", "0.45",
+      "--minco_corridor_min_radius", "0.04",
+      "--minco_corridor_sample_step", "0.025",
+      "--minco_sfc_bound_distance", "0.8",
+      "--minco_sfc_seed_line_max_length", "2.0",
+      "--minco_sfc_min_overlap_depth", "0.02",
+      "--minco_adaptive_max_spatial_step", "0.025",
+      "--minco_adaptive_near_clearance", "0.05",
+      "--minco_adaptive_max_depth", "14",
+      "--minco_adaptive_sample_budget", "20000",
+      "--minco_max_jerk", "20.0",
+      "--threshold-profile-id", "full-real-v3",
+      "--high-turn-curvature-p95", "2.0",
+      "--high-turn-curvature-tv", "100.0",
+      "--jump-position-rmse", "0.5",
+      "--jump-tangent-rad", "0.4",
+      "--planning-deadline-ms", "100.0",
       "--enable_minco"
     ]
   ],
@@ -121,7 +161,7 @@ write_invalid_plan() {
       sed -i '0,/\["python", "navdp_server.py", "--port", "8889"\]/s//["anything", "--port", "8889"]/' "$path"
       ;;
     invalid-eval-prefix)
-      sed -i '0,/"conda", "run"/s//"anything", "conda", "run"/' "$path"
+      sed -i '0,/"\/root\/miniconda3\/bin\/conda", "run"/s//"anything", "\/root\/miniconda3\/bin\/conda", "run"/' "$path"
       ;;
     glued-server-port)
       sed -i '/\["python", "navdp_server.py"/s/]$/, "--port=8890"]/' "$path"
@@ -323,6 +363,9 @@ if [[ "$*" == *"create_empty.py --headless"* ]]; then
       printf '| 0 | NVIDIA GeForce RTX 4090 | Inactive |\n'
       printf '[3.557s] app ready\n'
       ;;
+    eula)
+      printf 'Do you accept the EULA? (Yes/No):\n'
+      ;;
   esac
   exit 0
 fi
@@ -456,6 +499,7 @@ run_case() {
     FAKE_CUDA_OK="${FAKE_CUDA_OK:-1}" \
     FAKE_NAVDP_IMPORTS_OK="${FAKE_NAVDP_IMPORTS_OK:-1}" \
     FAKE_SMOKE_MODE="${FAKE_SMOKE_MODE:-healthy}" \
+    OMNI_KIT_ACCEPT_EULA=YES \
     FAKE_KILL_SURVIVES="${FAKE_KILL_SURVIVES:-0}" \
     FAKE_KILL_SIGNAL_FAIL="${FAKE_KILL_SIGNAL_FAIL:-0}" \
     FAKE_KILL_LIVENESS_FAIL="${FAKE_KILL_LIVENESS_FAIL:-0}" \
@@ -509,6 +553,7 @@ run_prepared_case() {
     FAKE_CUDA_OK="${FAKE_CUDA_OK:-1}" \
     FAKE_NAVDP_IMPORTS_OK="${FAKE_NAVDP_IMPORTS_OK:-1}" \
     FAKE_SMOKE_MODE="${FAKE_SMOKE_MODE:-healthy}" \
+    OMNI_KIT_ACCEPT_EULA=YES \
     FAKE_KILL_SURVIVES="${FAKE_KILL_SURVIVES:-0}" \
     FAKE_KILL_SIGNAL_FAIL="${FAKE_KILL_SIGNAL_FAIL:-0}" \
     FAKE_KILL_LIVENESS_FAIL="${FAKE_KILL_LIVENESS_FAIL:-0}" \
@@ -536,6 +581,7 @@ run_prepared_case() {
 bash -n "$SCRIPT"
 assert_not_contains "$SCRIPT" "assert torch.cuda"
 assert_not_contains "$SCRIPT" "Older Python/kernel combinations fall back"
+assert_contains "$SCRIPT" "import rsl_rl"
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$SCRIPT"
 fi
@@ -637,10 +683,13 @@ run_case healthy --skip-smoke --skip-dry-run
 }
 assert_contains "$CASE_OUT" "[REPAIRED] Selected NVIDIA Vulkan ICD"
 assert_contains "$CASE_OUT" "Report:"
+assert_contains "$CASE_OUT" "[CHECK] Runtime source and eval parser contracts"
+assert_not_contains "$CASE_CALLS" "eval_pointgoal_wheeled.py --help"
 assert_contains "$CASE_ENV_FILE" "export VK_ICD_FILENAMES="
 assert_contains "$CASE_ENV_FILE" "export VK_DRIVER_FILES="
 assert_contains "$CASE_ENV_FILE" "export CONDA_ENVS_PATH="
 assert_contains "$CASE_ENV_FILE" "export CONDA_BIN=$CASE_BIN/conda"
+assert_contains "$CASE_ENV_FILE" "export OMNI_KIT_ACCEPT_EULA=YES"
 assert_contains "$CASE_ENV_FILE" "$CASE_ETC_ICD/nvidia_icd.json"
 assert_not_contains "$CASE_ENV_FILE" "CUDA_VISIBLE_DEVICES"
 assert_not_contains "$CASE_ENV_FILE" "NVIDIA_VISIBLE_DEVICES"
@@ -879,10 +928,15 @@ FAKE_SMOKE_MODE=healthy run_case smoke-healthy --skip-dry-run
   fail "healthy Isaac smoke should pass"
 }
 assert_contains "$CASE_OUT" "Isaac headless GPU smoke passed"
+assert_contains "$CASE_OUT" "[CHECK] Isaac headless GPU smoke"
 
 FAKE_SMOKE_MODE=fatal run_case smoke-fatal --skip-dry-run
 [[ "$CASE_STATUS" == 1 ]] || fail "fatal Isaac smoke should fail"
 assert_contains "$CASE_OUT" "Isaac smoke reported a fatal GPU error"
+
+FAKE_SMOKE_MODE=eula run_case smoke-eula --skip-dry-run
+[[ "$CASE_STATUS" == 1 ]] || fail "Isaac EULA prompt should fail fast"
+assert_contains "$CASE_OUT" "Isaac smoke reported a fatal startup error"
 
 FAKE_SMOKE_MODE=inactive run_case smoke-inactive --skip-dry-run
 [[ "$CASE_STATUS" == 1 ]] || fail "inactive GPU smoke row should fail"

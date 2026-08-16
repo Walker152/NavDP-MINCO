@@ -22,7 +22,7 @@ except ImportError:  # Allows model/engine tests while the scenario module lands
 
 
 Planner = Callable[..., object]
-PLANNED_STATE_TOLERANCE = 5e-4
+PLANNED_STATE_TOLERANCE = 1e-3
 
 
 def _normalise_diagnostic(value: object) -> object:
@@ -254,10 +254,17 @@ def run_rollout(
     profile: Mapping[str, object],
     config: RolloutConfig,
     planner: Planner | None = None,
+    reset_history_each_cycle: bool = False,
 ) -> RolloutResult:
-    """Execute fixed-prefix local plans until one fixed terminal class applies."""
+    """Execute fixed-prefix local plans until one fixed terminal class applies.
 
-    if method not in {"legacy", "safe_corridor_v1"}:
+    ``reset_history_each_cycle`` is intentionally only a reproducibility mode
+    for static full-route figures.  It prevents native wall-clock hot-start
+    age from affecting a recorded route; real closed-loop simulation keeps the
+    default history-reuse behaviour.
+    """
+
+    if method not in {"legacy", "superplanner_sfc_v1", "safe_corridor_v1"}:
         raise ValueError(f"unsupported rollout method: {method}")
     if not isinstance(config, RolloutConfig):
         raise TypeError("config must be RolloutConfig")
@@ -295,23 +302,37 @@ def run_rollout(
             state=state,
             terminal_goal_xyz=terminal_goal,
             profile=profile,
-            reset_history=cycle_index == 0,
+            reset_history=reset_history_each_cycle or cycle_index == 0,
         )
         plan = planner(**planner_arguments)
         initial_samples = np.asarray(
             getattr(plan, "samples", np.empty((0, MINCO_SAMPLE_COLUMNS)))
         )
+        planned_start_error = math.inf
         if (
             initial_samples.ndim == 2
             and len(initial_samples)
-            and _planned_state_error(initial_samples, state)
+            and (planned_start_error := _planned_state_error(initial_samples, state))
             > PLANNED_STATE_TOLERANCE
         ):
             reset = getattr(planner, "reset_execution_history", None)
             if callable(reset):
                 reset()
-                planner_arguments["reset_history"] = False
+                # The native planner must also receive the reset request.  A
+                # bare Python-side reset is insufficient when its processor
+                # retains a stale proposal: it can otherwise return a cold
+                # plan whose first state is not the executed state.  This is
+                # especially visible late in long, full-route rollouts.
+                planner_arguments["reset_history"] = True
                 plan = planner(**planner_arguments)
+                initial_samples = np.asarray(
+                    getattr(plan, "samples", np.empty((0, MINCO_SAMPLE_COLUMNS)))
+                )
+                planned_start_error = (
+                    _planned_state_error(initial_samples, state)
+                    if initial_samples.ndim == 2 and len(initial_samples)
+                    else math.inf
+                )
         diagnostics = {
             str(key): _normalise_diagnostic(value)
             for key, value in dict(getattr(plan, "diagnostics", {})).items()
@@ -321,6 +342,15 @@ def run_rollout(
         success = plan_status in {"SUCCEEDED", "SUCCESS"} and bool(
             diagnostics.get("success", True)
         )
+        if success and planned_start_error > PLANNED_STATE_TOLERANCE:
+            success = False
+            diagnostics.update(
+                {
+                    "success": False,
+                    "failure_reason": "PLANNED_START_STATE_DISCONTINUITY",
+                    "planned_start_state_error": planned_start_error,
+                }
+            )
         if not success or samples.size == 0:
             replanning_failures += 1
             anchor = np.zeros((1, MINCO_SAMPLE_COLUMNS), dtype=np.float64)

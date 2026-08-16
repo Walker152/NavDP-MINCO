@@ -100,6 +100,15 @@ class _LinearPlanner:
         )
 
 
+class _MismatchedStartPlanner(_LinearPlanner):
+    """Fixture for a native proposal that cannot start from executed state."""
+
+    def __call__(self, **kwargs):
+        result = super().__call__(**kwargs)
+        result.samples[0, 1] += 0.01
+        return result
+
+
 def _config(**overrides) -> RolloutConfig:
     values = {
         "planning_period_s": 0.5,
@@ -117,6 +126,19 @@ def _config(**overrides) -> RolloutConfig:
 
 
 class RollingEngineTests(unittest.TestCase):
+    def test_rollout_fails_closed_when_native_candidate_start_is_discontinuous(self):
+        from experiments.rolling.engine import run_rollout
+
+        with patch("experiments.rolling.engine.materialize_world", return_value=_world()):
+            result = run_rollout(
+                _scenario(), method="legacy", profile={}, config=_config(),
+                planner=_MismatchedStartPlanner(),
+            )
+
+        self.assertEqual(result.status, "OPTIMIZATION_FAILED")
+        self.assertEqual(result.cycles[0].diagnostics["failure_reason"], "PLANNED_START_STATE_DISCONTINUITY")
+        self.assertEqual(result.validate(), [])
+
     def test_rollout_executes_prefixes_until_full_guide_goal(self):
         from experiments.rolling.engine import run_rollout
 
@@ -158,6 +180,24 @@ class RollingEngineTests(unittest.TestCase):
             np.testing.assert_allclose(right.input_state.acceleration_xyz_mps2, end[7:10])
             self.assertAlmostEqual(right.input_state.yaw_rad, end[13])
             self.assertAlmostEqual(right.input_state.yaw_rate_radps, end[14])
+
+    def test_cold_replan_mode_resets_native_history_on_every_cycle(self):
+        from experiments.rolling.engine import run_rollout
+
+        planner = _LinearPlanner()
+        with patch("experiments.rolling.engine.materialize_world", return_value=_world()):
+            result = run_rollout(
+                _scenario(2.5),
+                method="legacy",
+                profile={},
+                config=_config(),
+                planner=planner,
+                reset_history_each_cycle=True,
+            )
+
+        self.assertEqual(result.status, "GOAL_REACHED")
+        self.assertGreater(len(planner.calls), 1)
+        self.assertTrue(all(call["reset_history"] for call in planner.calls))
 
     def test_local_guide_progress_never_backtracks(self):
         from experiments.rolling.engine import select_local_guide

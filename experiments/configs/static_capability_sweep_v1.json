@@ -52,13 +52,16 @@
       "optimization_safe_distance_m": 0.3,
       "guide_corridor_weight": 0.0
     },
-    "safe_corridor_v1": {
-      "constraint_profile": "safe_corridor_v1",
+    "superplanner_sfc_v1": {
+      "constraint_profile": "superplanner_sfc_v1",
       "optimization_safe_distance_m": 0.4293079057,
-      "guide_corridor_weight": 2000.0,
+      "guide_corridor_weight": 100000.0,
       "corridor_max_radius_m": 0.45,
       "corridor_min_radius_m": 0.04,
-      "corridor_sample_step_m": 0.025
+      "corridor_sample_step_m": 0.025,
+      "sfc_bound_distance_m": 0.8,
+      "sfc_seed_line_max_length_m": 2.0,
+      "sfc_min_overlap_depth_m": 0.02
     }
   },
   "calibration_status": {
@@ -76,9 +79,9 @@
     {"case_uid":"state_v_limit","source_case_uid":"syn_straight","velocity_xyz_mps":[0.95,0.0,0.0],"factor_name":"initial_speed_mps","factor_level":0.95,"tags":["velocity_near_limit"]},
     {"case_uid":"state_v_reverse","source_case_uid":"syn_straight","velocity_xyz_mps":[-0.5,0.0,0.0],"factor_name":"initial_speed_mps","factor_level":-0.5,"tags":["velocity_reverse"]},
     {"case_uid":"state_v_lateral","source_case_uid":"syn_straight","velocity_xyz_mps":[0.0,0.5,0.0],"factor_name":"initial_lateral_speed_mps","factor_level":0.5,"tags":["velocity_lateral"]},
-    {"case_uid":"state_a_along","source_case_uid":"syn_straight","acceleration_xyz_mps2":[0.75,0.0,0.0],"factor_name":"initial_acceleration_x_mps2","factor_level":0.75,"tags":["initial_acceleration_only"]},
-    {"case_uid":"state_a_reverse","source_case_uid":"syn_straight","acceleration_xyz_mps2":[-0.75,0.0,0.0],"factor_name":"initial_acceleration_x_mps2","factor_level":-0.75,"tags":["initial_acceleration_only"]},
-    {"case_uid":"state_a_lateral","source_case_uid":"syn_straight","acceleration_xyz_mps2":[0.0,0.75,0.0],"factor_name":"initial_acceleration_y_mps2","factor_level":0.75,"tags":["initial_acceleration_only"]},
+    {"case_uid":"state_a_along","source_case_uid":"syn_straight","velocity_xyz_mps":[0.5,0.0,0.0],"acceleration_xyz_mps2":[0.75,0.0,0.0],"factor_name":"initial_acceleration_x_mps2","factor_level":0.75,"tags":["matched_velocity_0p5","initial_acceleration_only"]},
+    {"case_uid":"state_a_reverse","source_case_uid":"syn_straight","velocity_xyz_mps":[0.5,0.0,0.0],"acceleration_xyz_mps2":[-0.75,0.0,0.0],"factor_name":"initial_acceleration_x_mps2","factor_level":-0.75,"tags":["matched_velocity_0p5","initial_acceleration_only"]},
+    {"case_uid":"state_a_lateral","source_case_uid":"syn_straight","velocity_xyz_mps":[0.5,0.0,0.0],"acceleration_xyz_mps2":[0.0,0.75,0.0],"factor_name":"initial_acceleration_y_mps2","factor_level":0.75,"tags":["matched_velocity_0p5","initial_acceleration_only"]},
     {"case_uid":"state_yaw_small","source_case_uid":"syn_straight","yaw_rad":0.25,"factor_name":"yaw_error_rad","factor_level":0.25,"tags":["yaw_small"]},
     {"case_uid":"state_yaw_mid","source_case_uid":"syn_straight","yaw_rad":1.2,"factor_name":"yaw_error_rad","factor_level":1.2,"tags":["yaw_mid"]},
     {"case_uid":"state_yaw_large","source_case_uid":"syn_straight","yaw_rad":2.6,"factor_name":"yaw_error_rad","factor_level":2.6,"tags":["yaw_large"]},
@@ -177,10 +180,11 @@
       "grid_uid": "grid_accel_yaw_on_l90",
       "factor_scale": "continuous",
       "source_case_uid": "syn_l90",
+      "fixed_state": {"velocity_xyz_mps": [0.5, 0.0, 0.0]},
       "x_factor": {
         "name": "initial_acceleration_x_mps2",
         "field": "acceleration_x_mps2",
-        "levels": [0.0, 0.5, 0.75]
+        "levels": [-0.75, 0.0, 0.75]
       },
       "y_factor": {
         "name": "yaw_error_rad",

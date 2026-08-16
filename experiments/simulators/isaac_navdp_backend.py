@@ -90,8 +90,9 @@ class IsaacNavDPBackend:
             if isaac_python
             else ["-n", "isaaclab"]
         )
+        conda_bin = os.environ.get("CONDA_BIN", "conda").strip() or "conda"
         command = [
-            "conda", "run", "--no-capture-output", *isaac_selector,
+            conda_bin, "run", "--no-capture-output", *isaac_selector,
             "bash", str(self.isaaclab_dir / "isaaclab.sh"), "-p", str(self.evaluator_path),
             "--experiment-config", str(Path(run_dir) / "run_config.json"),
             "--experiment-run-dir", str(run_dir), "--experiment-variant", run.variant, "--scenario-manifest", str(manifest_path),
@@ -158,6 +159,9 @@ class IsaacNavDPBackend:
             "--minco_corridor_max_radius", str(minco["corridor_max_radius_m"]),
             "--minco_corridor_min_radius", str(minco["corridor_min_radius_m"]),
             "--minco_corridor_sample_step", str(minco["corridor_sample_step_m"]),
+            "--minco_sfc_bound_distance", str(minco["sfc_bound_distance_m"]),
+            "--minco_sfc_seed_line_max_length", str(minco["sfc_seed_line_max_length_m"]),
+            "--minco_sfc_min_overlap_depth", str(minco["sfc_min_overlap_depth_m"]),
             "--minco_adaptive_max_spatial_step", str(minco["adaptive_max_spatial_step_m"]),
             "--minco_adaptive_near_clearance", str(minco["adaptive_near_clearance_m"]),
             "--minco_adaptive_max_depth", str(minco["adaptive_max_depth"]),
@@ -189,8 +193,9 @@ class IsaacNavDPBackend:
             if navdp_python
             else ["-n", "navdp"]
         )
+        conda_bin = os.environ.get("CONDA_BIN", "conda").strip() or "conda"
         return [
-            "conda", "run", "--no-capture-output", *navdp_selector, "python", "-u",
+            conda_bin, "run", "--no-capture-output", *navdp_selector, "python", "-u",
             str(self.repo_root / "baselines/navdp/navdp_server.py"),
             "--port", str(port), "--checkpoint", str(self.repo_root / "baselines/navdp/checkpoints/navdp_checkpoint.ckpt"),
             "--output-dir", str(run_dir), "--run-id", str(run_id), "--seed", str(seed), "--no-save-video",

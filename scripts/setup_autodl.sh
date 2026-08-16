@@ -18,6 +18,8 @@ ISAACLAB_USE_LOCAL_SOURCE="${ISAACLAB_USE_LOCAL_SOURCE:-0}"
 AUTODL_EXPORT_DIR="${AUTODL_EXPORT_DIR:-$REPO_ROOT/requirements/autodl}"
 AUTODL_MIN_FREE_GB="${AUTODL_MIN_FREE_GB:-35}"
 ISAACSIM_VERIFY_TIMEOUT="${ISAACSIM_VERIFY_TIMEOUT:-180}"
+NAVDP_HEADLESS_VULKAN_ICD_PATH="${NAVDP_HEADLESS_VULKAN_ICD_PATH:-/etc/vulkan/icd.d/navdp_nvidia_headless_icd.json}"
+NAVDP_EIGEN_INCLUDE_DIR="${NAVDP_EIGEN_INCLUDE_DIR:-/usr/include/eigen3}"
 export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-$AUTODL_WORK_DIR/conda/envs}"
 export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-$AUTODL_WORK_DIR/conda/pkgs}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$AUTODL_WORK_DIR/pip-cache}"
@@ -26,6 +28,9 @@ export HF_HOME="${HF_HOME:-$AUTODL_WORK_DIR/huggingface}"
 export TORCH_HOME="${TORCH_HOME:-$AUTODL_WORK_DIR/torch}"
 CHECK_ONLY=0
 SKIP_VERIFY=0
+RUN_REAL_EXPERIMENTS=0
+ACCEPT_ISAAC_EULA=0
+EXPERIMENT_OUTPUT="results/navdp_superplanner_final"
 CURRENT_STAGE="startup"
 
 usage() {
@@ -37,6 +42,13 @@ Create the NavDP and IsaacLab Conda environments documented by this repository.
 Options:
   --check-only   Validate the host and repository without installing anything
   --skip-verify  Install dependencies but skip runtime smoke tests
+  --accept-isaac-eula
+                 Record explicit acceptance of the NVIDIA Omniverse EULA for
+                 non-interactive Isaac Sim startup
+  --run-real-experiments
+                 After a successful install, run the strict AutoDL self-check
+                 and the complete static + 12-run real NavDP/MINCO/SFC workflow
+  --output PATH   Result root used with --run-real-experiments
   -h, --help     Show this help message
 
 Environment variables:
@@ -52,6 +64,10 @@ Environment variables:
   PIP_INDEX_URL           Optional primary pip mirror
   AUTODL_MIN_FREE_GB      Required free disk space in GiB (default: 35)
   ISAACSIM_VERIFY_TIMEOUT Headless verification timeout in seconds (default: 180)
+  OMNI_KIT_ACCEPT_EULA   Set to YES as an alternative explicit EULA opt-in
+  NAVDP_HEADLESS_VULKAN_ICD_PATH
+                          Managed AutoDL headless EGL ICD path
+  NAVDP_EIGEN_INCLUDE_DIR Eigen3 include root (default: /usr/include/eigen3)
 EOF
 }
 
@@ -122,6 +138,94 @@ retry_git() {
   done
 }
 
+vulkan_summary_has_nvidia() {
+  grep -Eiq 'deviceName[[:space:]]*=.*NVIDIA' <<<"$1"
+}
+
+vulkan_summary_is_nvidia_only() {
+  vulkan_summary_has_nvidia "$1" &&
+    ! grep -Eiq 'deviceName[[:space:]]*=.*llvmpipe' <<<"$1"
+}
+
+resolve_nvidia_egl_library() {
+  awk '
+    $1 == "libEGL_nvidia.so.0" && $(NF - 1) == "=>" {
+      print $NF
+      exit
+    }
+  ' <<<"$1"
+}
+
+write_headless_nvidia_icd() {
+  local target="$1"
+  local egl_library="$2"
+  local target_dir temp
+  [[ "$target" == /* && "$target" == *.json ]] || \
+    die "NAVDP_HEADLESS_VULKAN_ICD_PATH must be an absolute JSON path"
+  [[ "$egl_library" =~ ^/[A-Za-z0-9._/+:-]+$ ]] || \
+    die "resolved libEGL_nvidia.so.0 path contains unsupported characters"
+  [[ ! -L "$target" ]] || die "managed Vulkan ICD path must not be a symlink: $target"
+  [[ ! -e "$target" || -f "$target" ]] || \
+    die "managed Vulkan ICD path is not a regular file: $target"
+  target_dir="$(dirname "$target")"
+  mkdir -p "$target_dir"
+  temp="$(mktemp "$target_dir/.navdp-nvidia-headless-icd.XXXXXX")"
+  if ! printf '%s\n' \
+      '{' \
+      '    "file_format_version": "1.0.0",' \
+      '    "ICD": {' \
+      "        \"library_path\": \"$egl_library\"," \
+      '        "api_version": "1.3.277"' \
+      '    }' \
+      '}' >"$temp"; then
+    command rm -f "$temp"
+    die "failed to write temporary AutoDL headless Vulkan ICD"
+  fi
+  chmod 0644 "$temp"
+  if [[ -f "$target" ]] && cmp -s "$temp" "$target"; then
+    command rm -f "$temp"
+  else
+    mv "$temp" "$target"
+  fi
+}
+
+configure_autodl_headless_vulkan() {
+  local linker_cache="$1"
+  local egl_library probe_icd repaired_summary probe_is_temporary=0
+  egl_library="$(resolve_nvidia_egl_library "$linker_cache")"
+  if [[ -z "$egl_library" || ! -r "$egl_library" ]]; then
+    die "libEGL_nvidia.so.0 was not found; AutoDL headless Vulkan cannot be repaired; see https://www.autodl.com/docs/vulkan/"
+  fi
+
+  if ((CHECK_ONLY)); then
+    probe_icd="$(mktemp --suffix=.json "${TMPDIR:-/tmp}/navdp-nvidia-headless-icd.XXXXXX")"
+    command rm -f "$probe_icd"
+    probe_is_temporary=1
+  else
+    probe_icd="$NAVDP_HEADLESS_VULKAN_ICD_PATH"
+  fi
+  write_headless_nvidia_icd "$probe_icd" "$egl_library"
+
+  if ! repaired_summary="$(
+      VK_ICD_FILENAMES="$probe_icd" \
+      VK_DRIVER_FILES="$probe_icd" \
+      timeout 30 vulkaninfo --summary 2>&1
+    )" || ! vulkan_summary_is_nvidia_only "$repaired_summary"; then
+    printf '%s\n' "$repaired_summary" >&2
+    ((probe_is_temporary == 0)) || command rm -f "$probe_icd"
+    die "AutoDL headless NVIDIA EGL ICD validation failed; see https://www.autodl.com/docs/vulkan/"
+  fi
+
+  if ((probe_is_temporary)); then
+    command rm -f "$probe_icd"
+    log "AutoDL headless NVIDIA Vulkan repair is available; normal setup will persist the EGL ICD"
+  else
+    export VK_ICD_FILENAMES="$probe_icd"
+    export VK_DRIVER_FILES="$probe_icd"
+    log "Configured AutoDL headless NVIDIA Vulkan ICD: $probe_icd"
+  fi
+}
+
 clone_isaaclab_once() {
   local clone_tmp status
   clone_tmp="$(mktemp -d "${ISAACLAB_DIR}.clone.XXXXXX")"
@@ -158,13 +262,11 @@ preflight() {
   command -v vulkaninfo >/dev/null 2>&1 || \
     die "required command not found: vulkaninfo; install it with: apt-get update && apt-get install -y vulkan-tools"
   local vulkan_summary
-  if ! vulkan_summary="$(timeout 30 vulkaninfo --summary 2>&1)"; then
+  if ! vulkan_summary="$(timeout 30 vulkaninfo --summary 2>&1)" || \
+     ! vulkan_summary_has_nvidia "$vulkan_summary"; then
     printf '%s\n' "$vulkan_summary" >&2
-    die "NVIDIA Vulkan validation failed"
-  fi
-  if ! grep -Eiq 'deviceName[[:space:]]*=.*NVIDIA' <<<"$vulkan_summary"; then
-    printf '%s\n' "$vulkan_summary" >&2
-    die "NVIDIA Vulkan device unavailable; recreate the container with NVIDIA_DRIVER_CAPABILITIES including graphics (or all); CPU llvmpipe is not supported"
+    log "Default Vulkan ICD did not expose NVIDIA; trying the AutoDL headless EGL ICD repair"
+    configure_autodl_headless_vulkan "$linker_cache"
   fi
   validate_env_name "$NAVDP_ENV_NAME"
   validate_env_name "$ISAACLAB_ENV_NAME"
@@ -272,6 +374,9 @@ install_benchmark_requirements() {
   CURRENT_STAGE="restore IsaacLab v1.2.0 PyTorch stack"
   pip_install "$ISAACLAB_ENV_NAME" torch==2.4.0 triton==3.0.0
 
+  CURRENT_STAGE="install Isaac evaluation RSL-RL adapter"
+  pip_install "$ISAACLAB_ENV_NAME" rsl-rl-lib==2.3.1
+
   CURRENT_STAGE="restore packaging dependency consistency"
   pip_install "$ISAACLAB_ENV_NAME" \
     'packaging>=24.0' \
@@ -283,12 +388,52 @@ install_benchmark_requirements() {
   conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" python -m pip check
 }
 
+install_native_build_dependencies() {
+  local -a missing_packages=()
+  command -v cmake >/dev/null 2>&1 || missing_packages+=(cmake)
+  command -v g++ >/dev/null 2>&1 || missing_packages+=(build-essential)
+  [[ -r "$NAVDP_EIGEN_INCLUDE_DIR/Eigen/Core" ]] || \
+    missing_packages+=(libeigen3-dev)
+
+  if ((${#missing_packages[@]})); then
+    CURRENT_STAGE="install native MINCO build dependencies"
+    require_command apt-get
+    log "Installing missing native build dependencies: ${missing_packages[*]}"
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
+  fi
+
+  require_command cmake
+  require_command g++
+  [[ -r "$NAVDP_EIGEN_INCLUDE_DIR/Eigen/Core" ]] || \
+    die "Eigen3 headers are unavailable after installing libeigen3-dev"
+}
+
+build_native_minco_sfc() {
+  install_native_build_dependencies
+  CURRENT_STAGE="build native MINCO and SuperPlanner 2-D SFC extension"
+  log "Building the native MINCO/SFC extension for the NavDP environment"
+  conda run --no-capture-output -n "$NAVDP_ENV_NAME" \
+    python -m pip install pybind11
+  local pybind_cmake
+  pybind_cmake="$(conda run --no-capture-output -n "$NAVDP_ENV_NAME" \
+    python -m pybind11 --cmakedir)"
+  cmake -S "$REPO_ROOT/minco_processor" -B "$REPO_ROOT/minco_processor/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -Dpybind11_DIR="$pybind_cmake"
+  cmake --build "$REPO_ROOT/minco_processor/build" -j2
+  "$REPO_ROOT/minco_processor/build/minco_processor_compile_test"
+  conda run --no-capture-output -n "$NAVDP_ENV_NAME" env \
+    PYTHONPATH="$REPO_ROOT/minco_processor/build:$REPO_ROOT" \
+    python -c 'from minco_processor import MincoProcessor; print("native MINCO/SuperPlanner 2-D SFC import OK", MincoProcessor.__name__)'
+}
+
 verify_installation() {
   CURRENT_STAGE="verify NavDP environment"
   conda run --no-capture-output -n "$NAVDP_ENV_NAME" python -c 'import diffusers, flask, torch; print("NavDP imports OK; torch", torch.__version__)'
 
   CURRENT_STAGE="verify IsaacLab Python packages"
-  conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" python -c 'import isaacsim; print("Isaac Sim import OK")'
+  conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" python -c 'import isaacsim, rsl_rl; print("Isaac Sim and RSL-RL imports OK")'
 
   CURRENT_STAGE="verify Isaac Sim headless startup"
   timeout "${ISAACSIM_VERIFY_TIMEOUT}s" conda run --no-capture-output -n "$ISAACLAB_ENV_NAME" \
@@ -308,14 +453,35 @@ while (($#)); do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --skip-verify) SKIP_VERIFY=1 ;;
+    --accept-isaac-eula) ACCEPT_ISAAC_EULA=1 ;;
+    --run-real-experiments) RUN_REAL_EXPERIMENTS=1 ;;
+    --output)
+      (($# >= 2)) || die "--output requires a path"
+      [[ "$2" != --* ]] || die "--output requires a path"
+      EXPERIMENT_OUTPUT="$2"
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
 
+if ((ACCEPT_ISAAC_EULA)); then
+  export OMNI_KIT_ACCEPT_EULA=YES
+elif [[ "${OMNI_KIT_ACCEPT_EULA:-}" == YES ]]; then
+  ACCEPT_ISAAC_EULA=1
+fi
+if ((CHECK_ONLY == 0 && SKIP_VERIFY == 0 && ACCEPT_ISAAC_EULA == 0)); then
+  die "Isaac Sim verification requires explicit EULA acceptance; review the NVIDIA Omniverse EULA, then pass --accept-isaac-eula or export OMNI_KIT_ACCEPT_EULA=YES"
+fi
+if ((RUN_REAL_EXPERIMENTS && ACCEPT_ISAAC_EULA == 0)); then
+  die "real Isaac experiments require --accept-isaac-eula or OMNI_KIT_ACCEPT_EULA=YES"
+fi
+
 preflight
 if ((CHECK_ONLY)); then
+  ((RUN_REAL_EXPERIMENTS == 0)) || die "--check-only cannot be combined with --run-real-experiments"
   exit 0
 fi
 
@@ -344,6 +510,7 @@ pip_install "$ISAACLAB_ENV_NAME" \
 install_isaaclab_checkout
 
 install_benchmark_requirements
+build_native_minco_sfc
 
 if ((SKIP_VERIFY)); then
   log "Runtime verification skipped"
@@ -361,3 +528,18 @@ printf '\nRun the IsaacLab smoke test again:\n'
 printf '  conda run -n %q bash %q -p %q --headless\n' \
   "$ISAACLAB_ENV_NAME" "$ISAACLAB_DIR/isaaclab.sh" \
   "$ISAACLAB_DIR/source/standalone/tutorials/00_sim/create_empty.py"
+printf '\nEnable the verified AutoDL runtime before real NavDP simulation:\n'
+printf '  bash %q\n' "$REPO_ROOT/scripts/autodl_self_check_repair.sh"
+printf '  bash %q --output results/navdp_superplanner_final --resume --retry-failed --allow-real-simulation\n' \
+  "$REPO_ROOT/scripts/run_simulation_experiments.sh"
+printf '\nRun the complete static + real three-method workflow:\n'
+printf '  bash %q --output results/navdp_superplanner_final --resume --retry-failed --allow-real-simulation\n' \
+  "$REPO_ROOT/scripts/run_all_experiments.sh"
+
+if ((RUN_REAL_EXPERIMENTS)); then
+  CURRENT_STAGE="verify strict AutoDL runtime"
+  bash "$REPO_ROOT/scripts/autodl_self_check_repair.sh"
+  CURRENT_STAGE="run complete static and real NavDP/MINCO/SFC experiments"
+  bash "$REPO_ROOT/scripts/run_all_experiments.sh" \
+    --output "$EXPERIMENT_OUTPUT" --resume --retry-failed --allow-real-simulation
+fi

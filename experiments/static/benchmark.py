@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Any, Iterable, Mapping
 
@@ -379,17 +380,41 @@ def run_static_benchmark(
     case_uids: Iterable[str] | None = None,
     trace_limit: int | None = None,
     repeat_count: int = 2,
+    resume: bool = False,
 ) -> StaticBenchmarkReceipt:
     config_path = Path(config_path).resolve()
     output_dir = Path(output_dir).resolve()
+    checkpoint_path = output_dir / "benchmark_checkpoint.json"
     if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f"immutable static baseline already exists: {output_dir}")
+        if not resume or not checkpoint_path.is_file():
+            # One-time migration path for an interrupted run created before
+            # checkpoints existed. It is safe only when the frozen config is
+            # byte-identical and no final immutable manifest was written.
+            snapshot = output_dir / "inputs" / "static_benchmark_config.json"
+            incomplete_legacy = (
+                resume
+                and snapshot.is_file()
+                and _sha256(snapshot) == _sha256(config_path)
+                and not (output_dir / "legacy_baseline_manifest.json").exists()
+            )
+            if not incomplete_legacy:
+                raise FileExistsError(
+                    f"immutable static baseline already exists without a resumable checkpoint: {output_dir}"
+                )
+        else:
+            try:
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise ValueError(f"unreadable static benchmark checkpoint: {error}") from error
+            if checkpoint.get("config_sha256") != _sha256(config_path):
+                raise ValueError("static benchmark checkpoint config hash mismatch")
     output_dir.mkdir(parents=True, exist_ok=True)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     input_dir = output_dir / "inputs"
     input_dir.mkdir(parents=True, exist_ok=True)
     config_snapshot = input_dir / "static_benchmark_config.json"
-    config_snapshot.write_bytes(config_path.read_bytes())
+    if not config_snapshot.is_file():
+        config_snapshot.write_bytes(config_path.read_bytes())
     profile = load_legacy_profile(config_path)
     cases = generate_catalogue(config_path)
     if case_uids is not None:
@@ -414,6 +439,19 @@ def run_static_benchmark(
             )
     case_input_dir = output_dir / "cases"
     artifacts_root = output_dir / "artifacts"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "RUNNING",
+                "config_sha256": _sha256(config_path),
+                "case_uids": [case.case_uid for case in cases],
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
     rows: list[dict[str, Any]] = []
     index_rows: list[dict[str, Any]] = []
     manifest_cases: list[dict[str, Any]] = []
@@ -436,14 +474,37 @@ def run_static_benchmark(
         )
         all_deterministic &= deterministic
         artifact_dir = artifacts_root / case.case_uid
-        artifacts = render_static_case(
-            case,
-            results[0],
-            metrics,
-            detail,
-            artifact_dir,
-            footprint_radius_m=float(config.get("visualization_footprint_radius_m", 0.2)),
-        )
+        metrics_path = artifact_dir / f"{case.case_uid}_metrics.json"
+        if metrics_path.is_file():
+            # Render output is immutable once its self-contained metric
+            # payload matches this case/configuration.  Resuming never
+            # silently substitutes a different case or result.
+            try:
+                rendered = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise ValueError(f"unreadable rendered case payload {metrics_path}: {error}") from error
+            if rendered.get("case_hash") != case.case_hash or rendered.get("status") != results[0].status:
+                raise ValueError(f"rendered case checkpoint mismatch: {case.case_uid}")
+            artifacts = tuple(sorted(path for path in artifact_dir.rglob("*") if path.is_file()))
+        else:
+            # A process may have been interrupted after writing an immutable
+            # GIF evidence package but before its per-case metrics checkpoint.
+            # There is no complete case receipt to reuse, so rebuild only this
+            # incomplete directory.  Completed siblings remain untouched.
+            if artifact_dir.exists() and any(artifact_dir.iterdir()):
+                if not resume:
+                    raise FileExistsError(
+                        f"incomplete static case artifact requires --resume: {case.case_uid}"
+                    )
+                shutil.rmtree(artifact_dir)
+            artifacts = render_static_case(
+                case,
+                results[0],
+                metrics,
+                detail,
+                artifact_dir,
+                footprint_radius_m=float(config.get("visualization_footprint_radius_m", 0.2)),
+            )
         row = _json_safe(
             {
                 **metrics,
@@ -545,6 +606,19 @@ def run_static_benchmark(
     )
     (output_dir / "legacy_report.md").write_text(report, encoding="utf-8")
     (output_dir / "static_report.md").write_text(report, encoding="utf-8")
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "COMPLETE",
+                "config_sha256": _sha256(config_path),
+                "case_uids": [case.case_uid for case in cases],
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
     artifact_receipt_path = output_dir / "artifact_receipt.json"
     artifact_receipt_path.write_text(
         json.dumps(

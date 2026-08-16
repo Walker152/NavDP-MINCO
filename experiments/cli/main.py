@@ -8,7 +8,10 @@ from experiments.analyzers.paired import compare_runs
 from experiments.analyzers.readonly import analyze_suite_readonly
 from experiments.analyzers.validator import validate_run
 from experiments.closure import run_codex_closure
-from experiments.dynamic_pilot import prepare_dynamic_pilot
+from experiments.dynamic_pilot import (
+    build_dynamic_comparison_videos,
+    prepare_dynamic_pilot,
+)
 from experiments.orchestrators.suite_runner import run_suite
 from experiments.orchestrators.research_workflow import (
     WorkflowOptions,
@@ -60,6 +63,9 @@ def build_parser():
     dynamic.add_argument("--legacy-profile", required=True)
     dynamic.add_argument("--safe-profile", required=True)
     dynamic.add_argument("--output", required=True)
+    dynamic_video = commands.add_parser("dynamic-build-comparison-videos")
+    dynamic_video.add_argument("--dynamic-output", required=True)
+    dynamic_video.add_argument("--output")
     closure = commands.add_parser("codex-closure")
     closure.add_argument("--output", required=True)
     closure.add_argument("--static-only", action="store_true")
@@ -171,6 +177,11 @@ def main(argv=None):
             args.safe_profile,
             args.output,
         )
+    elif args.command == "dynamic-build-comparison-videos":
+        result = build_dynamic_comparison_videos(
+            args.dynamic_output, output_dir=args.output
+        )
+        print(json.dumps(result, indent=2))
         print(
             json.dumps(
                 {

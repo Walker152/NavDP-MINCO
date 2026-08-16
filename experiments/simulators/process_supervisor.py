@@ -26,7 +26,14 @@ class ProcessSupervisor:
         stdout = (log_dir / f"{name}.stdout.log").open("ab")
         stderr = (log_dir / f"{name}.stderr.log").open("ab")
         self._handles.extend((stdout, stderr))
-        process = self._popen(command, cwd=cwd, stdout=stdout, stderr=stderr, start_new_session=True)
+        process = self._popen(
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
         self._processes.append(process)
         return process
 

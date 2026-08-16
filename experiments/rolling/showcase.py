@@ -4,6 +4,7 @@ import hashlib
 import csv
 import json
 import math
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -32,12 +33,73 @@ SHOWCASE_DIRECTORIES = (
 REQUIRED_METHODS = (
     "guide_reference",
     "legacy",
-    "safe_corridor_v1",
+    "superplanner_sfc_v1",
 )
 PAIRING_KEY = ("scenario_uid", "seed", "initial_state_hash")
 INELIGIBLE_CORRIDOR_EFFECT_FAMILIES = frozenset(
     {"free_space", "sampling_boundary"}
 )
+
+
+def _scene_package_is_valid(path: Path) -> bool:
+    """Return true only for a self-validated immutable scene package."""
+    if not (path / "scene_manifest.json").is_file():
+        return False
+    from experiments.visualizers.rolling_showcase import validate_scene_package
+
+    return validate_scene_package(path) == []
+
+
+def _resumable_root(root: Path) -> bool:
+    """Recognise only a workflow-created, unfinished showcase directory."""
+    if (root / "showcase_checkpoint.json").is_file():
+        return True
+    expected = {root / name for name in SHOWCASE_DIRECTORIES}
+    return (
+        expected.issubset(set(root.iterdir()))
+        and not (root / "showcase_manifest.json").exists()
+        and any(root.rglob("scene_manifest.json"))
+    )
+
+
+def _checkpoint(root: Path, config_path: Path, *, status: str) -> None:
+    (root / "showcase_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": status,
+                "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _result_from_evidence_or_run(
+    *, scenario: object, method: str, profile: Mapping[str, object],
+    rollout_config: RolloutConfig, root: Path, rollout_runner: Callable[..., object],
+    rollout_serializer: Callable[[object, Path], object],
+) -> object:
+    """Reuse hash-validated evidence; recompute only an absent or bad method."""
+    from experiments.rolling.serialization import (
+        load_rollout_result,
+        validate_rollout_result,
+    )
+
+    evidence = root / "rollout_evidence" / str(getattr(scenario, "scenario_uid")) / method
+    manifest = evidence / "run_manifest.json"
+    if manifest.is_file() and validate_rollout_result(evidence) == []:
+        return load_rollout_result(manifest)
+    if evidence.exists():
+        shutil.rmtree(evidence)
+    result = rollout_runner(
+        scenario, method=method, profile=profile, config=rollout_config,
+    )
+    rollout_serializer(result, evidence)
+    return result
 
 
 def _finite_number(row: Mapping[str, object], key: str) -> float:
@@ -138,7 +200,7 @@ def validate_showcase_manifest(manifest: Mapping[str, object]) -> list[str]:
             continue
         comparison = [
             receipts.get(method)
-            for method in ("legacy", "safe_corridor_v1")
+            for method in ("legacy", "superplanner_sfc_v1")
         ]
         if any(not isinstance(row, Mapping) for row in comparison):
             errors.append(f"{uid or index}: paired method receipts are incomplete")
@@ -232,30 +294,26 @@ def run_rolling_showcase(
         from experiments.rolling.serialization import write_rollout_result
 
         rollout_serializer = write_rollout_result
+    config_path = Path(config_path).resolve()
     root = Path(output_dir)
-    if root.exists() and any(root.iterdir()):
+    if root.exists() and any(root.iterdir()) and not _resumable_root(root):
         raise FileExistsError(f"immutable rolling showcase exists: {root}")
     root.mkdir(parents=True, exist_ok=True)
     for name in SHOWCASE_DIRECTORIES:
         (root / name).mkdir(parents=True, exist_ok=True)
+    _checkpoint(root, config_path, status="RUNNING")
     rollout_config = RolloutConfig(**config["rollout"])
     profiles = _load_profiles(Path(config_path).resolve().parents[2])
     scene_rows: list[dict[str, object]] = []
     for scenario in scenarios.values():
         results: dict[str, object] = {}
-        for method in ("legacy", "safe_corridor_v1"):
-            results[method] = rollout_runner(
-                scenario,
-                method=method,
-                profile=profiles[method],
-                config=rollout_config,
+        for method in ("legacy", "superplanner_sfc_v1"):
+            results[method] = _result_from_evidence_or_run(
+                scenario=scenario, method=method, profile=profiles[method],
+                rollout_config=rollout_config, root=root,
+                rollout_runner=rollout_runner, rollout_serializer=rollout_serializer,
             )
         package_path = _scene_package_path(scenario.family, scenario.scenario_uid)
-        for method, result in results.items():
-            rollout_serializer(
-                result,
-                root / "rollout_evidence" / scenario.scenario_uid / method,
-            )
         paired = {
             "scenario_uid": scenario.scenario_uid,
             "guide_path_xyz": scenario.guide_path_xyz,
@@ -265,7 +323,13 @@ def run_rolling_showcase(
             "static_rectangles": scenario.static_rectangles,
             **results,
         }
-        package = scene_renderer(paired, root / package_path)
+        package_root = root / package_path
+        if _scene_package_is_valid(package_root):
+            package = None
+        else:
+            if package_root.exists():
+                shutil.rmtree(package_root)
+            package = scene_renderer(paired, package_root)
         state_receipt = {
             "seed": scenario.seed,
             "initial_state_hash": initial_state_hash(
@@ -287,7 +351,7 @@ def run_rolling_showcase(
                 "method_pair_receipts": {
                     "guide_reference": state_receipt,
                     "legacy": state_receipt,
-                    "safe_corridor_v1": state_receipt,
+                    "superplanner_sfc_v1": state_receipt,
                 },
                 "package_path": package_path.as_posix(),
                 "headline_figure": "three_panel.png",
@@ -301,7 +365,7 @@ def run_rolling_showcase(
                     scenario.scenario_uid,
                     scenario.family,
                     results["legacy"],
-                    results["safe_corridor_v1"],
+                    results["superplanner_sfc_v1"],
                 ),
             }
         )
@@ -313,22 +377,16 @@ def run_rolling_showcase(
             initial_state=sweep.variant,
         )
         results = {
-            method: rollout_runner(
-                scenario,
-                method=method,
-                profile=profiles[method],
-                config=rollout_config,
+            method: _result_from_evidence_or_run(
+                scenario=scenario, method=method, profile=profiles[method],
+                rollout_config=rollout_config, root=root,
+                rollout_runner=rollout_runner, rollout_serializer=rollout_serializer,
             )
-            for method in ("legacy", "safe_corridor_v1")
+            for method in ("legacy", "superplanner_sfc_v1")
         }
         package_path = (
             Path("03_initial_state") / sweep.factor / scenario.scenario_uid
         )
-        for method, result in results.items():
-            rollout_serializer(
-                result,
-                root / "rollout_evidence" / scenario.scenario_uid / method,
-            )
         paired = {
             "scenario_uid": scenario.scenario_uid,
             "guide_path_xyz": scenario.guide_path_xyz,
@@ -338,7 +396,11 @@ def run_rolling_showcase(
             "static_rectangles": scenario.static_rectangles,
             **results,
         }
-        scene_renderer(paired, root / package_path)
+        package_root = root / package_path
+        if not _scene_package_is_valid(package_root):
+            if package_root.exists():
+                shutil.rmtree(package_root)
+            scene_renderer(paired, package_root)
         state_receipt = {
             "seed": scenario.seed,
             "initial_state_hash": initial_state_hash(
@@ -388,6 +450,7 @@ def run_rolling_showcase(
         encoding="utf-8",
     )
     write_showcase_index(manifest, root)
+    _checkpoint(root, config_path, status="COMPLETE")
     if write_receipts:
         receipts = inventory_receipts(
             root,
@@ -411,8 +474,8 @@ def _load_profiles(repo_root: Path) -> dict[str, Mapping[str, object]]:
     config = repo_root / "experiments" / "configs"
     return {
         "legacy": load_legacy_profile(config / "static_legacy_suite.json"),
-        "safe_corridor_v1": load_legacy_profile(
-            config / "static_safe_corridor_suite.json"
+        "superplanner_sfc_v1": load_legacy_profile(
+            config / "static_superplanner_sfc_suite.json"
         ),
     }
 
@@ -446,8 +509,8 @@ def _write_aggregate_outputs(
                 "scene_family": scene.get("scene_family", ""),
                 "experiment_group": scene.get("experiment_group", "scenario"),
                 "legacy_status": statuses.get("legacy", "UNKNOWN"),
-                "safe_corridor_v1_status": statuses.get(
-                    "safe_corridor_v1", "UNKNOWN"
+                "superplanner_sfc_v1_status": statuses.get(
+                    "superplanner_sfc_v1", statuses.get("safe_corridor_v1", "UNKNOWN")
                 ),
             }
         )
@@ -457,7 +520,7 @@ def _write_aggregate_outputs(
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
-    methods = ("legacy", "safe_corridor_v1")
+    methods = ("legacy", "superplanner_sfc_v1")
     reached = [
         sum(row[f"{method}_status"] == "GOAL_REACHED" for row in rows)
         for method in methods

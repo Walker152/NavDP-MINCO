@@ -13,6 +13,7 @@ RGB_WHITE = (255, 255, 255)
 RGB_GRAY = (128, 128, 128)
 RGB_CANDIDATE_OTHER = (96, 128, 160)
 RGB_BLACK = (0, 0, 0)
+RGB_SFC = (220, 70, 220)
 
 
 class VisualizationManager:
@@ -240,6 +241,47 @@ class VisualizationManager:
             cv2.circle(vis_image, tuple(p), radius, color, -1, cv2.LINE_AA)
         return vis_image
 
+    def draw_sfc_cells_world(self, vis_image, cells, robot_pose):
+        """Draw only recorded native SuperPlanner 2-D SFC polygons.
+
+        The visualizer deliberately does not reconstruct a corridor from a
+        guide.  Missing or malformed native cell vertices therefore result in
+        no corridor drawing instead of an invented safety claim.
+        """
+        if not isinstance(cells, (list, tuple)):
+            return vis_image
+        grid_size = vis_image.shape[0]
+        center_offset = grid_size // 2
+        overlay = vis_image.copy()
+        rendered = False
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            vertices = cell.get("vertices_xy_m", cell.get("vertices", ()))
+            try:
+                vertices = np.asarray(vertices, dtype=np.float64)
+            except (TypeError, ValueError):
+                continue
+            if (
+                vertices.ndim != 2
+                or vertices.shape[0] < 3
+                or vertices.shape[1] < 2
+                or not np.all(np.isfinite(vertices[:, :2]))
+            ):
+                continue
+            points = self.world_to_vis_points(
+                vertices[:, :2], robot_pose, grid_size, center_offset
+            )
+            # A clipped polygon is not geometrically meaningful in this view.
+            if points.shape[0] != vertices.shape[0]:
+                continue
+            cv2.fillPoly(overlay, [points], RGB_SFC, lineType=cv2.LINE_AA)
+            cv2.polylines(vis_image, [points], True, RGB_SFC, 2, cv2.LINE_AA)
+            rendered = True
+        if rendered:
+            cv2.addWeighted(overlay, 0.20, vis_image, 0.80, 0.0, vis_image)
+        return vis_image
+
     def render_esdf_overlay(self, vis_image, robot_pose, esdf, safe_dist=0.30):
         distance = np.asarray(esdf["distance"], dtype=np.float64)
         origin = np.asarray(esdf["origin"], dtype=np.float64)
@@ -411,6 +453,13 @@ class VisualizationManager:
                 vis_image = self.render_esdf_overlay(vis_image, robot_pose, esdf, safe_dist=overlay_safe_dist)
             except Exception:
                 pass
+
+        if isinstance(minco_info, dict):
+            # The cells originate from the native optimizer result.  They are
+            # never inferred from the displayed trajectory.
+            self.draw_sfc_cells_world(
+                vis_image, minco_info.get("sfc_cells", ()), robot_pose
+            )
         
         # Draw historical occupancy grids
         all_hist_world_points_list = []
@@ -564,6 +613,8 @@ class VisualizationManager:
         cv2.putText(vis_image, "yellow: sparse guide", (8, legend_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_YELLOW, 1, cv2.LINE_AA)
         cv2.putText(vis_image, "red obstacle | gray history", (8, legend_y + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_RED, 1, cv2.LINE_AA)
         cv2.putText(vis_image, "red/orange dot: min ESDF", (8, legend_y + 64), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_ORANGE, 1, cv2.LINE_AA)
+        if isinstance(minco_info, dict) and minco_info.get("sfc_cells"):
+            cv2.putText(vis_image, "magenta: native SuperPlanner 2-D SFC", (8, legend_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RGB_SFC, 1, cv2.LINE_AA)
 
         combined_image = self._compose_panels(rgb_image, vis_image)
 

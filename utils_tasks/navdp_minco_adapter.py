@@ -49,6 +49,9 @@ class NavDPMincoAdapter:
         corridor_max_radius=0.45,
         corridor_min_radius=0.04,
         corridor_sample_step=0.025,
+        sfc_bound_distance=0.8,
+        sfc_seed_line_max_length=2.0,
+        sfc_min_overlap_depth=0.02,
         adaptive_max_spatial_step=0.025,
         adaptive_near_clearance=0.05,
         adaptive_max_depth=14,
@@ -116,10 +119,10 @@ class NavDPMincoAdapter:
                     time_weight=self.time_weight,
                     time_barrier_weight=float(self.penalty_weights[4]),
                 )
-            if self.constraint_profile == "safe_corridor_v1":
+            if self.constraint_profile == "superplanner_sfc_v1":
                 if not hasattr(self.processor, "configure_safety_profile"):
                     raise RuntimeError(
-                        "native MINCO extension lacks safe_corridor_v1 support"
+                        "native MINCO extension lacks SuperPlanner 2-D SFC support"
                     )
                 self.processor.configure_safety_profile(
                     constraint_profile=self.constraint_profile,
@@ -135,6 +138,9 @@ class NavDPMincoAdapter:
                     wheel_radius=float(wheel_radius),
                     wheel_base=float(wheel_base),
                     max_wheel_speed=float(max_wheel_speed),
+                    sfc_bound_distance=float(sfc_bound_distance),
+                    sfc_seed_line_max_length=float(sfc_seed_line_max_length),
+                    sfc_min_overlap_depth=float(sfc_min_overlap_depth),
                 )
             self.processor.set_static_esdf_2d(
                 distance=self._esdf_grid.distance,
@@ -272,6 +278,11 @@ class NavDPMincoAdapter:
                     "corridor_min_radius": float(result.get("corridor_min_radius", np.nan)),
                     "corridor_min_clearance": float(result.get("corridor_min_clearance", np.nan)),
                     "corridor_min_overlap": float(result.get("corridor_min_overlap", np.nan)),
+                    "sfc_generation_reason": str(result.get("sfc_generation_reason", "")),
+                    "sfc_min_overlap": float(result.get("sfc_min_overlap", np.nan)),
+                    "sfc_min_margin": float(result.get("sfc_min_margin", np.nan)),
+                    "sfc_cells": result.get("sfc_cells", []),
+                    "sfc_piece_bindings": result.get("sfc_piece_bindings", []),
                     "validation_offending_sample_index": int(
                         result.get("validation_offending_sample_index", -1)
                     ),
@@ -428,6 +439,11 @@ class NavDPMincoAdapter:
                     "corridor_min_radius": float(best.get("corridor_min_radius", np.nan)),
                     "corridor_min_clearance": float(best.get("corridor_min_clearance", np.nan)),
                     "corridor_min_overlap": float(best.get("corridor_min_overlap", np.nan)),
+                    "sfc_generation_reason": str(best.get("sfc_generation_reason", "")),
+                    "sfc_min_overlap": float(best.get("sfc_min_overlap", np.nan)),
+                    "sfc_min_margin": float(best.get("sfc_min_margin", np.nan)),
+                    "sfc_cells": best.get("sfc_cells", []),
+                    "sfc_piece_bindings": best.get("sfc_piece_bindings", []),
                     "validation_offending_sample_index": int(
                         best.get("validation_offending_sample_index", -1)
                     ),

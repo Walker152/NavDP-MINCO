@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 from pathlib import Path
+import shutil
 
 from experiments.analyzers.run_analysis import analyze_run
 from experiments.analyzers.artifact_manifest import generate_artifact_manifest
@@ -137,6 +138,18 @@ def run_suite(
         progress.start_run(run_index, len(expanded_runs), run.variant, run.scene_id, expected_episode_count)
         if behavior.resume and status_path.exists() and json.loads(status_path.read_text()).get("status") == "COMPLETE" and validate_run(run_dir, write_report=False)["valid"]:
             progress.skip_completed_run(); skipped += 1; continue
+        if (
+            behavior.resume
+            and behavior.retry_failed
+            and status_path.exists()
+            and json.loads(status_path.read_text()).get("status") == "FAILED"
+        ):
+            # A failed Isaac attempt may leave partial CSVs, videos, traces and
+            # append-only logs.  A retry must never mix those artifacts with a
+            # fresh process run using the same deterministic run directory.
+            shutil.rmtree(run_dir)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            status_path = run_dir / "run_status.json"
         lifecycle = RunLifecycle(run_dir)
         if not behavior.resume and lifecycle.status != "CREATED":
             lifecycle.status = "CREATED"

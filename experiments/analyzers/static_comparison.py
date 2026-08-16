@@ -14,7 +14,11 @@ from matplotlib.colors import TwoSlopeNorm
 import numpy as np
 from matplotlib.patches import Rectangle
 
-from experiments.core.artifact_receipt import file_receipt, inventory_receipts
+from experiments.core.artifact_receipt import (
+    file_receipt,
+    inventory_receipts,
+    validate_file_receipt,
+)
 from experiments.visualizers.paper_style import (
     PAPER_COLORS,
     apply_paper_style,
@@ -23,7 +27,40 @@ from experiments.visualizers.paper_style import (
 )
 
 
-PROFILES = ("legacy", "safe_corridor_v1")
+PROFILES = ("legacy", "superplanner_sfc_v1")
+
+
+def validate_static_paper_outputs(output_dir: Path | str) -> list[str]:
+    root = Path(output_dir).resolve()
+    manifest_path = root / "static_paper_manifest.json"
+    inventory_path = root / "artifact_receipt.json"
+    errors: list[str] = []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"unreadable static paper manifest: {error}"]
+    receipts = manifest.get("figure_receipts", [])
+    if not isinstance(receipts, list) or not receipts:
+        errors.append("static paper manifest has no figure receipts")
+    for receipt in receipts:
+        if not isinstance(receipt, Mapping):
+            errors.append("malformed static paper figure receipt")
+            continue
+        for row in receipt.get("outputs", []):
+            if isinstance(row, Mapping):
+                errors.extend(validate_file_receipt(root, row))
+            else:
+                errors.append("malformed static paper output receipt")
+    try:
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        for row in inventory.get("artifacts", []):
+            if isinstance(row, Mapping):
+                errors.extend(validate_file_receipt(root, row))
+            else:
+                errors.append("malformed static paper inventory receipt")
+    except (OSError, json.JSONDecodeError) as error:
+        errors.append(f"unreadable static paper inventory: {error}")
+    return errors
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -72,7 +109,7 @@ def _single_factor(
     values = [
         row
         for row in rows
-        if row.get("profile") == "safe_corridor_v1"
+        if row.get("profile") in PROFILES
         and row.get("factor_name") not in {"", "geometry_category"}
         and not row.get("factor_name_secondary")
         and math.isfinite(_number(row, "factor_level"))
@@ -98,34 +135,35 @@ def _single_factor(
         "yaw_error_rad": "Initial yaw error (rad)",
     }
     for axis, factor in zip(axes.flat, factors):
-        subset = sorted(
-            (row for row in values if row["factor_name"] == factor),
-            key=lambda row: _number(row, "factor_level"),
-        )
-        finite = [
-            row
-            for row in subset
-            if math.isfinite(_number(row, "min_normalized_margin"))
-        ]
-        axis.plot(
-            [_number(row, "factor_level") for row in finite],
-            [_number(row, "min_normalized_margin") for row in finite],
-            marker="o",
-            linewidth=1.5,
-            color=PAPER_COLORS["safe_corridor_v1"],
-            label=f"finite margin (n={len(finite)})",
-        )
-        failed = [row for row in subset if row not in finite]
-        if failed:
-            axis.scatter(
-                [_number(row, "factor_level") for row in failed],
-                [0.06] * len(failed),
-                transform=axis.get_xaxis_transform(),
-                marker="x",
-                color=PAPER_COLORS["failure"],
-                label=f"failed/no margin (n={len(failed)})",
-                zorder=4,
+        subset = [row for row in values if row["factor_name"] == factor]
+        for profile in PROFILES:
+            profile_rows = sorted(
+                (row for row in subset if row["profile"] == profile),
+                key=lambda row: _number(row, "factor_level"),
             )
+            finite = [
+                row for row in profile_rows
+                if math.isfinite(_number(row, "min_normalized_margin"))
+            ]
+            axis.plot(
+                [_number(row, "factor_level") for row in finite],
+                [_number(row, "min_normalized_margin") for row in finite],
+                marker="o" if profile == "legacy" else "s",
+                linestyle="--" if profile == "legacy" else "-",
+                linewidth=1.5,
+                color=PAPER_COLORS[profile],
+                label=f"{profile} (n={len(profile_rows)})",
+            )
+            failed = [row for row in profile_rows if row not in finite]
+            if failed:
+                axis.scatter(
+                    [_number(row, "factor_level") for row in failed],
+                    [0.04 if profile == "legacy" else 0.08] * len(failed),
+                    transform=axis.get_xaxis_transform(),
+                    marker="x",
+                    color=PAPER_COLORS[profile],
+                    zorder=4,
+                )
         axis.axhline(0.0, color="black", linewidth=0.8, linestyle="--")
         axis.set_xlabel(labels.get(factor, factor))
         axis.set_ylabel("Normalized margin (1)")
@@ -146,12 +184,12 @@ def _single_factor(
         values,
         scientific_caption(
             "Controlled single-factor initial-state scan",
-            source="static_runs.csv; safe_corridor_v1 recomputations",
+            source="static_runs.csv; paired native legacy and SuperPlanner 2-D SFC recomputations",
             units="factor-specific SI units; normalized margin is dimensionless",
             sample_count=len(values),
             missing_failed=_missing_summary(values, "min_normalized_margin") if values else "No isolated rows; n=0 is explicitly reported.",
             interpretation="Each line varies one declared initial-state factor while retaining the configured source geometry.",
-            profile="safe_corridor_v1",
+            profile="legacy and superplanner_sfc_v1",
         ),
     )
 
@@ -162,67 +200,79 @@ def _factor_heatmap(
     values = [
         row
         for row in rows
-        if row.get("profile") == "safe_corridor_v1"
+        if row.get("profile") in PROFILES
         and row.get("factor_name_secondary")
         and math.isfinite(_number(row, "factor_level"))
         and math.isfinite(_number(row, "factor_level_secondary"))
     ]
-    x_values = sorted({_number(row, "factor_level") for row in values})
-    y_values = sorted({_number(row, "factor_level_secondary") for row in values})
-    matrix = np.full((len(y_values), len(x_values)), np.nan)
-    classifications: dict[tuple[int, int], str] = {}
-    for row in values:
-        y_index = y_values.index(_number(row, "factor_level_secondary"))
-        x_index = x_values.index(_number(row, "factor_level"))
-        matrix[y_index, x_index] = _number(row, "min_normalized_margin")
-        classifications[(y_index, x_index)] = str(row.get("classification", ""))
-    fig, ax = plt.subplots(figsize=(6.4, 4.8), constrained_layout=True)
-    if matrix.size:
-        finite_values = matrix[np.isfinite(matrix)]
-        span = max(
-            0.001,
-            float(np.max(np.abs(finite_values))) if len(finite_values) else 0.0,
-        )
-        colour_map = plt.get_cmap("RdYlGn").copy()
-        colour_map.set_bad("#D1D5DB")
-        image = ax.imshow(
-            matrix,
-            origin="lower",
-            aspect="auto",
-            cmap=colour_map,
-            norm=TwoSlopeNorm(vmin=-span, vcenter=0.0, vmax=span),
-        )
-        fig.colorbar(image, ax=ax, label="minimum normalized margin (1)")
-        ax.set_xticks(range(len(x_values)), [f"{value:g}" for value in x_values])
-        ax.set_yticks(range(len(y_values)), [f"{value:g}" for value in y_values])
-        for y_index in range(len(y_values)):
-            for x_index in range(len(x_values)):
-                value = matrix[y_index, x_index]
-                classification = classifications.get((y_index, x_index), "MISSING")
-                label = (
-                    f"{value:.2e}"
-                    if math.isfinite(value)
-                    else classification.replace("_", "\n")
-                )
-                ax.text(
-                    x_index,
-                    y_index,
-                    label,
-                    ha="center",
-                    va="center",
-                    fontsize=7,
-                )
-    else:
-        ax.text(0.5, 0.5, "No two-factor measurements", ha="center", va="center")
-    first_name = values[0]["factor_name"] if values else "factor x"
-    second_name = values[0]["factor_name_secondary"] if values else "factor y"
+    groups = sorted({
+        row.get("scan_group") or f"{row['factor_name']}__{row['factor_name_secondary']}"
+        for row in values
+    })
+    fig, axes = plt.subplots(
+        max(1, len(groups)), len(PROFILES),
+        figsize=(10.5, max(4.0, 3.6 * max(1, len(groups)))),
+        constrained_layout=True, squeeze=False,
+    )
+    finite_margins = [
+        _number(row, "min_normalized_margin") for row in values
+        if math.isfinite(_number(row, "min_normalized_margin"))
+    ]
+    span = max(0.001, max((abs(value) for value in finite_margins), default=0.0))
+    norm = TwoSlopeNorm(vmin=-span, vcenter=0.0, vmax=span)
+    colour_map = plt.get_cmap("RdYlGn").copy()
+    colour_map.set_bad("#D1D5DB")
     axis_labels = {
         "initial_speed_mps": "Initial longitudinal speed (m/s)",
+        "initial_acceleration_x_mps2": "Initial longitudinal acceleration (m/s²)",
+        "initial_yaw_rate_radps": "Initial yaw rate (rad/s)",
         "yaw_error_rad": "Initial yaw error (rad)",
     }
-    ax.set_xlabel(axis_labels.get(first_name, first_name))
-    ax.set_ylabel(axis_labels.get(second_name, second_name))
-    ax.set_title("Measured two-factor capability boundary")
+    last_image = None
+    if not values:
+        axes[0, 0].text(0.5, 0.5, "No two-factor measurements", ha="center", va="center")
+        axes[0, 1].set_visible(False)
+    for group_index, group in enumerate(groups):
+        group_rows = [
+            row for row in values
+            if (row.get("scan_group") or f"{row['factor_name']}__{row['factor_name_secondary']}") == group
+        ]
+        for profile_index, profile in enumerate(PROFILES):
+            ax = axes[group_index, profile_index]
+            subset = [row for row in group_rows if row["profile"] == profile]
+            first_name = group_rows[0]["factor_name"]
+            second_name = group_rows[0]["factor_name_secondary"]
+            x_values = sorted({_number(row, "factor_level") for row in subset})
+            y_values = sorted({_number(row, "factor_level_secondary") for row in subset})
+            matrix = np.full((len(y_values), len(x_values)), np.nan)
+            classifications: dict[tuple[int, int], str] = {}
+            for row in subset:
+                y_index = y_values.index(_number(row, "factor_level_secondary"))
+                x_index = x_values.index(_number(row, "factor_level"))
+                matrix[y_index, x_index] = _number(row, "min_normalized_margin")
+                classifications[(y_index, x_index)] = str(row.get("classification", ""))
+            if matrix.size:
+                last_image = ax.imshow(
+                    matrix, origin="lower", aspect="auto", cmap=colour_map, norm=norm,
+                )
+                ax.set_xticks(range(len(x_values)), [f"{value:g}" for value in x_values])
+                ax.set_yticks(range(len(y_values)), [f"{value:g}" for value in y_values])
+                for y_index in range(len(y_values)):
+                    for x_index in range(len(x_values)):
+                        value = matrix[y_index, x_index]
+                        classification = classifications.get((y_index, x_index), "MISSING")
+                        label = f"{value:.2f}" if math.isfinite(value) else classification.replace("_", "\n")
+                        ax.text(x_index, y_index, label, ha="center", va="center", fontsize=6)
+            else:
+                ax.text(0.5, 0.5, "No measurements", ha="center", va="center")
+            ax.set_xlabel(axis_labels.get(first_name, first_name))
+            ax.set_ylabel(axis_labels.get(second_name, second_name))
+            ax.set_title(f"{group} · {profile} · n={len(subset)}", fontsize=8)
+    if last_image is not None:
+        fig.colorbar(last_image, ax=axes.ravel().tolist(), label="minimum normalized margin (1)")
+    fig.suptitle("Paired measured two-factor capability boundaries")
+    first_name = values[0]["factor_name"] if values else "factor x"
+    second_name = values[0]["factor_name_secondary"] if values else "factor y"
     return _bundle(
         output,
         inputs,
@@ -230,13 +280,13 @@ def _factor_heatmap(
         fig,
         values,
         scientific_caption(
-            "Measured two-factor capability boundary",
-            source="static_runs.csv; configured factor grid",
+            "Paired measured two-factor capability boundaries",
+            source="static_runs.csv; configured factor grids grouped by scan_group and paired by profile",
             units=f"{first_name} and {second_name} in declared SI units; cell value dimensionless",
             sample_count=len(values),
             missing_failed=_missing_summary(values, "min_normalized_margin") if values else "No two-factor rows; n=0 is explicitly reported.",
-            interpretation="Every cell is an executed factor combination; no interpolation or synthetic filling is used.",
-            profile="safe_corridor_v1",
+            interpretation="Every cell is an executed factor combination; scan groups and profiles use separate panels with one shared colour scale.",
+            profile="legacy and superplanner_sfc_v1",
         ),
     )
 
@@ -261,10 +311,10 @@ def _transitions(
     backing: list[dict[str, object]] = []
     for uid in paired:
         left = lookup[(uid, "legacy")]["classification"]
-        right = lookup[(uid, "safe_corridor_v1")]["classification"]
+        right = lookup[(uid, "superplanner_sfc_v1")]["classification"]
         matrix[classes.index(left), classes.index(right)] += 1
         backing.append(
-            {"case_uid": uid, "legacy": left, "safe_corridor_v1": right}
+            {"case_uid": uid, "legacy": left, "superplanner_sfc_v1": right}
         )
     fig, ax = plt.subplots(figsize=(6.8, 5.4), constrained_layout=True)
     if matrix.size:
@@ -274,7 +324,7 @@ def _transitions(
         ax.set_yticks(range(len(classes)), classes)
         for y, x in np.ndindex(matrix.shape):
             ax.text(x, y, str(matrix[y, x]), ha="center", va="center")
-    ax.set_xlabel("safe_corridor_v1 classification")
+    ax.set_xlabel("SuperPlanner 2-D SFC classification")
     ax.set_ylabel("legacy classification")
     ax.set_title("Paired profile classification transitions")
     return _bundle(
@@ -428,7 +478,7 @@ def _rankings(
             sample_count=len(values),
             missing_failed="Every eligible case is retained in both rankings; no rank is imputed.",
             interpretation="Opposed axes make Best2/Worst2 selection and backup ordering directly auditable.",
-            profile="safe_corridor_v1 eligibility ranking",
+            profile="SuperPlanner 2-D SFC eligibility ranking",
         ),
     )
     return receipt, values
@@ -540,7 +590,7 @@ def _case_cards(
             units="normalized margin is dimensionless; backing table also reports metres and milliseconds",
             sample_count=len(backing),
             missing_failed="Unavailable profile/case pairs are omitted and counted by the difference from 2×selected cases; failed values remain NaN.",
-            interpretation="Paired bars expose how each frozen dynamic pilot case changes between legacy and safe profiles.",
+            interpretation="Paired bars expose how each frozen dynamic pilot case changes between legacy and native SuperPlanner 2-D SFC.",
         ),
     )
 
@@ -573,7 +623,7 @@ def _trajectory_cards(
             continue
         samples = _read_csv(samples_path)
         fig, ax = plt.subplots(figsize=(6.8, 5.0), constrained_layout=True)
-        safe_row = lookup.get((str(uid), "safe_corridor_v1"), {})
+        safe_row = lookup.get((str(uid), "superplanner_sfc_v1"), {})
         try:
             obstacles = json.loads(str(safe_row.get("obstacle_layout", "[]")))
         except json.JSONDecodeError:
@@ -598,9 +648,9 @@ def _trajectory_cards(
         styles = {
             "guide": {"color": "#111827", "linestyle": "--", "linewidth": 1.3},
             "legacy": {"color": PAPER_COLORS["legacy"], "linestyle": ":", "linewidth": 2.0},
-            "safe_corridor_v1": {"color": PAPER_COLORS["safe_corridor_v1"], "linestyle": "-", "linewidth": 2.0},
+            "superplanner_sfc_v1": {"color": PAPER_COLORS["superplanner_sfc_v1"], "linestyle": "-", "linewidth": 2.0},
         }
-        for profile in ("guide", "legacy", "safe_corridor_v1"):
+        for profile in ("guide", "legacy", "superplanner_sfc_v1"):
             subset = sorted(
                 (row for row in samples if row.get("profile") == profile),
                 key=lambda row: int(row.get("sample_index", 0)),
@@ -633,7 +683,7 @@ def _trajectory_cards(
                     units="world-frame metres",
                     sample_count=len(samples),
                     missing_failed="Missing profile trajectories are not interpolated; failed profiles may contain no trajectory samples.",
-                    interpretation="The shared axes directly compare the same guide, legacy output and safe-corridor output for one frozen case.",
+                    interpretation="The shared axes directly compare the same guide, legacy output and native SuperPlanner 2-D SFC output for one frozen case.",
                 ),
             )
         )
@@ -647,7 +697,13 @@ def generate_static_paper_outputs(
     selection_dir = Path(selection_dir).resolve()
     output_dir = Path(output_dir).resolve()
     if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f"immutable paper output already exists: {output_dir}")
+        errors = validate_static_paper_outputs(output_dir)
+        if not errors:
+            return json.loads((output_dir / "static_paper_manifest.json").read_text(encoding="utf-8"))
+        raise FileExistsError(
+            "immutable paper output already exists but is incomplete: "
+            + "; ".join(errors)
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     runs_path = selection_dir / "static_runs.csv"
     selection_path = selection_dir / "selected_dynamic_cases.json"

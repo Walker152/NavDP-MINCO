@@ -21,6 +21,37 @@ def _samples(y_offset: float, yaw_offset: float = 0.0) -> np.ndarray:
     return samples
 
 
+def _recorded_sfc_cells() -> list[dict[str, object]]:
+    return [
+        {
+            "cell_index": 0,
+            "halfspaces": np.array(
+                [[1.0, 0.0, -2.2], [-1.0, 0.0, -0.2],
+                 [0.0, 1.0, -0.4], [0.0, -1.0, -0.4]],
+                dtype=np.float64,
+            ),
+            "vertices": np.array(
+                [[-0.2, -0.4], [2.2, -0.4], [2.2, 0.4], [-0.2, 0.4]],
+                dtype=np.float64,
+            ),
+            "piece_indices": np.array([0], dtype=np.int64),
+        },
+        {
+            "cell_index": 1,
+            "halfspaces": np.array(
+                [[1.0, 0.0, -4.2], [-1.0, 0.0, 1.8],
+                 [0.0, 1.0, -0.4], [0.0, -1.0, -0.4]],
+                dtype=np.float64,
+            ),
+            "vertices": np.array(
+                [[1.8, -0.4], [4.2, -0.4], [4.2, 0.4], [1.8, 0.4]],
+                dtype=np.float64,
+            ),
+            "piece_indices": np.array([1], dtype=np.int64),
+        },
+    ]
+
+
 def make_paired_results(*, corridor: bool = True, goal_yaw: float | None = None):
     corridor_segments = (
         np.array(
@@ -41,6 +72,7 @@ def make_paired_results(*, corridor: bool = True, goal_yaw: float | None = None)
             "radius_m": 0.28,
         },
     )
+    sfc_cells = _recorded_sfc_cells() if corridor else []
     cycles = (
         {
             "cycle_index": 0,
@@ -54,7 +86,7 @@ def make_paired_results(*, corridor: bool = True, goal_yaw: float | None = None)
             "executed_samples": _samples(0.0)[:5],
             "corridor_segments": corridor_segments,
             "obstacle_states": obstacles,
-            "diagnostics": {"failure_reason": ""},
+            "diagnostics": {"failure_reason": "", "sfc_cells": sfc_cells},
         },
         {
             "cycle_index": 1,
@@ -68,7 +100,7 @@ def make_paired_results(*, corridor: bool = True, goal_yaw: float | None = None)
             "executed_samples": _samples(0.1, 0.2)[4:],
             "corridor_segments": corridor_segments,
             "obstacle_states": obstacles,
-            "diagnostics": {"failure_reason": ""},
+            "diagnostics": {"failure_reason": "", "sfc_cells": sfc_cells},
         },
     )
     return {
@@ -90,8 +122,8 @@ def make_paired_results(*, corridor: bool = True, goal_yaw: float | None = None)
             "executed_samples": _samples(0.18),
             "metrics": {"min_clearance_m": 0.31, "runtime_ms": 8.2},
         },
-        "safe_corridor_v1": {
-            "method": "safe_corridor_v1",
+        "superplanner_sfc_v1": {
+            "method": "superplanner_sfc_v1",
             "status": "GOAL_REACHED",
             "cycles": cycles,
             "executed_samples": _samples(0.05),
@@ -108,6 +140,29 @@ class RollingShowcaseRendererTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._temporary.cleanup()
 
+    def test_animation_status_box_is_below_the_map_not_over_it(self):
+        import matplotlib.pyplot as plt
+        from experiments.visualizers.rolling_showcase import _status_box
+
+        figure, axis = plt.subplots()
+        try:
+            artist = _status_box(
+                axis,
+                method="legacy",
+                status="GOAL_REACHED",
+                frame=0,
+                total=2,
+                cycle=0,
+                sample=None,
+                local_goal=None,
+                final_goal=np.array([1.0, 2.0, 0.0]),
+            )
+            self.assertIsNotNone(artist)
+            self.assertLess(artist.get_position()[1], 0.0)
+            self.assertFalse(artist.get_clip_on())
+        finally:
+            plt.close(figure)
+
     def test_scene_package_contains_all_paper_outputs_and_valid_receipts(self):
         from experiments.visualizers.rolling_showcase import (
             render_scene_package,
@@ -121,8 +176,8 @@ class RollingShowcaseRendererTests(unittest.TestCase):
             "three_panel.pdf",
             "overlay.png",
             "overlay.pdf",
-            "safe_corridor.png",
-            "safe_corridor.pdf",
+            "superplanner_sfc.png",
+            "superplanner_sfc.pdf",
             "three_way.gif",
             "figure_data.csv",
             "caption.md",
@@ -152,13 +207,13 @@ class RollingShowcaseRendererTests(unittest.TestCase):
                 "INITIAL_STATE",
                 "GOAL_STATE",
                 "EXECUTED_SAMPLE",
-                "CORRIDOR_SEGMENT",
+                "SFC_CELL_VERTEX",
                 "OBSTACLE_STATE",
                 "ANIMATION_FRAME",
             }.issubset(record_types)
         )
 
-    def test_visual_contract_records_arrows_equal_axes_and_na_goal_yaw(self):
+    def test_visual_contract_derives_goal_heading_from_the_terminal_guide_tangent(self):
         from experiments.visualizers.rolling_showcase import render_scene_package
 
         package = render_scene_package(make_paired_results(goal_yaw=None), self.root / "scene")
@@ -172,11 +227,12 @@ class RollingShowcaseRendererTests(unittest.TestCase):
         )
         self.assertEqual(contract["robot_heading"], "ARROW")
         self.assertEqual(contract["initial_yaw"], "ARROW")
-        self.assertEqual(contract["goal_yaw"], "N/A")
+        self.assertEqual(contract["goal_yaw"], "HOLLOW_ARROW")
+        self.assertEqual(contract["goal_yaw_source"], "DERIVED_GUIDE_TERMINAL_TANGENT")
         self.assertEqual(contract["velocity"], "ARROW")
         self.assertEqual(contract["dynamic_obstacle_velocity"], "ARROW")
         self.assertGreater(contract["sampled_heading_arrow_count"], 1)
-        self.assertGreater(contract["corridor_capsule_count"], 0)
+        self.assertGreater(contract["sfc_cell_count"], 0)
 
     def test_safe_corridor_requires_real_recorded_corridor_segments(self):
         from experiments.visualizers.rolling_showcase import render_scene_package
@@ -203,10 +259,10 @@ class RollingShowcaseRendererTests(unittest.TestCase):
         self.assertEqual(len(frames), len(animation_rows))
         self.assertEqual(len(frames), manifest["animation"]["frame_count"])
         self.assertGreaterEqual(manifest["animation"]["terminal_hold_frames"], 3)
-        self.assertEqual(manifest["animation"]["panels"], ["guide", "legacy", "safe_corridor_v1"])
+        self.assertEqual(manifest["animation"]["panels"], ["guide", "legacy", "superplanner_sfc_v1"])
         self.assertTrue(manifest["animation"]["shows_current_state"])
         self.assertTrue(manifest["animation"]["shows_final_goal"])
-        self.assertTrue(manifest["animation"]["shows_safe_corridor"])
+        self.assertTrue(manifest["animation"]["shows_superplanner_2d_sfc"])
         self.assertEqual(
             manifest["animation"]["state_box_fields"],
             [
@@ -219,6 +275,8 @@ class RollingShowcaseRendererTests(unittest.TestCase):
                 "speed_mps",
                 "acceleration_mps2",
                 "yaw_rate_radps",
+                "clearance_m",
+                "sfc_margin_m",
                 "local_goal_xy_m",
                 "final_goal_xy_m",
                 "status",
@@ -261,7 +319,7 @@ class RollingShowcaseRendererTests(unittest.TestCase):
         package = render_scene_package(make_paired_results(), self.root / "scene")
         manifest = json.loads(package.manifest_path.read_text(encoding="utf-8"))
         manifest["visual_contract"]["panel_xy_limits"] = None
-        manifest["visual_contract"]["corridor_capsule_count"] = "not-an-integer"
+        manifest["visual_contract"]["sfc_cell_count"] = "not-an-integer"
         package.manifest_path.write_text(
             json.dumps(manifest), encoding="utf-8"
         )
@@ -270,7 +328,7 @@ class RollingShowcaseRendererTests(unittest.TestCase):
 
         self.assertTrue(any("panel XY limits" in error for error in errors), errors)
         self.assertTrue(
-            any("recorded capsule evidence" in error for error in errors), errors
+            any("recorded native 2-D SFC evidence" in error for error in errors), errors
         )
 
     def test_static_rectangles_are_rendered_from_scenario_evidence(self):
@@ -318,7 +376,7 @@ class RollingShowcaseRendererTests(unittest.TestCase):
                 [[0.0, 0.0, 2.0, 0.1, 0.35], [2.0, 0.1, 4.0, 0.0, 0.3]]
             ),
             obstacle_states=(obstacle,),
-            diagnostics={},
+            diagnostics={"sfc_cells": _recorded_sfc_cells()},
         )
 
         def result(method: str) -> RolloutResult:
@@ -333,7 +391,7 @@ class RollingShowcaseRendererTests(unittest.TestCase):
             )
 
         package = render_scene_package(
-            (result("legacy"), result("safe_corridor_v1")),
+            (result("legacy"), result("superplanner_sfc_v1")),
             self.root / "production",
         )
         manifest = json.loads(package.manifest_path.read_text(encoding="utf-8"))

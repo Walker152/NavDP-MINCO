@@ -23,13 +23,16 @@ from experiments.core.artifact_receipt import (
     sha256_file,
     validate_file_receipt,
 )
-from experiments.dynamic_pilot import prepare_dynamic_pilot
+from experiments.dynamic_pilot import (
+    build_dynamic_comparison_videos,
+    prepare_dynamic_pilot,
+)
 from experiments.orchestrators.suite_runner import run_suite
 from experiments.static.benchmark import (
     run_static_benchmark,
     validate_static_benchmark,
 )
-from experiments.static.selection import run_boundary_selection
+from experiments.static.selection import run_boundary_selection, validate_boundary_selection
 from experiments.rolling.showcase import (
     run_rolling_showcase,
     validate_showcase,
@@ -101,20 +104,62 @@ def _python_environment_entry(
     }
 
 
+_AUTODL_REPO_ROOT = Path("/root/NavDP")
+_AUTODL_WORK_DIR = Path("/root/autodl-tmp/navdp")
+_AUTODL_ISAACLAB_DIR = _AUTODL_WORK_DIR / "IsaacLab"
+
+
+def _is_verified_autodl_runtime(repo_root: Path | None = None) -> bool:
+    """Return whether this process was launched from the repaired AutoDL profile.
+
+    A usable Isaac Python on a workstation is intentionally insufficient: the
+    production workflow relies on the memory/cache and Vulkan configuration
+    written by ``autodl_self_check_repair.sh``.  The shell entry points source
+    that receipt before delegating here; the check is repeated here so a direct
+    Python CLI invocation cannot bypass the server-only safety policy.
+    """
+    expected_repo = _AUTODL_REPO_ROOT if repo_root is None else repo_root
+    return (
+        expected_repo == _AUTODL_REPO_ROOT
+        and os.environ.get("NAVDP_REPO_ROOT") == str(_AUTODL_REPO_ROOT)
+        and os.environ.get("AUTODL_WORK_DIR") == str(_AUTODL_WORK_DIR)
+        and os.environ.get("ISAACLAB_DIR") == str(_AUTODL_ISAACLAB_DIR)
+        and (_AUTODL_ISAACLAB_DIR / "isaaclab.sh").is_file()
+    )
+
+
+def _require_verified_autodl_runtime(repo_root: Path) -> None:
+    if not _is_verified_autodl_runtime(repo_root):
+        raise RuntimeError(
+            "real simulation is restricted to the verified AutoDL server runtime "
+            "(/root/NavDP + /root/autodl-tmp/navdp); local execution is disabled"
+        )
+
+
 def _environment_receipt() -> dict[str, object]:
     navdp = os.environ.get("NAVDP_PYTHON") or sys.executable
     isaac = os.environ.get("ISAACLAB_PYTHON")
     if not isaac:
         candidate = Path("/home/alioth/miniforge3/envs/isaaclab/bin/python")
         isaac = str(candidate) if candidate.is_file() else None
-    return {
+    real_runtime = _is_verified_autodl_runtime()
+    receipt = {
         "static_analysis": _python_environment_entry(
             navdp, environment="navdp"
         ),
         "real_simulation": _python_environment_entry(
-            isaac, environment="isaaclab", pending=True
+            isaac, environment="isaaclab", pending=not real_runtime
         ),
     }
+    # A local interpreter can be present and healthy, yet it is not a valid
+    # execution target for the memory-heavy Isaac experiment.  Make that
+    # distinction explicit in every workflow receipt.
+    receipt["real_simulation"]["runtime_policy"] = "AUTODL_SERVER_ONLY"
+    receipt["real_simulation"]["runtime_verified"] = real_runtime
+    if not real_runtime:
+        receipt["real_simulation"]["available"] = False
+        receipt["real_simulation"]["status"] = "PENDING_REAL_SIMULATION"
+    return receipt
 
 
 def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -145,7 +190,7 @@ def _resolve_options(repo_root: Path, options: WorkflowOptions) -> WorkflowOptio
             options.legacy_config or config_dir / "static_legacy_suite.json"
         ).resolve(),
         safe_config=Path(
-            options.safe_config or config_dir / "static_safe_corridor_suite.json"
+            options.safe_config or config_dir / "static_superplanner_sfc_suite.json"
         ).resolve(),
         selection_config=Path(
             options.selection_config
@@ -258,13 +303,25 @@ def _run_stage(
         if previous.get("command") != list(command_tuple):
             raise RuntimeError(f"{name}: command changed")
         if previous.get("inputs") != list(inputs):
-            raise RuntimeError(f"{name}: input hash changed")
+            if not options.retry_failed:
+                raise RuntimeError(f"{name}: input hash changed")
+            # Downstream stages consume hash-receipted upstream outputs.  On
+            # an explicit retry their changed inputs require regeneration,
+            # rather than permanently blocking an otherwise recoverable
+            # one-click workflow.
+            previous = {**previous, "status": "FAILED"}
         status = previous.get("status")
         if status == "COMPLETE":
             errors = _verify_stage_outputs(previous.get("outputs", []), output_root)
             if errors:
-                raise RuntimeError(f"{name}: " + "; ".join(errors))
-            return previous
+                if not options.retry_failed:
+                    raise RuntimeError(f"{name}: " + "; ".join(errors))
+                # A completed receipt with missing/tampered outputs is no
+                # longer a completed stage.  Treat it exactly like a failed
+                # stage when the caller explicitly asks for recovery.
+                status = "FAILED"
+            else:
+                return previous
         if status == "FAILED" and not options.retry_failed:
             raise RuntimeError(
                 f"{name}: previous stage failed; pass --retry-failed"
@@ -278,6 +335,17 @@ def _run_stage(
                     raise RuntimeError(
                         f"{name}: refusing to clear output outside workflow root: {path}"
                     ) from error
+                resumable_checkpoints = (
+                    path / "benchmark_checkpoint.json",
+                    path / "selection_checkpoint.json",
+                    path / "showcase_checkpoint.json",
+                )
+                if any(checkpoint.is_file() for checkpoint in resumable_checkpoints):
+                    # A stage with an explicit hash-locked checkpoint owns its
+                    # partial artifacts and knows how to resume them. Deleting
+                    # it here would turn `--retry-failed` into unnecessary
+                    # recomputation and could destroy valid evidence.
+                    continue
                 if path.is_dir():
                     shutil.rmtree(path)
                 elif path.exists():
@@ -448,21 +516,19 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(stream))
 
 
-def _static_pair(legacy: Path, safe: Path, output: Path) -> None:
+def _static_pair(legacy: Path, sfc: Path, output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     legacy_rows = {
         row["case_uid"]: row for row in _read_csv(legacy / "legacy_case_metrics.csv")
     }
-    safe_rows = {
-        row["case_uid"]: row for row in _read_csv(safe / "legacy_case_metrics.csv")
+    sfc_rows = {
+        row["case_uid"]: row for row in _read_csv(sfc / "legacy_case_metrics.csv")
     }
-    fields = sorted(
-        set().union(*(row.keys() for row in [*legacy_rows.values(), *safe_rows.values()]))
-    )
+    fields = sorted(set().union(*(row.keys() for row in [*legacy_rows.values(), *sfc_rows.values()])))
     rows = []
-    for uid in sorted(set(legacy_rows) | set(safe_rows)):
+    for uid in sorted(set(legacy_rows) | set(sfc_rows)):
         left = legacy_rows.get(uid, {})
-        right = safe_rows.get(uid, {})
+        right = sfc_rows.get(uid, {})
         row: dict[str, object] = {
             "case_uid": uid,
             "pair_status": "COMPLETE" if left and right else "INCOMPLETE",
@@ -471,7 +537,7 @@ def _static_pair(legacy: Path, safe: Path, output: Path) -> None:
             if field == "case_uid":
                 continue
             row[f"legacy_{field}"] = left.get(field, "")
-            row[f"safe_{field}"] = right.get(field, "")
+            row[f"superplanner_sfc_{field}"] = right.get(field, "")
         rows.append(row)
     output_csv = output / "paired_profile_metrics.csv"
     csv_fields = list(rows[0]) if rows else ["case_uid", "pair_status"]
@@ -487,19 +553,36 @@ def _static_pair(legacy: Path, safe: Path, output: Path) -> None:
             "case_count": len(rows),
             "complete_pair_count": sum(row["pair_status"] == "COMPLETE" for row in rows),
             "legacy_input_sha256": sha256_file(legacy / "legacy_case_metrics.csv"),
-            "safe_input_sha256": sha256_file(safe / "legacy_case_metrics.csv"),
+            "superplanner_sfc_input_sha256": sha256_file(sfc / "legacy_case_metrics.csv"),
         },
     )
     (output / "report.md").write_text(
-        "# Paired static profile comparison\n\n"
+        "# Paired static profile comparison: legacy MINCO vs SuperPlanner 2-D SFC\n\n"
         f"Cases are joined exactly by `case_uid`: {len(rows)} total.\n"
         "No failed or missing case is dropped; `pair_status` records completeness.\n",
         encoding="utf-8",
     )
 
 
+def _boundary_selection_stage(config: Path, output: Path) -> None:
+    run_boundary_selection(config, output, resume=output.exists())
+    errors = validate_boundary_selection(output)
+    if errors:
+        raise RuntimeError("boundary selection validation failed: " + "; ".join(errors))
+
+
 def _paper(input_root: Path, output: Path) -> dict[str, object]:
     return generate_paper_report(input_root, output)
+
+
+def _dynamic_paper(dynamic_suite: Path, output: Path) -> dict[str, object]:
+    """Render dynamic figures/tables from only the completed real suite.
+
+    The static report is intentionally immutable once it has been receipted.
+    Keeping this output separate prevents its static tables from being mixed
+    into dynamic episode/control denominators after an AutoDL run finishes.
+    """
+    return generate_paper_report(dynamic_suite, output)
 
 
 def _run_rolling_showcase_stage(
@@ -546,7 +629,7 @@ def _static_validation(
     errors = []
     errors.extend(validate_static_benchmark(output_root / "static" / "legacy"))
     errors.extend(
-        validate_static_benchmark(output_root / "static" / "safe_corridor_v1")
+        validate_static_benchmark(output_root / "static" / "superplanner_sfc_v1")
     )
     errors.extend(_validate_inventory(output_root / "paper"))
     errors.extend(validate_paper_artifact_manifest(output_root / "paper"))
@@ -667,19 +750,21 @@ def run_static_workflow(
         input_paths=common_inputs,
         output_paths=(legacy_output,),
         action=lambda: run_static_benchmark(
-            options.legacy_config, legacy_output, trace_limit=0
+            options.legacy_config, legacy_output, trace_limit=0,
+            resume=legacy_output.exists(),
         ),
     )
-    safe_output = output_root / "static" / "safe_corridor_v1"
-    stages["safe_benchmark"] = _run_stage(
+    safe_output = output_root / "static" / "superplanner_sfc_v1"
+    stages["superplanner_sfc_benchmark"] = _run_stage(
         output_root=output_root,
         options=options,
-        name="safe_benchmark",
-        command=("static-benchmark", "safe_corridor_v1", "--trace-limit=0"),
+        name="superplanner_sfc_benchmark",
+        command=("static-benchmark", "superplanner_sfc_v1", "--trace-limit=0"),
         input_paths=common_inputs,
         output_paths=(safe_output,),
         action=lambda: run_static_benchmark(
-            options.safe_config, safe_output, trace_limit=0
+            options.safe_config, safe_output, trace_limit=0,
+            resume=safe_output.exists(),
         ),
     )
     comparison_output = output_root / "static" / "comparison"
@@ -704,7 +789,7 @@ def run_static_workflow(
         command=("static-boundary-selection", "Best2", "Worst2"),
         input_paths=common_inputs,
         output_paths=(boundary_output,),
-        action=lambda: run_boundary_selection(
+        action=lambda: _boundary_selection_stage(
             options.selection_config, boundary_output
         ),
     )
@@ -773,10 +858,12 @@ def _simulation_validation(output_root: Path) -> None:
         errors = [f"dynamic readiness unreadable: {error}"]
     else:
         errors = []
-        if receipt.get("run_count") != 8 or receipt.get("started_processes") != 0:
-            errors.append("dynamic readiness must contain eight runs and zero processes")
-        if dry_plan.get("run_count") != 8 or dry_plan.get("started_processes") != 0:
-            errors.append("dynamic dry-run must contain eight runs and zero processes")
+        # Four frozen representative cases are compared under raw NavDP,
+        # unconstrained MINCO, and native SuperPlanner 2-D SFC MINCO.
+        if receipt.get("run_count") != 12 or receipt.get("started_processes") != 0:
+            errors.append("dynamic readiness must contain twelve runs and zero processes")
+        if dry_plan.get("run_count") != 12 or dry_plan.get("started_processes") != 0:
+            errors.append("dynamic dry-run must contain twelve runs and zero processes")
         if sha256_file(Path(receipt["dry_run_plan"])) != receipt.get("dry_run_plan_sha256"):
             errors.append("dynamic dry-run plan hash mismatch")
     mock_path = (
@@ -857,11 +944,27 @@ def run_mock_smoke_suite(
     return receipt
 
 
+def _dynamic_suite_dir(suite_path: Path | str) -> Path:
+    """Resolve the only result directory declared by a prepared dynamic suite."""
+    suite_path = Path(suite_path).resolve()
+    try:
+        suite = json.loads(suite_path.read_text(encoding="utf-8"))
+        suite_id = str(suite["suite_id"]).strip()
+        output_root = Path(str(suite["output_root"])).resolve()
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError(f"unreadable dynamic suite: {suite_path}: {error}") from error
+    if not suite_id:
+        raise ValueError(f"dynamic suite has empty suite_id: {suite_path}")
+    return output_root / suite_id
+
+
 def run_simulation_workflow(
     *, repo_root: Path | str, options: WorkflowOptions
 ) -> dict[str, Any]:
     repo_root = Path(repo_root).resolve()
     options = _resolve_options(repo_root, options)
+    if options.allow_real_simulation:
+        _require_verified_autodl_runtime(repo_root)
     output_root = options.output_root
     static_receipt = output_root / "static_workflow_receipt.json"
     if not static_receipt.is_file():
@@ -892,7 +995,7 @@ def run_simulation_workflow(
         output_root=output_root,
         options=options,
         name="dynamic_readiness",
-        command=("dynamic-prepare", "--dry-run", "8-runs"),
+        command=("dynamic-prepare", "--dry-run", "12-runs"),
         input_paths=[
             *common_inputs,
             output_root / "boundary" / "selected_dynamic_cases.json",
@@ -910,7 +1013,7 @@ def run_simulation_workflow(
     )
     if options.allow_real_simulation:
         suite_path = dynamic_output / "dynamic_suite.json"
-        dynamic_suite_dir = dynamic_output / "dry_run_results" / "task06_dynamic_best2_worst2_v1"
+        dynamic_suite_dir = _dynamic_suite_dir(suite_path)
         stages["dynamic_real"] = _run_stage(
             output_root=output_root,
             options=options,
@@ -937,6 +1040,32 @@ def run_simulation_workflow(
             output_paths=(analysis_output,),
             action=lambda: analyze_suite_readonly(
                 dynamic_suite_dir, analysis_output, resume=options.resume
+            ),
+        )
+        dynamic_paper_output = output_root / "paper" / "dynamic_report"
+        stages["dynamic_paper_report"] = _run_stage(
+            output_root=output_root,
+            options=options,
+            name="dynamic_paper_report",
+            command=("generate-real-dynamic-paper-report", str(dynamic_suite_dir)),
+            input_paths=[*common_inputs, dynamic_suite_dir / "suite_status.json"],
+            output_paths=(dynamic_paper_output,),
+            action=lambda: _dynamic_paper(dynamic_suite_dir, dynamic_paper_output),
+        )
+        dynamic_video_output = output_root / "paper" / "dynamic_comparison_videos"
+        stages["dynamic_comparison_videos"] = _run_stage(
+            output_root=output_root,
+            options=options,
+            name="dynamic_comparison_videos",
+            command=("build-real-video-comparisons", str(dynamic_output)),
+            input_paths=[
+                *common_inputs,
+                dynamic_output / "dynamic_readiness_receipt.json",
+                dynamic_suite_dir / "suite_status.json",
+            ],
+            output_paths=(dynamic_video_output,),
+            action=lambda: build_dynamic_comparison_videos(
+                dynamic_output, output_dir=dynamic_video_output
             ),
         )
     if options.allow_real_simulation and options.full_suite:

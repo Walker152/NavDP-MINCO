@@ -12,6 +12,7 @@
 #include "minco_core/components/trajectory_safety_checker.hpp"
 #include "minco_processor/esdf_map.hpp"
 #include "minco_processor/guide_corridor.hpp"
+#include "minco_processor/sfc_corridor.hpp"
 #include "traj_opt/minco_optimizer.hpp"
 #include "traj_opt/yaw_traj_opt.h"
 #include "utils/header/eigen_alias.hpp"
@@ -49,6 +50,9 @@ public:
     double corridor_max_radius{0.45};
     double corridor_min_radius{0.04};
     double corridor_sample_step{0.025};
+    double sfc_bound_distance{0.8};
+    double sfc_seed_line_max_length{2.0};
+    double sfc_min_overlap_depth{0.02};
     double adaptive_max_spatial_step{0.025};
     double adaptive_near_clearance{0.05};
     int adaptive_max_depth{14};
@@ -140,6 +144,13 @@ public:
     double corridor_min_clearance{std::numeric_limits<double>::quiet_NaN()};
     double corridor_min_overlap{std::numeric_limits<double>::quiet_NaN()};
     std::vector<GuideCorridorSegment> corridor_segments;
+    std::vector<SfcCell2D> sfc_cells;
+    std::vector<SfcPieceBinding2D> sfc_piece_bindings;
+    std::string sfc_generation_reason{"NOT_RUN"};
+    int sfc_obstacle_sample_count{0};
+    int sfc_repair_cell_count{0};
+    double sfc_min_overlap{std::numeric_limits<double>::quiet_NaN()};
+    double sfc_min_margin{std::numeric_limits<double>::quiet_NaN()};
     int adaptive_validation_sample_count{0};
     int adaptive_validation_subdivision_count{0};
     int validation_offending_sample_index{-1};
@@ -210,6 +221,7 @@ private:
   std::unique_ptr<traj_opt::YawTrajOpt> yaw_optimizer_;
   std::unique_ptr<minco_planner::TrajectorySafetyChecker> safety_checker_;
   GuideCorridor2D corridor_;
+  SuperplannerSfc2D sfc_;
 
   geometry_utils::Trajectory last_traj_;
   geometry_utils::Trajectory last_yaw_traj_;

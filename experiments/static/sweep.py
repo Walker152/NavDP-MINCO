@@ -61,7 +61,7 @@ def run_capability_sweep(
 
     Loads the unified sweep config, expands cases (base + obstacle variants +
     state variants + factor grids), runs each for both legacy and
-    safe_corridor_v1 profiles with shared validation, and produces
+    SuperPlanner 2-D SFC profiles with shared validation, and produces
     per-case artifacts + sweep-level CSV + manifest.
     """
     config_path = Path(config_path).resolve()
@@ -105,7 +105,7 @@ def run_capability_sweep(
     except Exception:
         pass
 
-    profiles = ["legacy", "safe_corridor_v1"]
+    profiles = ["legacy", "superplanner_sfc_v1"]
     metric_limits = _assemble_metric_limits(sweep_config)
 
     # Factor metadata for comparison charts
@@ -206,16 +206,16 @@ def run_capability_sweep(
             })
             rows.append(row)
 
-    # Paired legacy/safe GIFs per case
+    # Paired legacy/SuperPlanner-SFC GIFs per case.
     from experiments.visualizers.static_benchmark import render_paired_static_gif
     for case in case_list:
         both = per_case_results[case.case_uid]
-        if "legacy" not in both or "safe_corridor_v1" not in both:
+        if "legacy" not in both or "superplanner_sfc_v1" not in both:
             continue
         legacy_case, legacy_result, _, legacy_detail = both["legacy"]
-        safe_case, safe_result, _, safe_detail = both["safe_corridor_v1"]
+        safe_case, safe_result, _, safe_detail = both["superplanner_sfc_v1"]
         paired_gif = (
-            output_dir / "comparison" / case.case_uid / f"{case.case_uid}_legacy_vs_safe.gif"
+            output_dir / "comparison" / case.case_uid / f"{case.case_uid}_legacy_vs_superplanner_sfc.gif"
         )
         paired_gif.parent.mkdir(parents=True, exist_ok=True)
         render_paired_static_gif(

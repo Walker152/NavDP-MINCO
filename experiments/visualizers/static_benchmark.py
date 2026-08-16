@@ -14,6 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import numpy as np
+from PIL import Image
 
 from experiments.visualizers.rolling_showcase import (
     draw_heading_arrow,
@@ -39,7 +40,13 @@ from experiments.static.case_schema import StaticCase
 from experiments.static.runner import StaticRunResult
 
 
+# Per-trajectory GIFs retain a compact cadence.  Factor grids redraw nine
+# annotated trajectories in every frame, so they need a distinctly slower
+# cadence for the initial-state labels, heading arrows, and SFC cells to be
+# readable in a paper review or screen recording.
 GIF_FRAME_DURATION_S = 0.1
+GRID_GIF_FRAME_DURATION_S = 0.20
+GRID_GIF_MIN_FRAMES = 24
 
 
 def _finite_or_blank(value: object) -> object:
@@ -418,10 +425,11 @@ def render_paired_static_gif(
     safe_detail: Mapping[str, np.ndarray],
     footprint_radius_m: float = 0.2,
 ) -> Path:
-    """Render a dual-panel Legacy/Safe paired GIF from static results.
+    """Render a dual-panel legacy/constrained paired GIF from static results.
 
     Left panel: legacy trajectory with its own data (no corridor capsules).
-    Right panel: safe_corridor_v1 trajectory with corridor capsules from real data.
+    Right panel: constrained trajectory with native corridor geometry from real
+    data (capsules for the historical profile, convex cells for SuperPlanner).
 
     Both panels show heading arrows, obstacles, and status boxes.
     """
@@ -441,6 +449,7 @@ def render_paired_static_gif(
     total_frames = base_frames + TERMINAL_HOLD_FRAMES
 
     safe_corridors = _corridor_segments_from_diagnostics(safe_result.diagnostics)
+    safe_sfc_cells = _sfc_cells_from_diagnostics(safe_result.diagnostics)
     obstacles = _obstacles_from_diagnostics(safe_result.diagnostics)
     static_rects = _static_obstacle_rectangles(case)
 
@@ -454,6 +463,11 @@ def render_paired_static_gif(
         all_points.append(case.terminal_goal[:2].reshape(1, 2))
     for x0, y0, x1, y1, radius, _ in safe_corridors:
         all_points.append(np.array([[x0 - radius, y0 - radius], [x1 + radius, y1 + radius]]))
+    for cell in safe_sfc_cells:
+        all_points.append(cell["vertices"])
+    for rectangle in static_rects:
+        x0, y0, x1, y1 = rectangle["bounds_xy"]
+        all_points.append(np.asarray([[x0, y0], [x1, y1]], dtype=float))
     combined = np.concatenate(all_points, axis=0)
     vmin = np.min(combined, axis=0)
     vmax = np.max(combined, axis=0)
@@ -466,15 +480,19 @@ def render_paired_static_gif(
     has_legacy_temporal = len(legacy_result.samples) == len(legacy_path) and len(legacy_result.samples) > 0
     has_safe_temporal = len(safe_result.samples) == len(safe_path) and len(safe_result.samples) > 0
 
+    constrained_profile = str(safe_result.diagnostics.get("constraint_profile", "safe_corridor_v1"))
+    if constrained_profile not in {"safe_corridor_v1", "superplanner_sfc_v1"}:
+        constrained_profile = "constrained"
     panels = (
         ("legacy", legacy_path, legacy_indices, legacy_result, has_legacy_temporal, False),
-        ("safe_corridor_v1", safe_path, safe_indices, safe_result, has_safe_temporal, True),
+        (constrained_profile, safe_path, safe_indices, safe_result, has_safe_temporal, True),
     )
 
     frames = []
     for encoded_index in range(total_frames):
         progress_index = min(encoded_index, base_frames - 1)
-        fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.8), constrained_layout=True)
+        fig, axes = plt.subplots(1, 2, figsize=(11.0, 6.1))
+        fig.subplots_adjust(left=0.06, right=0.99, top=0.92, bottom=0.28, wspace=0.18)
 
         for ax, (method, traj, indices, result, has_temporal, show_corridors) in zip(axes, panels):
             source_idx = int(indices[progress_index])
@@ -486,9 +504,9 @@ def render_paired_static_gif(
             )
             ax.plot(
                 traj[: source_idx + 1, 0], traj[: source_idx + 1, 1],
-                color=SAFE_STYLE["color"] if method == "safe_corridor_v1" else LEGACY_STYLE["color"],
-                linewidth=SAFE_STYLE["linewidth"] if method == "safe_corridor_v1" else LEGACY_STYLE["linewidth"],
-                linestyle=SAFE_STYLE["linestyle"] if method == "safe_corridor_v1" else LEGACY_STYLE["linestyle"],
+                color=SAFE_STYLE["color"] if show_corridors else LEGACY_STYLE["color"],
+                linewidth=SAFE_STYLE["linewidth"] if show_corridors else LEGACY_STYLE["linewidth"],
+                linestyle=SAFE_STYLE["linestyle"] if show_corridors else LEGACY_STYLE["linestyle"],
             )
             ax.scatter(*case.start_position[:2], marker="s", color="green", s=60, zorder=8)
 
@@ -531,6 +549,7 @@ def render_paired_static_gif(
             if show_corridors:
                 for segment in safe_corridors:
                     _draw_capsule(ax, segment, alpha=0.14)
+                _draw_sfc_cells(ax, safe_sfc_cells)
 
             _draw_obstacles(ax, obstacles)
             _draw_static_rectangles(ax, static_rects)
@@ -559,21 +578,25 @@ def render_paired_static_gif(
             else:
                 state_text = "state: N/A\n"
 
-            clearance_val = _nearest_clearance(centre, safe_detail if method == "safe_corridor_v1" else legacy_detail)
+            clearance_val = _nearest_clearance(centre, safe_detail if show_corridors else legacy_detail)
+            sfc_margin = _sfc_margin_at_point(centre, safe_sfc_cells) if show_corridors else ""
 
             ax.text(
-                0.02, 0.98,
+                0.02, -0.045,
                 f"{method}\n"
                 f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s\n"
                 f"{state_text}"
                 f"clearance: {clearance_val if clearance_val != '' else 'N/A'} m\n"
-                f"status: {result.status}",
+                f"SFC margin: {sfc_margin if sfc_margin != '' else 'N/A'} m\n"
+                f"status: {result.status}\n"
+                f"reason: {result.diagnostics.get('sfc_generation_reason') or result.diagnostics.get('validation_failure_reason') or result.diagnostics.get('failure_reason') or 'NONE'}",
                 transform=ax.transAxes,
                 ha="left", va="top",
                 fontsize=7.0,
                 bbox={"boxstyle": "round,pad=0.3", "facecolor": "white",
                       "alpha": 0.88, "edgecolor": "#6B7280"},
                 zorder=20,
+                clip_on=False,
             )
 
         fig.canvas.draw()
@@ -641,7 +664,9 @@ def render_factor_grid_gif(
             path = _path(result)
             if len(path) == 0:
                 path = case.guide_path_xyz
-            base_frames = min(16, len(path))
+            # Use enough equally-spaced samples for continuous apparent
+            # motion.  Slowing six milestone frames only creates a slideshow.
+            base_frames = min(32, max(GRID_GIF_MIN_FRAMES, len(path)))
             frame_indices = np.rint(
                 np.linspace(0, len(path) - 1, base_frames)
             ).astype(int)
@@ -650,6 +675,14 @@ def render_factor_grid_gif(
             all_points.append(path[:, :2])
             if case.terminal_goal is not None:
                 all_points.append(case.terminal_goal[:2].reshape(1, 2))
+            rectangles = _static_obstacle_rectangles(case)
+            for rectangle in rectangles:
+                x0, y0, x1, y1 = rectangle["bounds_xy"]
+                all_points.append(
+                    np.asarray([[x0, y0], [x0, y1], [x1, y0], [x1, y1]])
+                )
+            for sfc_cell in _sfc_cells_from_diagnostics(result.diagnostics):
+                all_points.append(sfc_cell["vertices"])
             cell_row.append({
                 "case": case,
                 "result": result,
@@ -657,6 +690,9 @@ def render_factor_grid_gif(
                 "frame_indices": frame_indices,
                 "base_frames": base_frames,
                 "has_temporal": len(result.samples) == len(path) and len(result.samples) > 0,
+                "sfc_cells": _sfc_cells_from_diagnostics(result.diagnostics),
+                "static_rectangles": _static_obstacle_rectangles(case),
+                "obstacles": _obstacles_from_diagnostics(result.diagnostics),
             })
         cell_data.append(cell_row)
 
@@ -705,6 +741,9 @@ def render_factor_grid_gif(
                 source_idx = int(frame_indices[progress_index])
 
                 _draw_map(ax, case)
+                _draw_sfc_cells(ax, data["sfc_cells"], alpha=0.18)
+                _draw_static_rectangles(ax, data["static_rectangles"])
+                _draw_obstacles(ax, data["obstacles"])
 
                 # Guide path (thin)
                 ax.plot(
@@ -766,6 +805,26 @@ def render_factor_grid_gif(
                     )
                 )
 
+                sample = result.samples[source_idx] if data["has_temporal"] else None
+                speed = float(np.linalg.norm(sample[4:7])) if sample is not None and len(sample) >= 7 else float("nan")
+                yaw_deg = float(np.degrees(sample[13])) if sample is not None and len(sample) >= 14 else float("nan")
+                margin = _sfc_margin_at_point(path[source_idx, :2], data["sfc_cells"])
+                initial_velocity = np.asarray(case.start_velocity[:2], dtype=float)
+                initial_acceleration = np.asarray(case.start_acceleration[:2], dtype=float)
+                ax.text(
+                    0.02, 0.02,
+                    "init: v=(%.2f,%.2f), a=(%.2f,%.2f), yaw=%.0f°\n"
+                    "current: v=%.2f, yaw=%.0f° | SFC=%d, margin=%s" % (
+                        initial_velocity[0], initial_velocity[1],
+                        initial_acceleration[0], initial_acceleration[1],
+                        np.degrees(case.start_yaw), speed, yaw_deg, len(data["sfc_cells"]),
+                        "N/A" if margin == "" else "%.3f m" % margin,
+                    ),
+                    transform=ax.transAxes, fontsize=5.2, va="bottom",
+                    bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "#64748B"},
+                    zorder=20,
+                )
+
                 _configure_axis(ax, limits, "")
                 ax.set_xticklabels([])
                 ax.set_yticklabels([])
@@ -788,7 +847,7 @@ def render_factor_grid_gif(
         fig.suptitle(
             f"{row_label} × {col_label}  |  "
             f"frame {encoded_index + 1}/{max_frames}  |  "
-            f"t={encoded_index * GIF_FRAME_DURATION_S:.1f}s",
+            f"display t={encoded_index * GRID_GIF_FRAME_DURATION_S:.2f}s",
             fontsize=8, y=0.995,
         )
 
@@ -796,7 +855,18 @@ def render_factor_grid_gif(
         frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
         plt.close(fig)
 
-    imageio.mimsave(gif_path, frames, duration=GIF_FRAME_DURATION_S, loop=0)
+    # imageio's GIF backend may silently omit a sub-second delay depending on
+    # the installed Pillow plugin.  Encode the delay as integer milliseconds
+    # through Pillow so grid playback is reproducibly reviewable.
+    images = [Image.fromarray(frame).convert("P") for frame in frames]
+    images[0].save(
+        gif_path,
+        save_all=True,
+        append_images=images[1:],
+        duration=int(GRID_GIF_FRAME_DURATION_S * 1000),
+        loop=0,
+        disposal=2,
+    )
     return gif_path
 
 
@@ -847,9 +917,9 @@ def build_paired_static_gif_evidence(
     primary_rows = safe_rows if safe_rows else legacy_rows
     for row in primary_rows:
         row["optimizer_state"] = (
-            f"legacy={legacy_result.status};safe_corridor_v1={safe_result.status}"
+            f"legacy={legacy_result.status};superplanner_sfc_v1={safe_result.status}"
         )
-        row["event_tags"] = "PAIRED_LEGACY_SAFE"
+        row["event_tags"] = "PAIRED_LEGACY_SUPERPLANNER_SFC"
     events: list[dict[str, object]] = []
     for label, result, rows in (
         ("legacy", legacy_result, legacy_rows),
@@ -877,13 +947,13 @@ def build_paired_static_gif_evidence(
         event_rows=events,
         caption_overrides={
             "scene_zh": f"静态案例 {case.case_uid}（{case.expected_category}）",
-            "method_zh": "legacy 与 safe_corridor_v1 左右配对",
+            "method_zh": "原始 MINCO（无走廊）与 SuperPlanner 二维 SFC 约束 MINCO 左右配对",
             "research_question_zh": (
                 f"{case.expected_category} 静态条件下 legacy 与 "
-                "safe_corridor_v1 约束配置的轨迹对比。"
+                "SuperPlanner 二维 SFC 约束配置的轨迹对比。"
             ),
             "pairing_key_zh": (
-                f"case_uid={case.case_uid}；profile=legacy_vs_safe_corridor_v1。"
+                f"case_uid={case.case_uid}；profile=legacy_vs_superplanner_sfc_v1。"
             ),
             "denominator_zh": (
                 f"解码帧 n={decoded_count}；较短面板末帧冻结后仍计入分母。"
@@ -892,18 +962,18 @@ def build_paired_static_gif_evidence(
                 "不能外推真实闭环、动态障碍、接触或统计总体性能。"
             ),
             "interpretation_zh": (
-                "左右差异由图像与分方法事件解释；逐帧定量列仅对应 safe 面板。"
+                "左右差异由图像与分方法事件解释；逐帧定量列仅对应 SuperPlanner SFC 面板。"
             ),
             "time_basis_zh": (
                 "配对 GIF 相对时间轴；较短面板末帧冻结；source_time_s "
-                "仅对应逐帧指标所采用的 safe 面板"
+                "仅对应逐帧指标所采用的 SuperPlanner SFC 面板"
             ),
             "metrics_units_zh": (
-                "逐帧定量列仅对应 safe_corridor_v1 面板；位置/间隙：m；"
+                "逐帧定量列仅对应 SuperPlanner SFC 面板；位置/间隙/SFC 裕度：m；"
                 "时间：s；动力学量采用 SI 单位"
             ),
             "event_definition_zh": (
-                "legacy 与 safe 事件以 source_uid 区分；未合成跨方法数值"
+                "legacy 与 SuperPlanner SFC 事件以 source_uid 区分；未合成跨方法数值"
             ),
             "synchronization_zh": (
                 "按帧序号相对对齐，短流冻结末帧；不声称墙钟同步"
@@ -912,7 +982,7 @@ def build_paired_static_gif_evidence(
                 "不可用量保持空值；逐帧表不把左右方法合成为虚构平均值"
             ),
             "failure_handling_zh": (
-                f"legacy={legacy_result.status}；safe_corridor_v1={safe_result.status}；"
+                f"legacy={legacy_result.status}；superplanner_sfc_v1={safe_result.status}；"
                 "失败保留在分母和事件表"
             ),
             "evidence_boundary_zh": (
@@ -926,12 +996,12 @@ def build_paired_static_gif_evidence(
     return _finalize_static_gif_package(
         package,
         case=case,
-        profile="legacy_vs_safe_corridor_v1",
+        profile="legacy_vs_superplanner_sfc_v1",
         status_text=f"legacy={legacy_result.status};safe={safe_result.status}",
         decoded_count=decoded_count,
         interpretation=(
-            f"legacy={legacy_result.status}，safe_corridor_v1={safe_result.status}；"
-            "逐帧定量列仅对应 safe 面板，左右差异由图像与分方法事件解释。"
+            f"legacy={legacy_result.status}，superplanner_sfc_v1={safe_result.status}；"
+            "逐帧定量列仅对应 SuperPlanner SFC 面板，左右差异由图像与分方法事件解释。"
         ),
     )
 
@@ -1026,6 +1096,62 @@ def _corridor_segments_from_diagnostics(
     return segments
 
 
+def _sfc_cells_from_diagnostics(diagnostics: Mapping[str, Any]) -> list[dict[str, np.ndarray]]:
+    """Return only explicitly emitted SuperPlanner SFC cells.
+
+    Cells are never reconstructed from an optimized trajectory: the plotted
+    polygon must originate in the native planner receipt, otherwise the
+    visualisation intentionally stays empty.
+    """
+    raw = diagnostics.get("sfc_cells", None)
+    if not isinstance(raw, (list, tuple)):
+        return []
+    cells: list[dict[str, np.ndarray]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            vertices = np.asarray(item.get("vertices_xy_m", item.get("vertices", [])), dtype=float)
+            halfspaces = np.asarray(item.get("halfspaces", []), dtype=float)
+        except (TypeError, ValueError):
+            continue
+        if vertices.ndim != 2 or vertices.shape[1] < 2 or len(vertices) < 3:
+            continue
+        if not np.all(np.isfinite(vertices[:, :2])):
+            continue
+        if halfspaces.ndim != 2 or halfspaces.shape[1] < 3 or not np.all(np.isfinite(halfspaces[:, :3])):
+            continue
+        cells.append({"vertices": vertices[:, :2], "halfspaces": halfspaces[:, :3]})
+    return cells
+
+
+def _draw_sfc_cells(ax: Any, cells: list[dict[str, np.ndarray]], *, alpha: float = 0.18) -> None:
+    """Draw native SFC convex cells and their boundaries, once per panel."""
+    for index, cell in enumerate(cells):
+        patch = plt.matplotlib.patches.Polygon(
+            cell["vertices"], closed=True, facecolor="#0D9488", edgecolor="#047857",
+            linewidth=1.0, alpha=alpha, zorder=2,
+            label="SuperPlanner SFC" if index == 0 else "_nolegend_",
+        )
+        ax.add_patch(patch)
+
+
+def _sfc_margin_at_point(point_xy: np.ndarray, cells: list[dict[str, np.ndarray]]) -> object:
+    """Union-cell signed face margin in metres; blank when no native SFC exists."""
+    point = np.asarray(point_xy, dtype=float).reshape(-1)
+    if len(point) < 2 or not np.all(np.isfinite(point[:2])):
+        return ""
+    best = -math.inf
+    for cell in cells:
+        halfspaces = cell["halfspaces"]
+        # n_x*x + n_y*y + offset <= 0.  Normals are unit length in the
+        # serialized native representation, so this is a metric margin.
+        margins = -(halfspaces[:, :2] @ point[:2] + halfspaces[:, 2])
+        if len(margins):
+            best = max(best, float(np.min(margins)))
+    return _finite_or_blank(best) if math.isfinite(best) else ""
+
+
 def _obstacles_from_diagnostics(
     diagnostics: Mapping[str, Any],
 ) -> list[dict[str, object]]:
@@ -1067,6 +1193,9 @@ def _static_obstacle_rectangles(
     """Extract static rectangle obstacles from case auxiliary arrays."""
     raw = case.auxiliary_arrays.get("static_rectangles", None)
     if raw is None:
+        # Synthetic materialisation uses this explicit unit-bearing key.
+        raw = case.auxiliary_arrays.get("materialization_obstacle_rectangles_xyxy_m", None)
+    if raw is None:
         return []
     rectangles: list[dict[str, object]] = []
     arr = np.asarray(raw, dtype=float)
@@ -1104,6 +1233,8 @@ def render_static_case(
     metrics_path = prefix.with_name(prefix.name + "_metrics.json")
     path = _path(result)
     raw = case.auxiliary_arrays.get("raw_path_xyz")
+    sfc_cells = _sfc_cells_from_diagnostics(result.diagnostics)
+    static_rects = _static_obstacle_rectangles(case)
 
     figure, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
     _draw_map(ax, case)
@@ -1118,6 +1249,8 @@ def render_static_case(
         ax.plot(raw[:, 0], raw[:, 1], color="#7f7f7f", label="RAW")
     if len(path):
         ax.plot(path[:, 0], path[:, 1], color="#ff7f0e", linewidth=2, label="MINCO")
+    _draw_sfc_cells(ax, sfc_cells, alpha=0.20)
+    _draw_static_rectangles(ax, static_rects)
     ax.scatter(*case.start_position[:2], marker="s", color="green", label="start")
     if case.terminal_goal is not None:
         ax.scatter(*case.terminal_goal[:2], marker="*", s=120, color="purple", label="goal")
@@ -1153,7 +1286,85 @@ def render_static_case(
             linewidth=1.5,
         )
     )
-    ax.set_title(f"{case.case_uid} · {case.case_source} · {result.status}")
+    overview_points = [
+        case.guide_path_xyz[:, :2],
+        np.asarray(case.start_position[:2], dtype=float).reshape(1, 2),
+    ]
+    if len(path):
+        overview_points.append(path[:, :2])
+    if case.terminal_goal is not None:
+        overview_points.append(np.asarray(case.terminal_goal[:2], dtype=float).reshape(1, 2))
+    for rectangle in static_rects:
+        x0, y0, x1, y1 = rectangle["bounds_xy"]
+        overview_points.append(np.asarray([[x0, y0], [x1, y1]], dtype=float))
+    for cell in sfc_cells:
+        overview_points.append(cell["vertices"])
+    overview_all = np.concatenate(overview_points, axis=0)
+    overview_min = np.min(overview_all, axis=0)
+    overview_max = np.max(overview_all, axis=0)
+    overview_span = np.maximum(overview_max - overview_min, 1.0)
+    overview_margin = max(0.4, 0.08 * float(np.max(overview_span)))
+    overview_limits = (
+        float(overview_min[0] - overview_margin),
+        float(overview_max[0] + overview_margin),
+        float(overview_min[1] - overview_margin),
+        float(overview_max[1] + overview_margin),
+    )
+    arrow_length = 0.075 * max(
+        overview_limits[1] - overview_limits[0],
+        overview_limits[3] - overview_limits[2],
+    )
+    draw_heading_arrow(
+        ax, case.start_position[:2], case.start_yaw, color="#111827",
+        length_m=arrow_length, label="initial yaw",
+    )
+    if len(path) and len(result.samples) == len(path) and result.samples.shape[1] > 13:
+        current_yaw = float(result.samples[-1, 13])
+        if math.isfinite(current_yaw):
+            draw_heading_arrow(
+                ax, path[-1, :2], current_yaw, color="#1D4ED8",
+                length_m=arrow_length, label="final yaw",
+            )
+    if case.terminal_goal is not None:
+        goal_yaw = result.diagnostics.get("goal_yaw_rad")
+        try:
+            goal_yaw = float(goal_yaw)
+        except (TypeError, ValueError):
+            goal_yaw = math.nan
+        if math.isfinite(goal_yaw):
+            draw_heading_arrow(
+                ax, case.terminal_goal[:2], goal_yaw, color=GOAL_COLOR,
+                length_m=arrow_length, hollow=True, label="goal yaw",
+            )
+        else:
+            ax.annotate("goal yaw: N/A", xy=case.terminal_goal[:2], xytext=(5, -14),
+                        textcoords="offset points", color=GOAL_COLOR, fontsize=8)
+    failure_reason = str(
+        result.diagnostics.get("sfc_generation_reason")
+        or result.diagnostics.get("validation_failure_reason")
+        or result.diagnostics.get("failure_reason")
+        or "NONE"
+    )
+    ax.text(
+        0.02, 0.98,
+        "initial: v=(%.2f, %.2f) m/s; a=(%.2f, %.2f) m/s²; yaw=%.1f°\n"
+        "evidence: one-shot local MINCO preview (not full-route execution)\n"
+        "profile: %s | status: %s | SFC cells: %d | reason: %s" % (
+            case.start_velocity[0], case.start_velocity[1],
+            case.start_acceleration[0], case.start_acceleration[1],
+            math.degrees(case.start_yaw), case.constraint_profile,
+            result.status, len(sfc_cells), failure_reason,
+        ),
+        transform=ax.transAxes, ha="left", va="top", fontsize=7.2,
+        bbox={"facecolor": "white", "alpha": 0.88, "edgecolor": "#64748B"},
+        zorder=20,
+    )
+    ax.set_xlim(overview_limits[0], overview_limits[1])
+    ax.set_ylim(overview_limits[2], overview_limits[3])
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(
+        f"{case.case_uid} · local MINCO preview · {result.status}"
+    )
     ax.set_xlabel("world x (m)")
     ax.set_ylabel("world y (m)")
     ax.legend(loc="best", fontsize=8)
@@ -1220,6 +1431,7 @@ def render_static_case(
     total_frames = base_frames
 
     corridor_segments = _corridor_segments_from_diagnostics(result.diagnostics)
+    sfc_cells = _sfc_cells_from_diagnostics(result.diagnostics)
     obstacles = _obstacles_from_diagnostics(result.diagnostics)
     static_rects = _static_obstacle_rectangles(case)
 
@@ -1232,6 +1444,8 @@ def render_static_case(
         all_points.append(case.terminal_goal[:2].reshape(1, 2))
     for x0, y0, x1, y1, radius, _ in corridor_segments:
         all_points.append(np.array([[x0 - radius, y0 - radius], [x1 + radius, y1 + radius]]))
+    for cell in sfc_cells:
+        all_points.append(cell["vertices"])
     for obs in obstacles:
         r = float(obs["radius_m"])
         all_points.append(np.array([[float(obs["x_m"]) - r, float(obs["y_m"]) - r],
@@ -1261,7 +1475,8 @@ def render_static_case(
         progress_index = min(encoded_index, base_frames - 1)
         source_idx = int(frame_indices[progress_index])
 
-        fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=(6, 6.4))
+        fig.subplots_adjust(left=0.12, right=0.98, top=0.91, bottom=0.30)
         _draw_map(ax, case)
 
         # Guide path
@@ -1319,6 +1534,7 @@ def render_static_case(
         # Safe corridor capsules (only if real data exists)
         for segment in corridor_segments:
             _draw_capsule(ax, segment, alpha=0.14)
+        _draw_sfc_cells(ax, sfc_cells)
 
         # Obstacles
         _draw_obstacles(ax, obstacles)
@@ -1349,20 +1565,25 @@ def render_static_case(
             state_text = "state: N/A\n"
 
         clearance_val = _nearest_clearance(centre, detail)
+        sfc_margin = _sfc_margin_at_point(centre, sfc_cells)
 
         ax.text(
-            0.02, 0.98,
+            0.02, -0.055,
             f"{case.constraint_profile}\n"
-            f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s\n"
+                "mode: one-shot local MINCO preview (not full-route execution)\n"
+                f"time: {encoded_index * GIF_FRAME_DURATION_S:.2f}s\n"
             f"{state_text}"
             f"clearance: {clearance_val if clearance_val != '' else 'N/A'} m\n"
-            f"status: {result.status}",
+            f"SFC margin: {sfc_margin if sfc_margin != '' else 'N/A'} m\n"
+            f"status: {result.status}\n"
+            f"reason: {result.diagnostics.get('sfc_generation_reason') or result.diagnostics.get('validation_failure_reason') or result.diagnostics.get('failure_reason') or 'NONE'}",
             transform=ax.transAxes,
             ha="left", va="top",
             fontsize=7.5,
             bbox={"boxstyle": "round,pad=0.3", "facecolor": "white",
                   "alpha": 0.88, "edgecolor": "#6B7280"},
             zorder=20,
+            clip_on=False,
         )
 
         fig.canvas.draw()

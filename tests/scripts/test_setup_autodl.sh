@@ -47,6 +47,7 @@ printf 'conda %s\n' "$*" >>"$FAKE_CALLS"
 printf 'conda-envs-path %s\n' "${CONDA_ENVS_PATH:-unset}" >>"$FAKE_CALLS"
 printf 'conda-pkgs-dirs %s\n' "${CONDA_PKGS_DIRS:-unset}" >>"$FAKE_CALLS"
 printf 'pip-cache-dir %s\n' "${PIP_CACHE_DIR:-unset}" >>"$FAKE_CALLS"
+printf 'omni-kit-accept-eula %s\n' "${OMNI_KIT_ACCEPT_EULA:-unset}" >>"$FAKE_CALLS"
 if [[ "${1:-}" == "env" && "${2:-}" == "list" && "${3:-}" == "--json" ]]; then
   printf '{"envs":["/fake/base"'
   if [[ ",${FAKE_EXISTING_ENVS:-}," == *,navdp,* ]]; then printf ',"/fake/envs/navdp"'; fi
@@ -130,17 +131,74 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'timeout %s\n' "$*" >>"$FAKE_CALLS"
+if [[ "$*" == *"vulkaninfo --summary"* ]]; then
+  printf 'vulkaninfo icd=%s\n' "${VK_ICD_FILENAMES:-unset}" >>"$FAKE_CALLS"
+  case "${FAKE_VULKAN_MODE:-healthy}" in
+    healthy)
+      printf 'deviceType = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\n'
+      printf 'deviceName = NVIDIA RTX 4090\n'
+      printf 'driverName = NVIDIA\n'
+      ;;
+    glx-fails-egl-works)
+      if [[ -n "${VK_ICD_FILENAMES:-}" &&
+            -f "$VK_ICD_FILENAMES" &&
+            "$(grep -c 'libEGL_nvidia.so.0' "$VK_ICD_FILENAMES" || true)" == 1 ]]; then
+        printf 'deviceType = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\n'
+        printf 'deviceName = NVIDIA RTX 4090\n'
+        printf 'driverName = NVIDIA\n'
+      else
+        printf "ERROR: Could not get 'vkCreateInstance' for ICD libGLX_nvidia.so.0\n"
+        printf 'deviceType = PHYSICAL_DEVICE_TYPE_CPU\n'
+        printf 'deviceName = llvmpipe\n'
+      fi
+      ;;
+    repair-still-llvmpipe)
+      printf 'deviceType = PHYSICAL_DEVICE_TYPE_CPU\n'
+      printf 'deviceName = llvmpipe\n'
+      ;;
+    *)
+      printf 'unknown FAKE_VULKAN_MODE=%s\n' "$FAKE_VULKAN_MODE" >&2
+      exit 2
+      ;;
+  esac
+fi
 exit 0
 EOF
 
-  chmod +x "$bin_dir/conda" "$bin_dir/git" "$bin_dir/nvidia-smi" "$bin_dir/timeout" "$bin_dir/df" "$bin_dir/sleep"
+  cat >"$bin_dir/vulkaninfo" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  cat >"$bin_dir/ldconfig" <<'EOF'
+#!/usr/bin/env bash
+printf 'libGLU.so.1\nlibSM.so.6\nlibXt.so.6\n'
+if [[ "${FAKE_EGL_AVAILABLE:-1}" == 1 ]]; then
+  printf 'libEGL_nvidia.so.0 (libc6,x86-64) => %s\n' "$FAKE_EGL_LIBRARY_PATH"
+fi
+EOF
+
+  cat >"$bin_dir/apt-get" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'apt-get %s\n' "$*" >>"$FAKE_CALLS"
+if [[ " $* " == *" libeigen3-dev "* ]]; then
+  mkdir -p "$NAVDP_EIGEN_INCLUDE_DIR/Eigen"
+  : >"$NAVDP_EIGEN_INCLUDE_DIR/Eigen/Core"
+fi
+EOF
+
+  chmod +x "$bin_dir/conda" "$bin_dir/git" "$bin_dir/nvidia-smi" "$bin_dir/timeout" "$bin_dir/vulkaninfo" "$bin_dir/ldconfig" "$bin_dir/apt-get" "$bin_dir/df" "$bin_dir/sleep"
 }
 
 run_script() {
   local case_dir="$1"
   shift
-  mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/data"
+  mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/data" "$case_dir/lib" \
+    "$case_dir/system/include/eigen3/Eigen"
   : >"$case_dir/calls"
+  : >"$case_dir/lib/libEGL_nvidia.so.0"
+  : >"$case_dir/system/include/eigen3/Eigen/Core"
   make_fake_tools "$case_dir/bin"
   env \
     PATH="$case_dir/bin:/usr/bin:/bin" \
@@ -150,6 +208,9 @@ run_script() {
     AUTODL_EXPORT_DIR="$case_dir/export" \
     AUTODL_WORK_DIR="$case_dir/data" \
     FAKE_DATA_DISK="$case_dir/data" \
+    FAKE_EGL_LIBRARY_PATH="$case_dir/lib/libEGL_nvidia.so.0" \
+    NAVDP_HEADLESS_VULKAN_ICD_PATH="$case_dir/etc/vulkan/icd.d/navdp_nvidia_headless_icd.json" \
+    NAVDP_EIGEN_INCLUDE_DIR="$case_dir/system/include/eigen3" \
     "$@"
 }
 
@@ -160,6 +221,7 @@ mkdir -p "$help_dir"
 run_script "$help_dir" bash "$SCRIPT" --help >"$help_dir/out" 2>&1
 assert_contains "$help_dir/out" "Usage:"
 assert_contains "$help_dir/out" "--check-only"
+assert_contains "$help_dir/out" "--accept-isaac-eula"
 
 invalid_dir="$TEST_TMP/invalid"
 mkdir -p "$invalid_dir"
@@ -175,6 +237,72 @@ assert_contains "$check_dir/out" "Preflight checks passed"
 assert_contains "$check_dir/calls" "df -Pk $check_dir/data"
 assert_not_contains "$check_dir/calls" "env create"
 assert_not_contains "$check_dir/calls" "pip install"
+[[ ! -e "$check_dir/etc/vulkan/icd.d/navdp_nvidia_headless_icd.json" ]] || \
+  fail "healthy Vulkan preflight must not create a replacement ICD"
+
+headless_check_dir="$TEST_TMP/headless-check"
+mkdir -p "$headless_check_dir"
+if ! run_script "$headless_check_dir" \
+  FAKE_VULKAN_MODE=glx-fails-egl-works \
+  bash "$SCRIPT" --check-only >"$headless_check_dir/out" 2>&1; then
+  sed -n '1,240p' "$headless_check_dir/out" >&2
+  fail "AutoDL headless EGL repair should be discoverable in --check-only mode"
+fi
+assert_contains "$headless_check_dir/out" "AutoDL headless NVIDIA Vulkan repair is available"
+assert_contains "$headless_check_dir/out" "Preflight checks passed"
+[[ ! -e "$headless_check_dir/etc/vulkan/icd.d/navdp_nvidia_headless_icd.json" ]] || \
+  fail "--check-only must not persist the generated EGL ICD"
+
+headless_repair_dir="$TEST_TMP/headless-repair"
+mkdir -p "$headless_repair_dir"
+run_script "$headless_repair_dir" \
+  FAKE_VULKAN_MODE=glx-fails-egl-works \
+  ISAACLAB_DIR="$headless_repair_dir/IsaacLab" \
+  bash "$SCRIPT" --skip-verify >"$headless_repair_dir/out" 2>&1
+headless_icd="$headless_repair_dir/etc/vulkan/icd.d/navdp_nvidia_headless_icd.json"
+[[ -f "$headless_icd" ]] || fail "normal setup must persist the generated EGL ICD"
+assert_contains "$headless_icd" '"library_path": "'"$headless_repair_dir/lib/libEGL_nvidia.so.0"'"'
+assert_contains "$headless_repair_dir/out" "Configured AutoDL headless NVIDIA Vulkan ICD"
+assert_contains "$headless_repair_dir/calls" "vulkaninfo icd=$headless_icd"
+first_icd_hash="$(sha256sum "$headless_icd" | awk '{print $1}')"
+run_script "$headless_repair_dir" \
+  FAKE_VULKAN_MODE=glx-fails-egl-works \
+  ISAACLAB_DIR="$headless_repair_dir/IsaacLab" \
+  bash "$SCRIPT" --skip-verify >"$headless_repair_dir/second-out" 2>&1
+second_icd_hash="$(sha256sum "$headless_icd" | awk '{print $1}')"
+[[ "$first_icd_hash" == "$second_icd_hash" ]] || \
+  fail "repeated setup must leave the generated EGL ICD unchanged"
+
+missing_egl_dir="$TEST_TMP/missing-egl"
+mkdir -p "$missing_egl_dir"
+if run_script "$missing_egl_dir" \
+  FAKE_VULKAN_MODE=glx-fails-egl-works \
+  FAKE_EGL_AVAILABLE=0 \
+  bash "$SCRIPT" --check-only >"$missing_egl_dir/out" 2>&1; then
+  fail "Vulkan repair without libEGL_nvidia.so.0 must fail closed"
+fi
+assert_contains "$missing_egl_dir/out" "libEGL_nvidia.so.0 was not found"
+
+failed_repair_dir="$TEST_TMP/failed-repair"
+mkdir -p "$failed_repair_dir"
+if run_script "$failed_repair_dir" \
+  FAKE_VULKAN_MODE=repair-still-llvmpipe \
+  bash "$SCRIPT" --check-only >"$failed_repair_dir/out" 2>&1; then
+  fail "Vulkan repair that still exposes llvmpipe must fail closed"
+fi
+assert_contains "$failed_repair_dir/out" "EGL ICD validation failed"
+
+eigen_install_dir="$TEST_TMP/eigen-install"
+mkdir -p "$eigen_install_dir"
+missing_eigen_include="$eigen_install_dir/missing/include/eigen3"
+run_script "$eigen_install_dir" \
+  NAVDP_EIGEN_INCLUDE_DIR="$missing_eigen_include" \
+  ISAACLAB_DIR="$eigen_install_dir/IsaacLab" \
+  bash "$SCRIPT" --skip-verify >"$eigen_install_dir/out" 2>&1
+assert_contains "$eigen_install_dir/calls" "apt-get install -y libeigen3-dev"
+[[ -f "$missing_eigen_include/Eigen/Core" ]] || \
+  fail "native dependency installation must provide the Eigen/Core header"
+assert_contains "$eigen_install_dir/out" "Installing missing native build dependencies: libeigen3-dev"
 
 autodl_disk_dir="$TEST_TMP/autodl-disk"
 mkdir -p "$autodl_disk_dir"
@@ -200,7 +328,7 @@ mkdir -p "$full_dir"
 run_script "$full_dir" \
   ISAACLAB_DIR="$full_dir/IsaacLab" \
   FAKE_CAPTURED_REQUIREMENTS="$full_dir/benchmark-requirements" \
-  bash "$SCRIPT" >"$full_dir/out" 2>&1
+  bash "$SCRIPT" --accept-isaac-eula >"$full_dir/out" 2>&1
 assert_contains "$full_dir/calls" "env create -n navdp"
 assert_contains "$full_dir/calls" "env create -n isaaclab"
 assert_contains "$full_dir/calls" "conda run --no-capture-output -n navdp python -m pip install"
@@ -208,6 +336,7 @@ assert_contains "$full_dir/calls" "conda run --no-capture-output -n isaaclab pyt
 assert_contains "$full_dir/calls" "conda-envs-path $full_dir/data/conda/envs"
 assert_contains "$full_dir/calls" "conda-pkgs-dirs $full_dir/data/conda/pkgs"
 assert_contains "$full_dir/calls" "pip-cache-dir $full_dir/data/pip-cache"
+assert_contains "$full_dir/calls" "omni-kit-accept-eula YES"
 assert_contains "$full_dir/calls" "isaacsim==4.2.0.2"
 assert_contains "$full_dir/calls" "isaacsim-extscache-physics==4.2.0.2"
 assert_contains "$full_dir/calls" "checkout --detach v1.2.0"
@@ -218,9 +347,10 @@ assert_not_contains "$full_dir/benchmark-requirements" "rsl-rl-lib=="
 assert_not_contains "$full_dir/benchmark-requirements" "triton=="
 assert_not_contains "$full_dir/benchmark-requirements" "warp-lang=="
 assert_not_contains "$full_dir/benchmark-requirements" "packaging=="
-assert_not_contains "$full_dir/benchmark-requirements" "s3transfer=="
+assert_contains "$full_dir/benchmark-requirements" "s3transfer==0.6.1"
 assert_contains "$full_dir/calls" "python -m pip install torch==2.4.0 triton==3.0.0"
-assert_contains "$full_dir/calls" "python -m pip install packaging>=24.0 s3transfer>=0.19.0,<0.20.0"
+assert_contains "$full_dir/calls" "python -m pip install rsl-rl-lib==2.3.1"
+assert_contains "$full_dir/calls" "python -m pip install packaging>=24.0 boto3==1.26.76 botocore==1.29.76 s3transfer==0.6.1"
 assert_contains "$full_dir/calls" "python -m pip check"
 assert_contains "$full_dir/calls" "pip freeze"
 assert_contains "$full_dir/calls" "timeout"
@@ -303,7 +433,7 @@ run_script "$custom_dir" \
   bash "$SCRIPT" --skip-verify >"$custom_dir/out" 2>&1
 assert_contains "$custom_dir/calls" "env create -n model"
 assert_contains "$custom_dir/calls" "env create -n sim"
-assert_not_contains "$custom_dir/calls" "timeout"
+assert_not_contains "$custom_dir/calls" "isaaclab.sh -p"
 
 reuse_dir="$TEST_TMP/reuse"
 mkdir -p "$reuse_dir/IsaacLab/.git"

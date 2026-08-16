@@ -67,10 +67,14 @@ public:
     double max_jerk,
     double wheel_radius,
     double wheel_base,
-    double max_wheel_speed)
+    double max_wheel_speed,
+    double sfc_bound_distance,
+    double sfc_seed_line_max_length,
+    double sfc_min_overlap_depth)
   {
     if (constraint_profile != "legacy" &&
-      constraint_profile != "safe_corridor_v1")
+      constraint_profile != "safe_corridor_v1" &&
+      constraint_profile != "superplanner_sfc_v1")
     {
       throw std::invalid_argument("unsupported constraint_profile");
     }
@@ -79,6 +83,9 @@ public:
     config_.corridor_max_radius = corridor_max_radius;
     config_.corridor_min_radius = corridor_min_radius;
     config_.corridor_sample_step = corridor_sample_step;
+    config_.sfc_bound_distance = sfc_bound_distance;
+    config_.sfc_seed_line_max_length = sfc_seed_line_max_length;
+    config_.sfc_min_overlap_depth = sfc_min_overlap_depth;
     config_.adaptive_max_spatial_step = adaptive_max_spatial_step;
     config_.adaptive_near_clearance = adaptive_near_clearance;
     config_.adaptive_max_depth = adaptive_max_depth;
@@ -117,7 +124,8 @@ public:
     map_ = std::make_shared<minco_processor::StaticSimEsdfMap2D>();
     map_->setMap(distance, free, origin.x(), origin.y(), resolution);
     map_->setAnalyticGradient(
-      config_.constraint_profile == "safe_corridor_v1");
+      config_.constraint_profile == "safe_corridor_v1" ||
+      config_.constraint_profile == "superplanner_sfc_v1");
     pipeline_.setMap(map_);
   }
 
@@ -297,6 +305,54 @@ private:
       corridor_segments(i, 7) = segment.min_clearance;
     }
     out["corridor_segments"] = corridor_segments;
+    out["sfc_generation_reason"] = result.sfc_generation_reason;
+    out["sfc_bound_distance"] = config_.sfc_bound_distance;
+    out["sfc_seed_line_max_length"] = config_.sfc_seed_line_max_length;
+    out["sfc_min_overlap_depth"] = config_.sfc_min_overlap_depth;
+    out["sfc_obstacle_sample_count"] = result.sfc_obstacle_sample_count;
+    out["sfc_repair_cell_count"] = result.sfc_repair_cell_count;
+    out["sfc_min_overlap"] = result.sfc_min_overlap;
+    out["sfc_min_margin"] = result.sfc_min_margin;
+    py::list sfc_cells;
+    for (const auto & cell : result.sfc_cells) {
+      py::dict item;
+      item["cell_index"] = cell.cell_index;
+      item["guide_start_index"] = cell.guide_start_index;
+      item["guide_end_index"] = cell.guide_end_index;
+      item["seed_start"] = cell.seed_start;
+      item["seed_end"] = cell.seed_end;
+      item["clearance_radius"] = cell.clearance_radius;
+      item["overlap_with_previous"] = cell.overlap_with_previous;
+      item["overlap_witness"] = cell.overlap_witness;
+      item["overlap_depth"] = cell.overlap_depth;
+      Eigen::MatrixXd halfspaces(static_cast<int>(cell.halfspaces.size()), 3);
+      for (int i = 0; i < halfspaces.rows(); ++i) {
+        halfspaces(i, 0) = cell.halfspaces[static_cast<size_t>(i)].normal.x();
+        halfspaces(i, 1) = cell.halfspaces[static_cast<size_t>(i)].normal.y();
+        halfspaces(i, 2) = cell.halfspaces[static_cast<size_t>(i)].offset;
+      }
+      item["halfspaces"] = halfspaces;
+      Eigen::MatrixXd vertices(static_cast<int>(cell.vertices.size()), 2);
+      for (int i = 0; i < vertices.rows(); ++i) {
+        vertices.row(i) = cell.vertices[static_cast<size_t>(i)].transpose();
+      }
+      item["vertices"] = vertices;
+      Eigen::MatrixXd overlap_polygon(static_cast<int>(cell.overlap_polygon.size()), 2);
+      for (int i = 0; i < overlap_polygon.rows(); ++i) {
+        overlap_polygon.row(i) = cell.overlap_polygon[static_cast<size_t>(i)].transpose();
+      }
+      item["overlap_polygon"] = overlap_polygon;
+      sfc_cells.append(item);
+    }
+    out["sfc_cells"] = sfc_cells;
+    py::list sfc_piece_bindings;
+    for (const auto & binding : result.sfc_piece_bindings) {
+      py::dict item;
+      item["piece_index"] = binding.piece_index;
+      item["cell_index"] = binding.cell_index;
+      sfc_piece_bindings.append(item);
+    }
+    out["sfc_piece_bindings"] = sfc_piece_bindings;
     out["adaptive_validation_sample_count"] = result.adaptive_validation_sample_count;
     out["adaptive_validation_subdivision_count"] =
       result.adaptive_validation_subdivision_count;
@@ -358,7 +414,10 @@ PYBIND11_MODULE(_minco_processor, m)
       py::arg("max_jerk"),
       py::arg("wheel_radius"),
       py::arg("wheel_base"),
-      py::arg("max_wheel_speed"))
+      py::arg("max_wheel_speed"),
+      py::arg("sfc_bound_distance") = 0.8,
+      py::arg("sfc_seed_line_max_length") = 2.0,
+      py::arg("sfc_min_overlap_depth") = 0.02)
     .def("configure_validation", &MincoProcessorPy::configureValidation,
       py::arg("validation_dynamic_scale"),
       py::arg("enable_strict_validation"),

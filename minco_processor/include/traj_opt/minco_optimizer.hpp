@@ -2,6 +2,8 @@
 #define MINCO_PLANNER__MINCO_OPTIMIZER_HPP_
 
 #include <Eigen/Core>
+
+#include <numeric>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -12,6 +14,7 @@
 #include "data_structure/base/trajectory.h"
 #include "minco_processor/esdf_map.hpp"
 #include "minco_processor/guide_corridor.hpp"
+#include "minco_processor/sfc_corridor.hpp"
 #include "traj_opt/minco.h"
 #include "utils/header/color_text.hpp"
 #include "utils/header/eigen_alias.hpp"
@@ -89,6 +92,33 @@ public:
     opt_vars_.guide_path = guide;
     opt_vars_.guide_corridor_radius = radius;
   }
+  bool setSuperplannerSfc(
+    const std::vector<minco_processor::SfcCell2D> & cells,
+    const std::vector<int> & piece_to_cell)
+  {
+    if (cells.empty()) {
+      opt_vars_.sfc_cells.clear();
+      opt_vars_.sfc_piece_to_cell.clear();
+      return piece_to_cell.empty();
+    }
+    if (piece_to_cell.size() != cells.size()) {
+      return false;
+    }
+    for (const int cell_index : piece_to_cell) {
+      if (cell_index < 0 || cell_index >= static_cast<int>(cells.size())) {
+        return false;
+      }
+    }
+    opt_vars_.sfc_cells = cells;
+    opt_vars_.sfc_piece_to_cell = piece_to_cell;
+    return true;
+  }
+  bool setSuperplannerSfc(const std::vector<minco_processor::SfcCell2D> & cells)
+  {
+    std::vector<int> identity(cells.size());
+    std::iota(identity.begin(), identity.end(), 0);
+    return setSuperplannerSfc(cells, identity);
+  }
 
   int lastIterationCount() const { return last_iteration_count_; }
   int lastReturnCode() const { return last_return_code_; }
@@ -110,6 +140,14 @@ public:
     double minimum_duration,
     double weight,
     double * duration_gradient);
+
+  static double evaluateSfcCellTerm(
+    const Eigen::Vector3d & point,
+    const minco_processor::SfcCell2D & cell,
+    double smooth_eps,
+    double weight,
+    Eigen::Vector3d * gradient,
+    double * max_violation);
 
   // --- Trajectory Optimization ---
   double optimize(const std::vector<Eigen::Vector3d> & waypoints,
@@ -144,6 +182,8 @@ private:
     Mat3Df waypoint_attractor;
     std::vector<Eigen::Vector3d> guide_path;
     double guide_corridor_radius{0.0};
+    std::vector<minco_processor::SfcCell2D> sfc_cells;
+    std::vector<int> sfc_piece_to_cell;
 
     // Optimization cache for warm-start initialization from previous solution.
     VecDf init_ts;
@@ -185,6 +225,8 @@ private:
     const Mat3Df & waypoint_attractor,
     const std::vector<Eigen::Vector3d> & guide_path,
     double guide_corridor_radius,
+    const std::vector<minco_processor::SfcCell2D> & sfc_cells,
+    const std::vector<int> & sfc_piece_to_cell,
     const std::shared_ptr<minco_processor::EsdfMapInterface> & map,
     const double & smooth_eps,
     const int & integral_res,

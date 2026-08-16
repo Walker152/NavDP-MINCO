@@ -210,16 +210,23 @@ def _paired_success(rows: Sequence[Mapping[str, object]]) -> list[dict[str, obje
     output = []
     for method in ("minco-cold", "minco-hot"):
         if baseline and values.get(method):
+            statistics = paired_bootstrap_ci(
+                baseline,
+                values[method],
+                seed=BOOTSTRAP_SEED,
+                iterations=BOOTSTRAP_ITERATIONS,
+            )
+            # An empty exact join is missing paired evidence, not a numerical
+            # zero or a JSON NaN.  Keep the denominator explicitly as zero.
+            for field in ("estimate", "ci_low", "ci_high"):
+                value = statistics.get(field)
+                if isinstance(value, (int, float)) and not math.isfinite(float(value)):
+                    statistics[field] = None
             output.append(
                 {
                     "baseline": "raw",
                     "method": method,
-                    **paired_bootstrap_ci(
-                        baseline,
-                        values[method],
-                        seed=BOOTSTRAP_SEED,
-                        iterations=BOOTSTRAP_ITERATIONS,
-                    ),
+                    **statistics,
                 }
             )
     return output
@@ -509,13 +516,13 @@ def _static_dynamic_figure(
 ) -> dict[str, object] | None:
     static_lookup: dict[str, Mapping[str, object]] = {}
     for row in static_rows:
-        if str(row.get("profile", "")) != "safe_corridor_v1":
+        if str(row.get("profile", "")) != "superplanner_sfc_v1":
             continue
         uid = str(row.get("case_uid", "")).strip()
         if not uid:
             continue
         if uid in static_lookup:
-            raise ValueError(f"duplicate safe static case for dynamic join: {uid}")
+            raise ValueError(f"duplicate SuperPlanner SFC static case for dynamic join: {uid}")
         static_lookup[uid] = row
     backing = []
     for row in episode_rows:

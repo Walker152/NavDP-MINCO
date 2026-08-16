@@ -172,6 +172,10 @@ bool YawTrajOpt::optimize(const Eigen::Vector4d & istate_in,
     return false;
   }
   }
+  // The optimizer's construction feasibility allowance is intentionally
+  // broader than the execution validator below.  A constructed yaw profile
+  // still has to pass MincoPipeline::validateYawAndWheels() before it can be
+  // returned as a successful proposal.
   constexpr double kYawRateOverrunAllowance = 0.8;
   const double max_yaw_rate = yaw_traj.getMaxVelRate();
   if (!std::isfinite(max_yaw_rate) ||

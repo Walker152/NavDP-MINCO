@@ -30,6 +30,7 @@ Options:
   --kill-stale             Compatibility flag; stale cleanup is enabled by default
   --skip-smoke             Skip the Isaac headless GPU smoke test
   --skip-dry-run           Skip experiment command generation and validation
+  --accept-isaac-eula      Record explicit NVIDIA Omniverse EULA acceptance
   --config PATH            Suite config (default: configs/experiments/full_suite.json)
   --report-dir PATH        Base report directory
   --smoke-timeout SECONDS  Isaac smoke timeout (default: 180)
@@ -82,6 +83,10 @@ while (($#)); do
       ;;
     --skip-dry-run)
       SKIP_DRY_RUN=1
+      shift
+      ;;
+    --accept-isaac-eula)
+      export OMNI_KIT_ACCEPT_EULA=YES
       shift
       ;;
     --config)
@@ -145,6 +150,14 @@ else
 fi
 NAVDP_RESULTS_ROOT="${NAVDP_RESULTS_ROOT:-}"
 NAVDP_STALE_MIN_AGE_SECONDS="${NAVDP_STALE_MIN_AGE_SECONDS:-60}"
+
+# Preserve a previously explicit EULA opt-in without sourcing arbitrary shell
+# code from the managed environment file.
+if [[ "${OMNI_KIT_ACCEPT_EULA:-}" != YES &&
+      -f "$NAVDP_RUNTIME_ENV_FILE" && ! -L "$NAVDP_RUNTIME_ENV_FILE" ]] &&
+   grep -Fxq 'export OMNI_KIT_ACCEPT_EULA=YES' "$NAVDP_RUNTIME_ENV_FILE"; then
+  export OMNI_KIT_ACCEPT_EULA=YES
+fi
 
 if [[ -d "$ISAACLAB_DIR" ]]; then
   ISAACLAB_DIR="$(cd "$ISAACLAB_DIR" && pwd -P)"
@@ -1221,6 +1234,9 @@ write_runtime_environment() {
     printf 'export AUTODL_WORK_DIR=%q\n' "$AUTODL_WORK_DIR"
     printf 'export ISAACLAB_DIR=%q\n' "$ISAACLAB_DIR"
     printf 'export NAVDP_REPO_ROOT=%q\n' "$REPO_ROOT"
+    if [[ "${OMNI_KIT_ACCEPT_EULA:-}" == YES ]]; then
+      printf 'export OMNI_KIT_ACCEPT_EULA=YES\n'
+    fi
   } >"$temp"; then
     command rm -f "$temp"
     return 1
@@ -1580,6 +1596,7 @@ check_torch_cuda() {
   if "$CONDA_BIN" run --no-capture-output -n "$ISAACLAB_ENV_NAME" python - \
       >"$REPORT_DIR/torch-cuda.txt" 2>&1 <<'PY'
 import torch
+import rsl_rl
 
 if not torch.cuda.is_available():
     raise RuntimeError("torch.cuda.is_available() is false")
@@ -1592,7 +1609,7 @@ x = torch.ones(1, device="cuda:0")
 if float(x.item()) != 1.0:
     raise RuntimeError("CUDA tensor result is incorrect")
 torch.cuda.synchronize()
-print("CUDA_OK", name)
+print("CUDA_OK", name, "RSL_RL_OK")
 PY
   then
     pass "PyTorch CUDA validation passed"
@@ -1622,7 +1639,7 @@ PY
 check_runtime_contract() {
   local eval_file="$REPO_ROOT/run_scripts/eval_pointgoal_wheeled.py"
   local backend_file="$REPO_ROOT/experiments/simulators/isaac_navdp_backend.py"
-  local token cli_token flag ok=1 help_output
+  local token cli_token ok=1
   local -a tokens=(
     minco_start_validation_exemption_radius
     minco_penalty_weight_attractor
@@ -1630,6 +1647,7 @@ check_runtime_contract() {
     raw_controller
     experiment_variant
   )
+  printf '[CHECK] Runtime source and eval parser contracts\n'
   {
     printf 'Runtime source hashes:\n'
     sha256sum "$eval_file"
@@ -1675,6 +1693,30 @@ launcher_lines = [
     and isinstance(node.func, ast.Name)
     and node.func.id == "AppLauncher"
 ]
+eval_flags = {
+    argument.value
+    for node in ast.walk(eval_tree)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "add_argument"
+    for argument in node.args
+    if isinstance(argument, ast.Constant)
+    and isinstance(argument.value, str)
+    and argument.value.startswith("--")
+}
+required_eval_flags = {
+    "--minco_start_validation_exemption_radius",
+    "--minco_penalty_weight_attractor",
+    "--navdp-seeds",
+    "--raw-controller",
+    "--experiment-variant",
+}
+missing_eval_flags = sorted(required_eval_flags - eval_flags)
+if missing_eval_flags:
+    raise SystemExit(
+        "MISSING eval parser flags: " + ", ".join(missing_eval_flags)
+    )
+print("EVAL_FLAGS_OK")
 if (
     not parse_lines
     or not launcher_lines
@@ -1749,25 +1791,6 @@ PY
     ok=0
   fi
 
-  if help_output="$("$CONDA_BIN" run --no-capture-output -n "$ISAACLAB_ENV_NAME" \
-      bash "$ISAACLAB_DIR/isaaclab.sh" -p "$eval_file" --help 2>&1)"; then
-    printf '\nEval help:\n%s\n' "$help_output" >>"$REPORT_DIR/runtime-contract.txt"
-    for flag in \
-      --minco_start_validation_exemption_radius \
-      --minco_penalty_weight_attractor \
-      --navdp-seeds \
-      --raw-controller \
-      --experiment-variant; do
-      if ! grep -Fq -- "$flag" <<<"$help_output"; then
-        printf 'MISSING help %s\n' "$flag" >>"$REPORT_DIR/runtime-contract.txt"
-        ok=0
-      fi
-    done
-  else
-    printf '\nEval help failed:\n%s\n' "$help_output" >>"$REPORT_DIR/runtime-contract.txt"
-    ok=0
-  fi
-
   if ((ok)); then
     pass "Runtime source and eval parser contracts passed"
   else
@@ -1784,6 +1807,11 @@ smoke_log_has_fatal() {
     "$REPORT_DIR/isaac-smoke.log"
 }
 
+smoke_log_has_eula_prompt() {
+  grep -Eiq 'Do you accept the EULA|OMNI_KIT_ACCEPT_EULA' \
+    "$REPORT_DIR/isaac-smoke.log"
+}
+
 smoke_log_has_ready_gpu() {
   grep -Eiq 'app ready|Simulation App Startup Complete' \
     "$REPORT_DIR/isaac-smoke.log" &&
@@ -1792,6 +1820,10 @@ smoke_log_has_ready_gpu() {
 }
 
 classify_isaac_smoke() {
+  if smoke_log_has_eula_prompt; then
+    fail_check "Isaac smoke reported a fatal startup error: NVIDIA Omniverse EULA was not accepted"
+    return 1
+  fi
   if smoke_log_has_fatal; then
     fail_check "Isaac smoke reported a fatal GPU error"
     return 1
@@ -1822,7 +1854,7 @@ start_isaac_smoke() {
   local identity_file="$REPORT_DIR/isaac-smoke.identity"
   local reported_pid reported_pgid reported_sid extra attempt
   SMOKE_CLEANUP_REPORTED=0
-  setsid python3 - "$identity_file" "${command[@]}" \
+  setsid python3 - "$identity_file" "${command[@]}" </dev/null \
     >"$REPORT_DIR/isaac-smoke.log" 2>&1 <<'PY' &
 import os
 import sys
@@ -1871,6 +1903,13 @@ wait_for_smoke_result() {
   local started now
   started="$(date +%s)"
   while true; do
+    if smoke_log_has_eula_prompt; then
+      if ! stop_smoke_group; then
+        fail_check "Failed to clean up Isaac smoke process group"
+      fi
+      classify_isaac_smoke
+      return
+    fi
     if smoke_log_has_fatal; then
       if ! stop_smoke_group; then
         fail_check "Failed to clean up Isaac smoke process group"
@@ -1913,6 +1952,11 @@ wait_for_smoke_result() {
 }
 
 run_isaac_smoke() {
+  printf '[CHECK] Isaac headless GPU smoke (timeout: %ss)\n' "$SMOKE_TIMEOUT"
+  if [[ "${OMNI_KIT_ACCEPT_EULA:-}" != YES ]]; then
+    fail_check "Isaac smoke requires explicit NVIDIA Omniverse EULA acceptance; rerun with --accept-isaac-eula or OMNI_KIT_ACCEPT_EULA=YES"
+    return 1
+  fi
   if ! start_isaac_smoke; then
     return 1
   fi
@@ -2003,6 +2047,10 @@ single_value_options = {
     "--scenario-manifest",
     "--scene-path",
     "--scene-id",
+    "--dynamic-case-spec",
+    "--dynamic-case-hash",
+    "--dynamic-scene-sha256",
+    "--dynamic-calibration-sha256",
     "--warm-start-mode",
     "--seed",
     "--navdp-seed",
@@ -2013,6 +2061,7 @@ single_value_options = {
     "--use_robot_base_frame",
     "--port",
     "--raw-controller",
+    "--robot-calibration",
     "--minco_initial_top_k",
     "--minco_max_top_k",
     "--minco_candidate_time_budget_ms",
@@ -2029,6 +2078,19 @@ single_value_options = {
     "--minco_penalty_weight_attractor",
     "--minco_time_weight",
     "--minco_time_barrier_weight",
+    "--minco_constraint_profile",
+    "--minco_guide_corridor_weight",
+    "--minco_corridor_max_radius",
+    "--minco_corridor_min_radius",
+    "--minco_corridor_sample_step",
+    "--minco_sfc_bound_distance",
+    "--minco_sfc_seed_line_max_length",
+    "--minco_sfc_min_overlap_depth",
+    "--minco_adaptive_max_spatial_step",
+    "--minco_adaptive_near_clearance",
+    "--minco_adaptive_max_depth",
+    "--minco_adaptive_sample_budget",
+    "--minco_max_jerk",
     "--esdf_resolution",
     "--esdf_padding",
     "--esdf_cache_name",
@@ -2042,6 +2104,12 @@ single_value_options = {
     "--video-fps",
     "--video-crf",
     "--video-scale",
+    "--threshold-profile-id",
+    "--high-turn-curvature-p95",
+    "--high-turn-curvature-tv",
+    "--jump-position-rmse",
+    "--jump-tangent-rad",
+    "--planning-deadline-ms",
 }
 multi_value_options = {"--episode-uids", "--navdp-seeds"}
 flag_options = {
@@ -2112,19 +2180,13 @@ def validate_server_command(command, command_index):
             f"server command {command_index} has invalid python/navdp_server prefix",
         )
     else:
-        required_prefix = [
-            "conda",
-            "run",
-            "--no-capture-output",
-            "-n",
-            "navdp",
-            "python",
-        ]
+        required_prefix = ["run", "--no-capture-output", "-n", "navdp", "python"]
         require(
-            command[: len(required_prefix)] == required_prefix,
+            pathlib.Path(command[0]).name == "conda"
+            and command[1 : 1 + len(required_prefix)] == required_prefix,
             f"server command {command_index} has invalid conda/navdp prefix",
         )
-        cursor = len(required_prefix)
+        cursor = 1 + len(required_prefix)
         if cursor < len(command) and command[cursor] == "-u":
             cursor += 1
         require(
@@ -2164,16 +2226,10 @@ try:
             and all(isinstance(v, str) for v in server_command),
             f"server command {index} must be argv strings",
         )
-        required_eval_prefix = [
-            "conda",
-            "run",
-            "--no-capture-output",
-            "-n",
-            "isaaclab",
-            "bash",
-        ]
+        required_eval_prefix = ["run", "--no-capture-output", "-n", "isaaclab", "bash"]
         require(
-            command[: len(required_eval_prefix)] == required_eval_prefix,
+            pathlib.Path(command[0]).name == "conda"
+            and command[1 : 1 + len(required_eval_prefix)] == required_eval_prefix,
             f"command {index} has invalid conda/isaaclab prefix",
         )
         launcher_indexes = [
@@ -2187,7 +2243,7 @@ try:
         )
         launcher_index = launcher_indexes[0]
         require(
-            launcher_index == len(required_eval_prefix),
+            launcher_index == 1 + len(required_eval_prefix),
             f"command {index} has unexpected argv before isaaclab.sh",
         )
         require(

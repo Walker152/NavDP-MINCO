@@ -20,7 +20,27 @@ from experiments.visualizers.video_evidence import (
 )
 
 
+# The first three identifiers preserve historical generic paired-video output.
+# The latter three are the formal dynamic study panels and must remain in this
+# order: unmodified NavDP, MINCO without SFC, MINCO with native SFC.
 PANEL_ORDER = ("raw", "minco-cold", "minco-hot")
+FORMAL_DYNAMIC_PANEL_ORDER = (
+    "navdp_native",
+    "legacy",
+    "superplanner_sfc_v1",
+)
+LIVE_CURVE_FIELDS = (
+    ("actual_v_mps", "speed", (80, 210, 255)),
+    ("executed_clearance_m", "clearance", (80, 230, 120)),
+    ("time_aligned_position_error_m", "tracking", (255, 190, 70)),
+)
+
+
+def _panel_order_for_sources(sources: Mapping[str, "VideoSource"]) -> tuple[str, ...]:
+    formal_present = set(sources).intersection(FORMAL_DYNAMIC_PANEL_ORDER)
+    expected = FORMAL_DYNAMIC_PANEL_ORDER if formal_present else PANEL_ORDER
+    ordered = tuple(variant for variant in expected if variant in sources)
+    return ordered + tuple(sorted(set(sources) - set(expected)))
 
 
 @dataclass(frozen=True)
@@ -559,6 +579,7 @@ def _annotate_panel(
     source: VideoSource,
     episode_uid: str,
     output_time_s: float,
+    control_row: Mapping[str, str] | None = None,
 ) -> np.ndarray:
     annotated = panel.copy()
     terminal = source.terminal_status or "UNKNOWN"
@@ -572,6 +593,7 @@ def _annotate_panel(
     label = (
         f"{source.variant} {episode_uid} t={output_time_s:.2f}s "
         f"{terminal}@{terminal_time}"
+        + (" state=N/A" if control_row is None else "")
     )
     cv2.putText(
         annotated,
@@ -583,7 +605,120 @@ def _annotate_panel(
         1,
         cv2.LINE_AA,
     )
+    # The captured Isaac frame can contain a richer native overlay, but the
+    # comparison compositor must not make that a precondition.  Draw a small,
+    # panel-local box from the *same variant's* recorded control row so that a
+    # viewer can read state even after three videos are resized side-by-side.
+    if control_row is None:
+        # Preserve the source image below the compact title when no physical
+        # control trace exists.  The title explicitly marks the state as N/A;
+        # drawing an invented black dashboard would hide evidence instead.
+        return annotated
+    else:
+        def value(name: str, unit: str = "") -> str:
+            raw = _optional_control_value(control_row, name)
+            return "N/A" if raw == "" else f"{raw}{unit}"
+
+        yaw_value = _optional_control_value(control_row, "robot_yaw_rad")
+        if isinstance(yaw_value, (int, float)):
+            yaw_text = f"{float(yaw_value):.2f}rad/{math.degrees(float(yaw_value)):.1f}deg"
+        else:
+            yaw_text = "N/A"
+        lines = (
+            "xy=(%s,%s) yaw=%s" % (
+                value("robot_x_m"), value("robot_y_m"), yaw_text
+            ),
+            "v=%s w=%s | cmd=(%s,%s)" % (
+                value("actual_v_mps"), value("actual_w_radps"),
+                value("cmd_v_mps"), value("cmd_w_radps"),
+            ),
+            "clear=%s ctrl=%s plan=%s" % (
+                value("executed_clearance_m"),
+                str(control_row.get("control_state", "")).strip() or "N/A",
+                str(control_row.get("planning_state", "")).strip() or "N/A",
+            ),
+        )
+    line_height = max(10, int(round(annotated.shape[0] * 0.032)))
+    box_bottom = min(annotated.shape[0] - 1, 20 + line_height * len(lines) + 4)
+    cv2.rectangle(annotated, (0, 19), (annotated.shape[1] - 1, box_bottom), (0, 0, 0), -1)
+    for line_index, line in enumerate(lines):
+        cv2.putText(
+            annotated,
+            line,
+            (2, 20 + line_height * (line_index + 1)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            max(0.23, min(0.38, annotated.shape[1] / 1500.0)),
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
     return annotated
+
+
+def _live_curve_strip(
+    ordered: tuple[str, ...],
+    control_rows_by_variant: Mapping[str, tuple[dict[str, str], ...]],
+    control_times_by_variant: Mapping[str, np.ndarray],
+    *,
+    output_time_s: float,
+    output_duration_s: float,
+    panel_width: int,
+    height: int,
+) -> np.ndarray:
+    """Render recorded per-method speed/clearance/tracking histories."""
+    strip = np.full((height, panel_width * len(ordered), 3), 18, dtype=np.uint8)
+    row_height = max(18, height // len(LIVE_CURVE_FIELDS))
+    for panel_index, variant in enumerate(ordered):
+        x0 = panel_index * panel_width
+        x1 = x0 + panel_width - 1
+        rows = control_rows_by_variant.get(variant, ())
+        times = control_times_by_variant.get(variant, np.asarray([], dtype=np.float64))
+        for field_index, (field, label, colour) in enumerate(LIVE_CURVE_FIELDS):
+            y0 = field_index * row_height
+            y1 = min(height - 1, y0 + row_height - 1)
+            cv2.rectangle(strip, (x0, y0), (x1, y1), (32, 32, 32), 1)
+            cv2.putText(
+                strip, label, (x0 + 3, min(y1 - 2, y0 + 11)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.27, colour, 1, cv2.LINE_AA,
+            )
+            numeric = []
+            for row_index, row in enumerate(rows):
+                value = _optional_control_value(row, field)
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    numeric.append((float(times[row_index]), float(value)))
+            if not numeric:
+                cv2.putText(
+                    strip, "N/A", (max(x0 + 3, x1 - 28), min(y1 - 2, y0 + 11)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.27, (170, 170, 170), 1, cv2.LINE_AA,
+                )
+                continue
+            values = [value for _, value in numeric]
+            lower = min(0.0, min(values))
+            upper = max(values)
+            if upper - lower < 1e-9:
+                upper = lower + 1.0
+            points = []
+            for timestamp, value in numeric:
+                if timestamp > output_time_s + 1e-9:
+                    break
+                x = x0 + 2 + int(round(
+                    max(0.0, min(1.0, timestamp / max(1e-9, output_duration_s))) *
+                    max(1, panel_width - 5)
+                ))
+                normalized = (value - lower) / (upper - lower)
+                y = y1 - 3 - int(round(normalized * max(1, y1 - y0 - 15)))
+                points.append((x, y))
+            if len(points) >= 2:
+                cv2.polylines(
+                    strip, [np.asarray(points, dtype=np.int32)], False, colour, 1, cv2.LINE_AA,
+                )
+            elif points:
+                cv2.circle(strip, points[0], 1, colour, -1)
+        cv2.putText(
+            strip, variant, (x0 + 3, height - 3), cv2.FONT_HERSHEY_SIMPLEX,
+            0.27, (235, 235, 235), 1, cv2.LINE_AA,
+        )
+    return strip
 
 
 def render_paired_episode_video(
@@ -595,9 +730,7 @@ def render_paired_episode_video(
 ) -> PairedVideoReceipt:
     if len(sources) < 2:
         raise ValueError("paired video requires at least two variants")
-    ordered = tuple(variant for variant in PANEL_ORDER if variant in sources)
-    unsupported = tuple(sorted(set(sources) - set(PANEL_ORDER)))
-    ordered += unsupported
+    ordered = _panel_order_for_sources(sources)
 
     clocks = {
         variant: read_video_clock(source.path, source.receipt_path)
@@ -641,6 +774,15 @@ def render_paired_episode_video(
     }
     panel_height = max(frame.shape[0] for frame in first_frames.values())
     panel_width = max(frame.shape[1] for frame in first_frames.values())
+    curve_height = max(96, panel_height // 3)
+    control_rows_by_variant = {
+        variant: _load_control_rows(sources[variant], episode_uid)
+        for variant in ordered
+    }
+    control_times_by_variant = {
+        variant: _control_time_axis(control_rows_by_variant[variant])
+        for variant in ordered
+    }
 
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -664,22 +806,38 @@ def render_paired_episode_video(
                 )
                 frame = cursors[variant].frame_at(source_index)
                 panel = _normalize_panel(frame, panel_width, panel_height)
+                control_rows = control_rows_by_variant[variant]
+                control_row = None
+                if control_rows:
+                    control_index = int(
+                        np.argmin(
+                            np.abs(control_times_by_variant[variant] - output_time)
+                        )
+                    )
+                    control_row = control_rows[control_index]
                 panels.append(
                     _annotate_panel(
-                        panel, sources[variant], episode_uid, output_time
+                        panel, sources[variant], episode_uid, output_time,
+                        control_row,
                     )
                 )
-            writer.append_data(np.ascontiguousarray(np.concatenate(panels, axis=1)))
+            panel_row = np.concatenate(panels, axis=1)
+            curves = _live_curve_strip(
+                ordered,
+                control_rows_by_variant,
+                control_times_by_variant,
+                output_time_s=output_time,
+                output_duration_s=output_duration_s,
+                panel_width=panel_width,
+                height=curve_height,
+            )
+            writer.append_data(np.ascontiguousarray(np.concatenate((panel_row, curves), axis=0)))
     finally:
         writer.close()
         for cursor in cursors.values():
             cursor.close()
 
     evidence_path = _evidence_package_path(output_path)
-    control_rows_by_variant = {
-        variant: _load_control_rows(sources[variant], episode_uid)
-        for variant in ordered
-    }
     metric_variant = next(
         (variant for variant in ordered if control_rows_by_variant[variant]),
         None,
@@ -717,7 +875,12 @@ def render_paired_episode_video(
         output_fps=output_fps,
         control_rows_by_variant=control_rows_by_variant,
     )
-    missing_variants = [variant for variant in PANEL_ORDER if variant not in sources]
+    expected_variants = (
+        FORMAL_DYNAMIC_PANEL_ORDER
+        if set(sources).intersection(FORMAL_DYNAMIC_PANEL_ORDER)
+        else PANEL_ORDER
+    )
+    missing_variants = [variant for variant in expected_variants if variant not in sources]
     method_summary = "；".join(
         f"{variant}={clocks[variant].method}, 误差界≤{clocks[variant].error_bound_s:.6g}s"
         for variant in ordered
@@ -812,6 +975,14 @@ def render_paired_episode_video(
                 ),
                 "common_clock_domain": receipt.common_clock_domain,
                 "shorter_variants_end_behavior": "FREEZE_LAST_FRAME",
+                "per_panel_live_state_overlay": True,
+                "per_panel_live_curves": True,
+                "live_curve_fields": [field for field, _, _ in LIVE_CURVE_FIELDS],
+                "live_state_fields": [
+                    "x_m", "y_m", "yaw_rad", "speed_mps", "yaw_rate_rps",
+                    "command_linear_mps", "command_angular_rps", "clearance_m",
+                    "control_state", "planning_state",
+                ],
                 "video_size_bytes": output_path.stat().st_size,
                 "video_sha256": _sha256(output_path),
                 "evidence_package": evidence_path.name,

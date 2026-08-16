@@ -352,7 +352,15 @@ void MincoPipeline::setConfig(const Config & config)
   }
   config_.optimizer.magnitudeBounds << config_.optimizer.safe_dist, config_.optimizer.max_vel,
     config_.optimizer.max_acc;
-  const bool safe_corridor = config_.constraint_profile == "safe_corridor_v1";
+  SfcConfig2D sfc_config;
+  sfc_config.bound_distance = std::max(1e-3, config_.sfc_bound_distance);
+  sfc_config.seed_line_max_length = std::max(1e-3, config_.sfc_seed_line_max_length);
+  sfc_config.min_overlap_depth = std::max(0.0, config_.sfc_min_overlap_depth);
+  sfc_config.obstacle_sample_step = std::max(1e-3, config_.corridor_sample_step);
+  sfc_.setConfig(sfc_config);
+  const bool safe_corridor =
+    config_.constraint_profile == "safe_corridor_v1" ||
+    config_.constraint_profile == "superplanner_sfc_v1";
   if (safe_corridor) {
     if (config_.optimizer.penaltyWeights.size() < 5) {
       config_.optimizer.penaltyWeights.resize(6);
@@ -495,12 +503,60 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
       return finish();
     }
     optimizer_->setGuideCorridor(result.dense_path, corridor_.minRadius());
+    // A processor instance may switch profiles between planning calls.  Do not
+    // retain cells from a previous SuperPlanner SFC call when the historic
+    // capsule profile is requested.
+    optimizer_->setSuperplannerSfc({});
+  } else if (config_.constraint_profile == "superplanner_sfc_v1") {
+    stage_start = Clock::now();
+    const auto sfc_report = sfc_.generate(
+      result.dense_path,
+      map_,
+      config_.validation_safe_dist,
+      config_.sfc_bound_distance,
+      config_.corridor_min_radius,
+      config_.corridor_sample_step);
+    result.timing_ms["sfc_generation_ms"] = elapsedMs(stage_start);
+    result.corridor_schema_version = "superplanner_sfc_2d_v2";
+    result.sfc_generation_reason = sfc_report.reason;
+    result.sfc_cells = sfc_.cells();
+    result.sfc_piece_bindings = sfc_report.piece_bindings;
+    result.sfc_obstacle_sample_count = sfc_report.obstacle_sample_count;
+    result.sfc_repair_cell_count = sfc_report.repair_cell_count;
+    result.sfc_min_overlap = sfc_report.min_overlap;
+    result.corridor_failure_reason = sfc_report.reason;
+    result.corridor_segment_count = static_cast<int>(result.sfc_cells.size());
+    result.corridor_min_clearance = sfc_report.min_clearance;
+    result.corridor_min_radius = sfc_report.min_radius;
+    if (!sfc_report.valid) {
+      result.failure_reason = sfc_report.reason;
+      return finish();
+    }
+    // The historic capsule term is deliberately disabled for the SFC profile.
+    // SFC containment is a mandatory acceptance criterion in validateTrajectory.
+    optimizer_->setGuideCorridor({}, 0.0);
+    optimizer_->setSuperplannerSfc({});
   } else {
     optimizer_->setGuideCorridor({}, 0.0);
+    optimizer_->setSuperplannerSfc({});
     result.corridor_failure_reason = "DISABLED";
   }
   stage_start = Clock::now();
-  result.sparse_waypoints = sparsifyPath(result.dense_path, local_end_is_goal, &result.mandatory_corner_count);
+  if (config_.constraint_profile == "superplanner_sfc_v1") {
+    result.sparse_waypoints.reserve(result.sfc_cells.size() + 1U);
+    result.sparse_waypoints.push_back(result.dense_path.front());
+    for (size_t cell_index = 1U; cell_index < result.sfc_cells.size(); ++cell_index) {
+      Eigen::Vector3d junction = result.dense_path.front();
+      junction.head<2>() = result.sfc_cells[cell_index].overlap_witness;
+      result.sparse_waypoints.push_back(junction);
+    }
+    result.sparse_waypoints.push_back(result.dense_path.back());
+    result.mandatory_corner_count = std::max(
+      0, static_cast<int>(result.sparse_waypoints.size()) - 2);
+  } else {
+    result.sparse_waypoints = sparsifyPath(
+      result.dense_path, local_end_is_goal, &result.mandatory_corner_count);
+  }
   result.timing_ms["sparsify_path_ms"] = elapsedMs(stage_start);
   if (result.sparse_waypoints.size() < 2U) {
     result.failure_reason = "SPARSIFY_FAILED";
@@ -550,13 +606,31 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
       tangent * std::min({config_.optimizer.max_vel, v_max_kinematic, local_end_vmax});
   }
 
-  while (result.sparse_waypoints.size() > 2U &&
+  while (config_.constraint_profile != "superplanner_sfc_v1" &&
+         result.sparse_waypoints.size() > 2U &&
          (result.sparse_waypoints[1] - result.start_state.col(0)).norm() < 0.2) {
     result.sparse_waypoints.erase(result.sparse_waypoints.begin() + 1);
   }
   result.timing_ms["state_prepare_ms"] = elapsedMs(stage_start);
 
   const int N = static_cast<int>(result.sparse_waypoints.size()) - 1;
+  if (config_.constraint_profile == "superplanner_sfc_v1") {
+    std::vector<int> piece_to_cell;
+    piece_to_cell.reserve(result.sfc_piece_bindings.size());
+    for (const auto & binding : result.sfc_piece_bindings) {
+      if (binding.piece_index != static_cast<int>(piece_to_cell.size())) {
+        result.failure_reason = "SFC_BINDING_INVALID";
+        return finish();
+      }
+      piece_to_cell.push_back(binding.cell_index);
+    }
+    if (N != static_cast<int>(result.sfc_cells.size()) ||
+      !optimizer_->setSuperplannerSfc(result.sfc_cells, piece_to_cell))
+    {
+      result.failure_reason = "SFC_BINDING_INVALID";
+      return finish();
+    }
+  }
   result.local_vmaxs.resize(N);
   result.initial_times.resize(N);
   super_utils::vec_Vec3f shifted_waypoints;
@@ -624,14 +698,16 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   stage_start = Clock::now();
   if (!validateTrajectory(result.trajectory, result.end_state.col(0), &result)) {
     result.timing_ms["validate_ms"] = elapsedMs(stage_start);
-    if (config_.constraint_profile == "safe_corridor_v1") {
+    if (config_.constraint_profile == "safe_corridor_v1" ||
+        config_.constraint_profile == "superplanner_sfc_v1") {
       result.timing_ms["adaptive_validation_ms"] = result.timing_ms["validate_ms"];
     }
     result.failure_reason = result.validation_failure_reason;
     return finish();
   }
   result.timing_ms["validate_ms"] = elapsedMs(stage_start);
-  if (config_.constraint_profile == "safe_corridor_v1") {
+  if (config_.constraint_profile == "safe_corridor_v1" ||
+      config_.constraint_profile == "superplanner_sfc_v1") {
     result.timing_ms["adaptive_validation_ms"] = result.timing_ms["validate_ms"];
   }
 
@@ -653,7 +729,8 @@ MincoPipeline::Result MincoPipeline::optimize(const Request & request)
   }
   result.timing_ms["yaw_ms"] = elapsedMs(stage_start);
   if (config_.enable_yaw_wheel_validation ||
-      config_.constraint_profile == "safe_corridor_v1") {
+      config_.constraint_profile == "safe_corridor_v1" ||
+      config_.constraint_profile == "superplanner_sfc_v1") {
     if (!validateYawAndWheels(result.trajectory, result.yaw_trajectory, &result))
     {
       result.failure_reason = result.validation_failure_reason;
@@ -966,7 +1043,8 @@ bool MincoPipeline::validateTrajectory(
 {
   const bool use_strict_validation =
       config_.enable_strict_validation ||
-      config_.constraint_profile == "safe_corridor_v1";
+      config_.constraint_profile == "safe_corridor_v1" ||
+      config_.constraint_profile == "superplanner_sfc_v1";
   if (use_strict_validation) {
     auto reject = [diagnostics](
       const std::string & reason, int index, double t, const Eigen::Vector3d & position,
@@ -991,6 +1069,25 @@ bool MincoPipeline::validateTrajectory(
         (!map_ || corridor_.segments().empty())) {
       return reject(
         "VALIDATION_CORRIDOR", 0, 0.0, trajectory.getPos(0.0), -1.0, 0.0);
+    }
+    if (config_.constraint_profile == "superplanner_sfc_v1" &&
+        (!map_ || sfc_.cells().empty())) {
+      return reject(
+        "VALIDATION_SFC", 0, 0.0, trajectory.getPos(0.0), -1.0, 0.0);
+    }
+    Eigen::VectorXd sfc_piece_durations;
+    if (config_.constraint_profile == "superplanner_sfc_v1") {
+      sfc_piece_durations = trajectory.getDurations();
+      const bool bindings_valid = diagnostics &&
+        diagnostics->sfc_piece_bindings.size() ==
+        static_cast<size_t>(sfc_piece_durations.size()) &&
+        diagnostics->sfc_piece_bindings.size() == sfc_.cells().size();
+      if (!bindings_valid) {
+        return reject(
+          "VALIDATION_SFC_BINDING", 0, 0.0, trajectory.getPos(0.0),
+          static_cast<double>(sfc_piece_durations.size()),
+          static_cast<double>(sfc_.cells().size()));
+      }
     }
 
     struct Node {
@@ -1139,6 +1236,30 @@ bool MincoPipeline::validateTrajectory(
             "VALIDATION_CORRIDOR", sample_index, node.t, node.pos, corridor_margin, 0.0);
         }
         corridor_segment = matched_segment;
+      }
+      if (config_.constraint_profile == "superplanner_sfc_v1") {
+        int piece_index = 0;
+        double piece_end_time = sfc_piece_durations.size() > 0 ?
+          sfc_piece_durations(0) : 0.0;
+        while (piece_index + 1 < sfc_piece_durations.size() &&
+          node.t > piece_end_time + 1e-9)
+        {
+          ++piece_index;
+          piece_end_time += sfc_piece_durations(piece_index);
+        }
+        const auto & binding =
+          diagnostics->sfc_piece_bindings[static_cast<size_t>(piece_index)];
+        double sfc_margin = -std::numeric_limits<double>::infinity();
+        if (binding.piece_index != piece_index ||
+          !sfc_.containsInCell(node.pos, binding.cell_index, &sfc_margin))
+        {
+          return reject(
+            "VALIDATION_SFC", sample_index, node.t, node.pos, sfc_margin, 0.0);
+        }
+        if (diagnostics) {
+          diagnostics->sfc_min_margin = std::isfinite(diagnostics->sfc_min_margin) ?
+            std::min(diagnostics->sfc_min_margin, sfc_margin) : sfc_margin;
+        }
       }
       const double speed = node.vel.head<2>().norm();
       const double acceleration = node.acc.head<2>().norm();
@@ -1370,6 +1491,12 @@ std::vector<MincoPipeline::TrajectorySample> MincoPipeline::sampleTrajectory(
       sample.yaw = planar_speed > 1e-6 ? std::atan2(sample.vel.y(), sample.vel.x()) : fallback_yaw;
       sample.yaw_dot = 0.0;
     }
+    // The sampled command/state is also the state handed to the following
+    // rolling cycle.  Keep it inside the very same yaw-rate limit used by the
+    // optimizer and validator; otherwise a slightly overshooting sampled yaw
+    // rate is clipped only on the *next* plan and breaks state continuity.
+    sample.yaw_dot = std::clamp(
+      sample.yaw_dot, -config_.max_yaw_rate, config_.max_yaw_rate);
 
     samples.push_back(sample);
   }

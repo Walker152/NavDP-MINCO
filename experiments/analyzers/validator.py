@@ -217,7 +217,22 @@ def validate_run(run_dir: Path | str, write_report=True):
             if reason and classify_reason(reason)["reason_source"] == "UNMAPPED":
                 errors.append(f"unmapped failure reason: {key}: {reason}")
     expected_uids = list(config.get("episode_uids", []))
-    actual_uids = [row.get("episode_uid") for row in table_rows.get("episode_metrics", [])]
+    raw_actual_uids = [
+        row.get("episode_uid")
+        for row in table_rows.get("episode_metrics", [])
+    ]
+    invalid_actual_uids = [
+        value
+        for value in raw_actual_uids
+        if value is None or not str(value).strip()
+    ]
+    if invalid_actual_uids:
+        errors.append("episode_metrics contains empty episode_uid values")
+    actual_uids = [
+        str(value)
+        for value in raw_actual_uids
+        if value is not None and str(value).strip()
+    ]
     if expected_uids and sorted(actual_uids) != sorted(expected_uids): errors.append("episode completion set does not match run_config")
     if config.get("data_source") == "REAL":
         availability_path = run_dir / "machine_truth_availability.json"

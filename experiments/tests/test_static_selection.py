@@ -1,4 +1,5 @@
 import copy
+import csv
 import json
 from pathlib import Path
 import tempfile
@@ -8,6 +9,40 @@ import numpy as np
 
 
 class StaticSelectionPolicyTests(unittest.TestCase):
+    def test_factor_grid_gif_uses_reviewable_playback_cadence(self):
+        from experiments.visualizers.static_benchmark import (
+            GIF_FRAME_DURATION_S,
+            GRID_GIF_FRAME_DURATION_S,
+            GRID_GIF_MIN_FRAMES,
+        )
+
+        self.assertEqual(GRID_GIF_FRAME_DURATION_S, 0.20)
+        self.assertGreaterEqual(GRID_GIF_MIN_FRAMES, 24)
+        self.assertGreater(GRID_GIF_FRAME_DURATION_S, GIF_FRAME_DURATION_S)
+
+    def test_full_route_showcase_covers_initial_state_and_obstacle_extremes(self):
+        from experiments.static.selection import FULL_ROUTE_SHOWCASE_CASES
+
+        self.assertEqual(
+            FULL_ROUTE_SHOWCASE_CASES,
+            (
+                "syn_straight",
+                "state_v_reverse",
+                "state_a_along",
+                "state_yaw_reverse",
+                "syn_s_curve_sparse",
+                "syn_l90_dense",
+            ),
+        )
+
+    def test_corridor_showcase_cases_include_success_and_fail_closed_evidence(self):
+        from experiments.static.selection import CORRIDOR_SHOWCASE_CASES
+
+        self.assertEqual(
+            CORRIDOR_SHOWCASE_CASES,
+            ("syn_l90", "syn_s_curve_sparse", "syn_l90_dense"),
+        )
+
     def _rows(self):
         base = {
             "profile": "safe_corridor_v1",
@@ -107,6 +142,45 @@ class StaticSelectionPolicyTests(unittest.TestCase):
             f"Missing grid pairs: {expected_pairs - actual_pairs}",
         )
 
+    def test_lateral_offset_variants_are_pure_lateral(self):
+        from experiments.static.selection import generate_boundary_cases
+
+        config_path = (
+            Path(__file__).parents[1]
+            / "configs"
+            / "static_boundary_selection_v1.json"
+        )
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        base = Path(config["base_case_config"])
+        config["base_case_config"] = str((config_path.parent / base).resolve())
+        cases = {case.case_uid: case for case in generate_boundary_cases(config)}
+
+        # syn_straight runs along y=1 with zero lateral normal component in x,
+        # so a lateral offset must move the start purely in y with NO
+        # longitudinal (x) displacement.
+        guide_start = cases["syn_straight"].guide_path_xyz[0]
+        expected = {
+            "state_offset_small": guide_start + np.array([0.0, 0.15, 0.0]),
+            "state_offset_large": guide_start + np.array([0.0, 0.35, 0.0]),
+        }
+        for uid, target in expected.items():
+            np.testing.assert_allclose(
+                cases[uid].start_position, target, atol=1e-12
+            )
+            self.assertEqual(
+                cases[uid].start_position[0], guide_start[0],
+                f"{uid} must have zero longitudinal displacement",
+            )
+        # The lateral normal is perpendicular to the guide start direction
+        # ((3,0) for syn_straight), so the offset stays on the guide start
+        # position, not 1.0m ahead of it.
+        np.testing.assert_allclose(
+            cases["state_offset_small"].start_position[:2], [0.0, 1.15]
+        )
+        np.testing.assert_allclose(
+            cases["state_offset_large"].start_position[:2], [0.0, 1.35]
+        )
+
     def test_semantically_duplicate_initial_states_share_selection_hash(self):
         from experiments.static.selection import (
             boundary_case_content_hash,
@@ -136,6 +210,55 @@ class StaticSelectionPolicyTests(unittest.TestCase):
             boundary_case_content_hash(grid_zero),
         )
 
+    def test_acceleration_grid_keeps_the_declared_matched_velocity(self):
+        from experiments.static.selection import generate_boundary_cases
+
+        config_path = Path(__file__).parents[1] / "configs" / "static_boundary_selection_v1.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["base_case_config"] = str(
+            (config_path.parent / config["base_case_config"]).resolve()
+        )
+        cases = {
+            case.case_uid: case
+            for case in generate_boundary_cases(config)
+            if case.case_uid.startswith("grid_accel_yaw_on_l90_")
+        }
+        self.assertTrue(cases)
+        for case in cases.values():
+            np.testing.assert_allclose(case.start_velocity, [0.5, 0.0, 0.0])
+
+    def test_capability_comparison_pairs_legacy_with_superplanner_sfc(self):
+        from experiments.analyzers.sweep_comparison import generate_sweep_comparison
+
+        rows = []
+        for profile in ("legacy", "superplanner_sfc_v1"):
+            rows.append(
+                {
+                    "case_uid": "extreme_case",
+                    "profile": profile,
+                    "status": "SUCCEEDED",
+                    "expected_category": "l90",
+                    "failure_reason": "NONE",
+                    "min_clearance_m": "0.5",
+                    "unsafe_ratio": "0.0",
+                    "path_length_ratio": "1.0",
+                    "guide_deviation_p95_m": "0.1",
+                    "yaw_rate_violation_ratio": "0.0",
+                }
+            )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (root / "sweep_runs.csv").open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            summary = generate_sweep_comparison(root)
+            self.assertEqual(summary["paired_cases"], 1)
+            self.assertEqual(
+                [row["profile"] for row in summary["profiles"]],
+                ["legacy", "superplanner_sfc_v1"],
+            )
+
 
 class StaticSelectedGifEvidenceTests(unittest.TestCase):
     def test_selected_paired_gif_has_complete_chinese_evidence_package(self):
@@ -164,7 +287,7 @@ class StaticSelectedGifEvidenceTests(unittest.TestCase):
         }
         per_case = {}
         frozen = {"cases": {case.case_uid: {}}}
-        for profile in ("legacy", "safe_corridor_v1"):
+        for profile in ("legacy", "superplanner_sfc_v1"):
             profile_case = replace(case, constraint_profile=profile)
             result = StaticRunResult(
                 case_uid=case.case_uid,
@@ -178,6 +301,7 @@ class StaticSelectedGifEvidenceTests(unittest.TestCase):
                     "success": True,
                     "failure_reason": "",
                     "constraint_profile": profile,
+                    "sfc_cells": ([{"vertices": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], "halfspaces": [[1.0, 0.0, -1.0], [0.0, 1.0, -1.0], [-1.0, 0.0, 0.0]]}] if profile == "superplanner_sfc_v1" else []),
                 },
                 samples=samples,
                 waypoints=samples[:, 1:4],
@@ -201,7 +325,7 @@ class StaticSelectedGifEvidenceTests(unittest.TestCase):
                 output
                 / "selected_artifacts"
                 / case.case_uid
-                / f"{case.case_uid}_legacy_vs_safe.gif"
+                / f"{case.case_uid}_legacy_vs_superplanner_sfc.gif"
             )
             package = gif_path.with_name(f"{gif_path.stem}_evidence")
             for name in (

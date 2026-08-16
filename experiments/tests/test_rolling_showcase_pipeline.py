@@ -193,7 +193,7 @@ class RollingShowcasePipelineTests(unittest.TestCase):
         self.assertEqual(len(serialized), 2 * total)
         self.assertEqual(len(manifest["scenes"]), total)
         for scene in manifest["scenes"]:
-            self.assertEqual(scene["methods"], list(("guide_reference", "legacy", "safe_corridor_v1")))
+            self.assertEqual(scene["methods"], list(("guide_reference", "legacy", "superplanner_sfc_v1")))
             self.assertEqual(scene["paired_key"], "scenario_uid+seed+initial_state_hash")
 
     def test_run_showcase_includes_every_initial_state_variant(self) -> None:
@@ -276,6 +276,18 @@ class RollingShowcasePipelineTests(unittest.TestCase):
         self.assertTrue(
             (self.output / "06_aggregate_figures" / "status_comparison.pdf").is_file()
         )
+
+    def test_partial_showcase_root_is_recognised_as_resumable(self) -> None:
+        """A workflow-created partial showcase must survive retry-failed."""
+        from experiments.rolling.showcase import SHOWCASE_DIRECTORIES, _resumable_root
+
+        for name in SHOWCASE_DIRECTORIES:
+            (self.output / name).mkdir(parents=True)
+        scene = self.output / "01_trajectory_optimization" / "unobstructed"
+        scene.mkdir()
+        (scene / "scene_manifest.json").write_text("{}\n", encoding="utf-8")
+
+        self.assertTrue(_resumable_root(self.output))
 
     def test_extreme_scores_use_recorded_distortion_clearance_and_status(self) -> None:
         from experiments.rolling.showcase import _extreme_evidence_row

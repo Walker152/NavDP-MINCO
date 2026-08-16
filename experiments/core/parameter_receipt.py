@@ -106,9 +106,9 @@ def validate_effective_parameters(
         "minco.optimization_safe_distance_m",
     )
     profile = str(minco.get("constraint_profile", ""))
-    if profile not in {"legacy", "safe_corridor_v1"}:
+    if profile not in {"legacy", "safe_corridor_v1", "superplanner_sfc_v1"}:
         raise ValueError(f"unsupported minco.constraint_profile: {profile!r}")
-    if profile == "safe_corridor_v1":
+    if profile in {"safe_corridor_v1", "superplanner_sfc_v1"}:
         if validation < circumscribed:
             raise ValueError(
                 "minco.validation_safe_distance_m must be greater than or equal "
@@ -119,6 +119,13 @@ def validate_effective_parameters(
                 "minco.optimization_safe_distance_m must be greater than or "
                 "equal to minco.validation_safe_distance_m"
             )
+    if profile == "superplanner_sfc_v1":
+        for key in (
+            "sfc_bound_distance_m",
+            "sfc_seed_line_max_length_m",
+            "sfc_min_overlap_depth_m",
+        ):
+            _positive_number(minco, key, f"minco.{key}")
 
 
 def resolve_parameter_receipt(
