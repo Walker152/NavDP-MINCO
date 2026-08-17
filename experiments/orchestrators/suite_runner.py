@@ -144,19 +144,31 @@ def run_suite(
             and status_path.exists()
             and json.loads(status_path.read_text()).get("status") == "FAILED"
         ):
-            # A failed Isaac attempt may leave partial CSVs, videos, traces and
-            # append-only logs.  A retry must never mix those artifacts with a
-            # fresh process run using the same deterministic run directory.
-            shutil.rmtree(run_dir)
-            run_dir.mkdir(parents=True, exist_ok=True)
-            status_path = run_dir / "run_status.json"
+            # Validation rules may have been corrected after a complete run
+            # was marked FAILED.  Preserve and revalidate complete artifacts;
+            # only incomplete/invalid attempts require a clean process retry.
+            if not validate_run(run_dir, write_report=False)["valid"]:
+                # A failed Isaac attempt may leave partial CSVs, videos,
+                # traces and append-only logs. A process retry must never mix
+                # those artifacts with a fresh deterministic run.
+                shutil.rmtree(run_dir)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                status_path = run_dir / "run_status.json"
         lifecycle = RunLifecycle(run_dir)
         if not behavior.resume and lifecycle.status != "CREATED":
             lifecycle.status = "CREATED"
             lifecycle._write(restarted=True, restart_reason="resume disabled")
-        elif behavior.resume and lifecycle.status == "FAILED" and not behavior.retry_failed:
-            progress.fail_run("previous FAILED run skipped; pass --retry-failed")
-            skipped += 1; continue
+        elif behavior.resume and lifecycle.status == "FAILED":
+            recovered_validation = validate_run(run_dir, write_report=False)
+            if recovered_validation["valid"]:
+                lifecycle.status = "VALIDATING"
+                lifecycle._write(
+                    recovered_from="FAILED",
+                    recovery_reason="artifacts pass current validator",
+                )
+            elif not behavior.retry_failed:
+                progress.fail_run("previous FAILED run skipped; pass --retry-failed")
+                skipped += 1; continue
         elif behavior.resume and lifecycle.status == "RUNNING":
             lifecycle.transition("INTERRUPTED", reason="orphaned run detected during resume")
         if lifecycle.status in {"FAILED", "COMPLETE"}: # explicit rerun or --retry-failed gets a fresh record

@@ -196,6 +196,7 @@ from utils_tasks.episode_diagnostics import (
     EpisodeStartupDiagnostics,
     infer_termination_details,
     observe_termination,
+    termination_terms_from_manager,
 )
 from utils_tasks.mpc_diagnostics import ExpectedMotionZeroDetector
 from utils_tasks.minco_fallback import is_hold_trajectory_valid
@@ -1803,6 +1804,10 @@ try:
             env_step_timer = StageTimer()
             with env_step_timer.section("env_step_ms"):
                 obs, rewards, dones, infos = env.step(action)
+            termination_infos = dict(infos) if isinstance(infos, dict) else {}
+            termination_infos["termination_terms"] = termination_terms_from_manager(
+                getattr(env.unwrapped, "termination_manager", None)
+            )
             env_step_ms = env_step_timer.records["env_step_ms"]
             for record in control_timing_records:
                 record["env_step_ms"] = env_step_ms
@@ -1827,16 +1832,19 @@ try:
                             contact_detected = force_value >= float(DINGO_THRESHOLD)
                     except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
                         pass
+                    success_flag_bool = bool(
+                        np.sqrt(np.square(goals[i]).sum()) < 1.0
+                    )
                     termination = observe_termination(
-                        infos,
+                        termination_infos,
                         i,
                         contact_detected=contact_detected,
                         impact_force_n=impact_force_n,
                         collision_object="",
+                        goal_reached=success_flag_bool,
                     )
                     termination_reason = termination.reason
                     termination_term_raw = termination.raw_terms
-                    success_flag_bool = bool(np.sqrt(np.square(goals[i]).sum()) < 1.0)
                     executed_length = float(trajectory_length[i])
                     repository_spl = float(np.clip(euclidean[i] / executed_length, 0, 1)) if success_flag_bool and executed_length > 0 else 0.0
                     if experiment_hook is not None:

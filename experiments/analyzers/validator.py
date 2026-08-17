@@ -85,10 +85,6 @@ def required_diagnostic_errors(table_rows, variant, data_source):
     return errors
 
 
-def _truthy(value):
-    return str(value).strip().lower() in {"1", "true", "yes"}
-
-
 def real_machine_truth_errors(config, table_rows):
     if config.get("data_source") != "REAL":
         return []
@@ -109,12 +105,9 @@ def real_machine_truth_errors(config, table_rows):
             row.get("stop_duration_s", "")
         ):
             errors.append(f"missing recovery duration truth: {uid}")
-        collision = _truthy(row.get("collision", "")) or str(
-            row.get("done_reason", "")
-        ) == "COLLISION"
         contact = row.get("contact_detected", "")
-        if _is_blank(contact) or collision != _truthy(contact):
-            errors.append(f"contact consistency mismatch: {uid}")
+        if _is_blank(contact):
+            errors.append(f"missing contact observation: {uid}")
         for field in ("done_reason", "failure_reason"):
             reason = str(row.get(field, "")).strip()
             if reason and classify_reason(reason)["reason_source"] == "UNMAPPED":

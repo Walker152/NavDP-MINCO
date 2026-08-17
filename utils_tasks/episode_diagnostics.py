@@ -63,6 +63,19 @@ def infer_termination_reason(infos, env_idx):
     return infer_termination_details(infos, env_idx)[0]
 
 
+def termination_terms_from_manager(manager):
+    """Snapshot IsaacLab v1.2 termination terms before the next env step."""
+    if manager is None:
+        return {}
+    terms = {}
+    for name in getattr(manager, "active_terms", ()):
+        try:
+            terms[str(name)] = manager.get_term(name)
+        except (AttributeError, KeyError, RuntimeError):
+            continue
+    return terms
+
+
 def observe_termination(
     infos,
     env_idx,
@@ -70,9 +83,18 @@ def observe_termination(
     contact_detected=None,
     collision_object="",
     impact_force_n=None,
+    goal_reached=None,
 ):
     reason, raw_terms = infer_termination_details(infos, env_idx)
     contact = None if contact_detected is None else bool(contact_detected)
+    if reason == "UNKNOWN" and contact is True:
+        reason, raw_terms = canonical_termination_reason(
+            ["contact_sensor_force"]
+        )
+    elif reason == "UNKNOWN" and goal_reached is True:
+        reason, raw_terms = canonical_termination_reason(
+            ["goal_distance_threshold"]
+        )
     try:
         force = float(impact_force_n) if impact_force_n is not None else None
     except (TypeError, ValueError):

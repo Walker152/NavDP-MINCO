@@ -9,6 +9,50 @@ from unittest.mock import patch
 
 
 class ResearchWorkflowTests(unittest.TestCase):
+    def test_retry_failed_preserves_partial_suite_run_checkpoints(self):
+        from experiments.orchestrators.research_workflow import (
+            WorkflowOptions,
+            _run_stage,
+        )
+
+        target = self.output / "suite"
+        checkpoint = target / "experiments" / "run" / "run_status.json"
+
+        def fail_after_one_run():
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_text('{"status":"FAILED"}\n', encoding="utf-8")
+            raise RuntimeError("fixture failure")
+
+        with self.assertRaises(RuntimeError):
+            _run_stage(
+                output_root=self.output,
+                options=WorkflowOptions(output_root=self.output),
+                name="partial-suite",
+                command=("fixture",),
+                input_paths=(),
+                output_paths=(target,),
+                action=fail_after_one_run,
+            )
+
+        def resume_suite():
+            self.assertTrue(checkpoint.is_file())
+            (target / "suite_status.json").write_text(
+                '{"status":"COMPLETE"}\n', encoding="utf-8"
+            )
+
+        result = _run_stage(
+            output_root=self.output,
+            options=WorkflowOptions(
+                output_root=self.output, resume=True, retry_failed=True
+            ),
+            name="partial-suite",
+            command=("fixture",),
+            input_paths=(),
+            output_paths=(target,),
+            action=resume_suite,
+        )
+        self.assertEqual(result["status"], "COMPLETE")
+
     def test_retry_failed_rebuilds_missing_outputs_from_completed_receipt(self):
         from experiments.orchestrators.research_workflow import (
             WorkflowOptions,

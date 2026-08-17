@@ -66,6 +66,7 @@ _ROWS = {
     "MPC_SOLVE_FAILED": ("CONTROL", True, True, "STOP"),
     "COLLISION": ("SIMULATION", False, False, "TERMINATE"),
     "TIMEOUT": ("SIMULATION", False, False, "TERMINATE"),
+    "STUCK": ("SIMULATION", False, False, "TERMINATE"),
     "GOAL_REACHED": ("SIMULATION", True, False, "TERMINATE"),
     "PLANNING_EXCEPTION": ("INFRASTRUCTURE", True, False, "STOP"),
 }

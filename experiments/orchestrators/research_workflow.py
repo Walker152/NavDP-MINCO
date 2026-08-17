@@ -340,11 +340,18 @@ def _run_stage(
                     path / "selection_checkpoint.json",
                     path / "showcase_checkpoint.json",
                 )
-                if any(checkpoint.is_file() for checkpoint in resumable_checkpoints):
+                has_run_checkpoints = path.is_dir() and any(
+                    checkpoint.is_file()
+                    for checkpoint in path.rglob("run_status.json")
+                )
+                if (
+                    any(checkpoint.is_file() for checkpoint in resumable_checkpoints)
+                    or has_run_checkpoints
+                ):
                     # A stage with an explicit hash-locked checkpoint owns its
-                    # partial artifacts and knows how to resume them. Deleting
-                    # it here would turn `--retry-failed` into unnecessary
-                    # recomputation and could destroy valid evidence.
+                    # partial artifacts and knows how to resume them. Suite
+                    # run_status files are equivalent per-run checkpoints.
+                    # Deleting either kind here would destroy valid evidence.
                     continue
                 if path.is_dir():
                     shutil.rmtree(path)
